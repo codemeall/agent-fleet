@@ -1,0 +1,19 @@
+{
+  "name": "agent-fleet",
+  "owner": {
+    "name": "codemeall"
+  },
+  "metadata": {
+    "description": "Agent Fleet: lead coding-agent CLIs in cmux from a portable Fleet skill."
+  },
+  "plugins": [
+    {
+      "name": "agent-fleet",
+      "source": "./",
+      "description": "Plan, route, launch and verify coding-agent workers in visible cmux tabs.",
+      "version": "0.1.0-preview.1",
+      "license": "MIT",
+      "homepage": "https://github.com/codemeall/agent-fleet"
+    }
+  ]
+}

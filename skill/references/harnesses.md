@@ -9,7 +9,7 @@ The lead needs this skill, a local shell, access to the intended Git checkout, a
 | Cursor CLI / IDE | `/fleet …` or skill discovery | `~/.cursor/skills/fleet` |
 | ChatGPT with local execution | Host-supported skill invocation | Requires a connection to the local runtime |
 
-Project setup uses the corresponding `.claude/skills`, `.agents/skills` or `.cursor/skills` beneath the repository. Codex's legacy `~/.codex/skills` and custom skill directories may still contain an older copy: remove stale duplicate registrations deliberately rather than installing multiple copies. An npm executable alone does not register the skill. A plugin may namespace the command; use the name shown by the host (Claude example: `/agent-fleet:fleet`).
+Install with `npx github:codemeall/agent-fleet setup --harness <host>` (or `./install.sh` from a clone); Claude Code can alternatively use the plugin marketplace (`/plugin marketplace add codemeall/agent-fleet`). An npm registry package is coming soon. Project setup uses the corresponding `.claude/skills`, `.agents/skills` or `.cursor/skills` beneath the repository. Codex's legacy `~/.codex/skills` and custom skill directories may still contain an older copy: remove stale duplicate registrations deliberately rather than installing multiple copies. An npm executable alone does not register the skill. A plugin may namespace the command; use the name shown by the host (Claude example: `/agent-fleet:fleet`).
 
 ## Permission and connectivity checks
 

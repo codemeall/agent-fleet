@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Install from GitHub without npm publication: `npx github:codemeall/agent-fleet setup`.
+- Add a Claude Code plugin marketplace manifest (`/plugin marketplace add codemeall/agent-fleet`).
+- Restructure the README around installation methods; mark the npm registry package as coming soon.
+- Setup no longer points to the unpublished npm package in its completion message.
+
 ## 0.1.0-preview.1
 
 Initial distributable preview, under the MIT license.
