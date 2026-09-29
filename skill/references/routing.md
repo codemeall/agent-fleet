@@ -1,45 +1,40 @@
-# Routing
+# Routing and review
 
-## Modes
+For parameterized model IDs containing commas, select `single:<provider>` and set `model` in the JSON plan. The conversational `agents=` shorthand is comma-separated and cannot represent commas inside an ID. Quote the same full ID when passing `launch --model`.
 
-| Mode | Set by | Pool |
-|---|---|---|
-| `auto` (default) | nothing, or `auto` | every provider `fleet doctor` reports `ready`, ordered by `defaults.prefer` |
-| `single:<provider>` | `single:claude-co` | that provider only; tiers still choose the model |
-| pinned | `agents=claude-co:opus,codex,cursor:grok-4.7-high` | exactly those; a listed model overrides the tier model for every ticket that worker takes |
+The lead chooses assignments; Fleet enforces the saved plan. Persist the routing mode with `init --routing` and every ticket assignment with `plan --file`. Use the same provider, tier and explicit overrides at launch.
 
-The owner's explicit choice always wins over this reference. A pinned provider that is not ready is a blocker to report, never a silent swap.
+| Mode | Pool |
+| --- | --- |
+| `auto` | Enabled, authenticated adapters in `defaults.prefer` order |
+| `single:<provider>` | Only the named adapter; tiers still select models |
+| `agents=<provider>[:<model>],...` | Only listed adapters, with the listed model overriding tier models |
 
-## Tiers
+An unavailable explicit choice is a blocker to explain, not permission for a silent substitution. `prefer` is an editable ordering, not a claim about price, subscription quotas or model quality. All selected models must be checked against the account's availability.
 
-Rate each ticket by what a wrong answer costs, not by its length.
+## Ticket tiers
 
-| Tier | Ticket shape |
-|---|---|
-| **heavy** | crosses modules or layers, touches auth, money, data integrity or a schema, owns a new abstraction others build on, or carries unresolved judgment calls |
-| **standard** | one feature slice with clear acceptance criteria inside known patterns |
-| **light** | mechanical: copy, config, a rename, test repair, a small isolated fix |
-| **review** | a read-only cross-family review of another worker's diff |
+| Tier | Use |
+| --- | --- |
+| `heavy` | Cross-module work, authentication, money, data integrity, schemas, new shared abstractions or consequential judgment |
+| `standard` | A feature slice with clear criteria and established patterns |
+| `light` | Mechanical, tightly scoped changes such as documentation or isolated repairs |
+| `review` | Dedicated read-only review of a writer's captured diff |
 
-## Auto assignment
+Take consequential work first, balance ready providers without exceeding global or provider caps, and queue remaining tickets. Never raise caps merely to avoid waiting. Waves require satisfied blockers and disjoint exact file scopes. A `needs-verification` report does not free a slot: the process must exit.
 
-Per wave, in wave order:
+## Model family and review policy
 
-1. Take heavy tickets first, then standard, then light.
-2. Give each ticket the first provider in `prefer` that is ready and under its `max`, skipping one that already holds a heavy ticket in this wave while another provider with a heavy tier is free. **Spread** heavy work; stack light work.
-3. Model and effort come from that provider's tier (`fleet providers`).
-4. If the wave has more tickets than capacity, the rest wait for the next free slot. Queueing beats raising caps.
+`cross-heavy` (default) requires a different-family reviewer for each heavy implementation ticket. `cross-all` requires one for every ticket; `off` means lead verification alone. Record the chosen mode at run creation.
 
-`prefer` encodes quota strategy. The default spends the second Claude subscription first, then Codex and Cursor, keeping the owner's primary Claude and Antigravity as overflow.
+Family follows the resolved model, not the CLI. Use exact model-family mappings or matching tier metadata; a known single-family adapter can supply its family as a fallback. Mixed adapters require known model metadata. Use an explicit, accurate `family` in the plan or `--family` where necessary. Never invent a family solely to pass the gate.
 
-## Review
+If the allowed pool cannot provide a known different-family reviewer, tell the owner before implementation. Expand the pool under their routing instruction or obtain an explicit change to `review=off`; never silently downgrade the review policy. In particular, a second Claude account remains Anthropic, while two Cursor models may belong to different families.
 
-- `cross-heavy` (default): every heavy ticket gets a read-only reviewer from a different `family` than its writer after the lead's own verification.
-- `cross-all`: every ticket.
-- `off`: the lead's verification only.
+Stop the writer before generating its scoped diff. Give the reviewer a separate ID, the original ticket and rules, that exact immutable diff, and only its report as a writable path. Review-only is a prompt contract in a shared checkout, not a security sandbox. Inspect for unauthorized changes. Stop and verify the reviewer before verifying the writer; dependents remain blocked throughout. If the writer's diff changes, redo review against the new diff.
 
-The reviewer prompt says: read-only, review the diff of the named files against the ticket's acceptance criteria and the repo rules, and report findings ranked by severity in its report file.
+## Failures and plan changes
 
-## Fallback
+Before any worker launches, record an unavailable adapter and any owner-authorized substitution in the plan's decisions and update assignments explicitly. After the first launch the plan is immutable: use a new follow-up run for routing or scope changes, stopping all overlapping workers first and carrying forward pending dependencies, partial edits and context. A same-assignment repair may be relaunched only after the old process has exited. A missing tab is insufficient proof. Use `resume` to reconcile receipts, normal `stop` where possible, and evidence-backed `recover` only after independently verifying the process is gone.
 
-A provider that fails mid-run (login expired, quota, crash): record it, move its unstarted tickets to the next provider in `prefer` with the same tier, and name the substitution in the final report. A ticket already half-done stays with its tab. Relaunch that tab after the owner fixes the login, telling the worker that the partial edits in the tree are its own.
+Never change providers to circumvent a permission denial. Work requiring installs, secrets, network access or infrastructure changes falls outside the default worker contract; isolate and ask the owner to handle or explicitly authorize it separately.

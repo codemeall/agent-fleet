@@ -1,0 +1,12 @@
+{
+  "tickets": [
+    {"id":"overview","ticket":"examples/tickets/overview.md","files":["docs/fleet-demo/overview.md"],"blockers":[],"provider":"codex","tier":"light"},
+    {"id":"glossary","ticket":"examples/tickets/glossary.md","files":["docs/fleet-demo/glossary.md"],"blockers":[],"provider":"codex","tier":"light"},
+    {"id":"guide","ticket":"examples/tickets/guide.md","files":["docs/fleet-demo/guide.md"],"blockers":["overview","glossary"],"provider":"codex","tier":"light"}
+  ],
+  "decisions": [
+    "Documentation-only example; no package installs, network, builds or servers.",
+    "Manual prose review and the local file/link checks in .fleet/rules.md are the agreed verification.",
+    "Run with single:codex and review=off; confirm account models before launch."
+  ]
+}

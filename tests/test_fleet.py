@@ -33,10 +33,10 @@ class ProviderConfig(unittest.TestCase):
         p = self.cfg["providers"]
         self.assertEqual(
             fleet.build_launch(p["codex"], "gpt-6-sol", "high", "go"),
-            "codex -m gpt-6-sol -c model_reasoning_effort=high -s workspace-write -a never go")
+            "codex -m gpt-6-sol -c model_reasoning_effort=high -s workspace-write -a on-request go")
         self.assertEqual(
             fleet.build_launch(p["cursor"], "grok-4.7-high", None, "go"),
-            "cursor-agent --model grok-4.7-high --force --trust go")
+            "cursor-agent --model grok-4.7-high --trust go")
         self.assertTrue(fleet.build_launch(p["claude-co"], "opus", "high", "go")
                         .startswith("CLAUDE_CONFIG_DIR=$HOME/.claude-co claude --model opus"))
         self.assertIn("-i go", fleet.build_launch(p["agy"], "gemini-3.1-pro-high", "high", "go"))

@@ -1,0 +1,23 @@
+{
+  "name": "agent-fleet",
+  "version": "0.1.0-preview.1",
+  "description": "Lead coding-agent CLIs in cmux from a portable Fleet skill.",
+  "author": {
+    "name": "codemeall"
+  },
+  "homepage": "https://github.com/codemeall/agent-fleet",
+  "repository": "https://github.com/codemeall/agent-fleet",
+  "license": "MIT",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Agent Fleet",
+    "shortDescription": "Coordinate coding agents in cmux.",
+    "longDescription": "Plan, route, launch and verify coding-agent workers with a portable local Fleet skill.",
+    "developerName": "codemeall",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": [
+      "Use Fleet to plan and implement my tickets."
+    ]
+  }
+}

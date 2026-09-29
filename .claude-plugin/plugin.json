@@ -1,0 +1,14 @@
+{
+  "name": "agent-fleet",
+  "version": "0.1.0-preview.1",
+  "description": "Lead coding-agent CLIs in cmux from a portable Fleet skill.",
+  "author": {
+    "name": "codemeall"
+  },
+  "homepage": "https://github.com/codemeall/agent-fleet",
+  "repository": "https://github.com/codemeall/agent-fleet",
+  "license": "MIT",
+  "skills": [
+    "./skill/"
+  ]
+}

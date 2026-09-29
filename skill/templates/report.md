@@ -1,21 +1,26 @@
 ```markdown
 # Report {{id}}
 
-Status: needs-verification | blocked
+Status: needs-verification
 
-## What changed
-- `path/to/file`: one line on what and why
+## Work or review performed
+- Implementation: exact files changed and why; review: captured diff inspected.
 
 ## Acceptance criteria
-- [x] criterion: the test or evidence that shows it
-- [ ] criterion: why not met
+- [x] criterion: concrete test or inspection evidence
+- [ ] criterion: remaining gap or why it could not be checked
 
-## Checks run
-- `command`: result (pass counts, error counts)
+## Checks and evidence
+- `command`: actual result; state when a check was not run
 
-## Decisions and questions for the lead
-- anything you decided that the ticket didn't, and anything that blocks you
+## Findings
+- Severity, file/location, failure scenario and suggested correction; or no actionable findings with review limits.
 
-## Out-of-scope findings
-- problems noticed outside your files, left untouched
+## Decisions and blockers
+- Decisions made, questions for the lead and any permission or scope blocker.
+
+## Out-of-scope observations
+- Relevant issues left untouched.
 ```
+
+Use one status only: `needs-verification` or `blocked`. The lead may request changes, but only `fleet verify` records acceptance. Do not copy the illustrative checkboxes as evidence.

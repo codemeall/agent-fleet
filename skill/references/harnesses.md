@@ -1,17 +1,24 @@
-# Running the lead from each harness
+# Lead host requirements
 
-The lead needs three things: the skill loaded, a shell that can reach the cmux socket, and a command allowance for `fleet` and `cmux`. Everything else is the same `fleet` CLI.
+The lead needs this skill, a local shell, access to the intended Git checkout, and permission to reach the cmux socket. Run `fleet doctor` in that same environment; a terminal outside the host is not proof that the host's sandbox can reach cmux.
 
-| | Claude Code (`claude`, `claude-co`) | Codex CLI | Cursor (`cursor-agent` or the IDE agent) |
-|---|---|---|---|
-| Invoke | `/fleet …` | `$fleet …` (or pick it in `/skills`) | `/fleet …` |
-| Skill dir | `~/.claude/skills/fleet`, `~/.claude-co/skills/fleet` | `~/.codex/skills/fleet` | `~/.cursor/skills/fleet` |
-| Reaching cmux | works | its sandbox blocks the socket. Start the lead with `-c sandbox_workspace_write.network_access=true`, or use a `[profiles.fleet]` entry with that setting (`codex -p fleet`) | works when `Shell(cmux)` and `Shell(fleet)` are allowed. If `fleet doctor` can't reach cmux, run with `--sandbox disabled` |
-| Allowances | `Bash(fleet:*)`, `Bash(cmux send:*)`, `Bash(cmux send-key:*)`, `Bash(cmux read-screen:*)`, `Bash(cmux new-surface:*)`, `Bash(cmux rename-tab:*)`, `Bash(cmux notify:*)` | `-a on-request`, approving `fleet` once per session | add `Shell(fleet)` to `permissions.allow` in `~/.cursor/cli-config.json` |
-| Watching | `fleet wait` in the foreground (fits the 10-minute tool limit) or in the background | `fleet wait --timeout 240`, raising the command timeout if Codex cuts it | `fleet wait --timeout 240` |
+| Host | Standalone invocation | User installation |
+| --- | --- | --- |
+| Claude Code | `/fleet …` | `~/.claude/skills/fleet` |
+| Codex CLI / desktop | `$fleet …` or skill picker | `~/.agents/skills/fleet` |
+| Cursor CLI / IDE | `/fleet …` or skill discovery | `~/.cursor/skills/fleet` |
+| ChatGPT with local execution | Host-supported skill invocation | Requires a connection to the local runtime |
 
-**Claude Code lead: leave auto mode first.** Its classifier blocks launching agents, even with allow rules in place. Plan mode is fine for step 2, but launching needs default or accept-edits mode.
+Project setup uses the corresponding `.claude/skills`, `.agents/skills` or `.cursor/skills` beneath the repository. Codex's legacy `~/.codex/skills` and custom skill directories may still contain an older copy: remove stale duplicate registrations deliberately rather than installing multiple copies. An npm executable alone does not register the skill. A plugin may namespace the command; use the name shown by the host (Claude example: `/agent-fleet:fleet`).
 
-**ChatGPT (web or desktop chat)** can't be a lead: it has no shell on this machine. Use Codex CLI with the ChatGPT login instead.
+## Permission and connectivity checks
 
-A worker can run on the same provider as the lead. Each tab is a separate process with its own session.
+1. Confirm Python 3.11+, Git, cmux and selected worker CLIs are available in the lead's shell.
+2. Confirm cmux is running and the intended workspace exists. Inside cmux the current workspace can be used; otherwise supply `fleet init <run> --workspace <ref>` explicitly.
+3. Run `fleet doctor`; diagnose its actual socket, executable or authentication error.
+4. If the host blocks a required operation, use its normal approval mechanism or have the owner configure a narrow allowance. Consult documentation for that installed host version. Do not disable the sandbox, switch permission modes or route to another harness to evade a rejection.
+5. Launch one small, scoped ticket and inspect it with `fleet peek` before starting a larger wave. Trust, authentication and model selection may still need owner input.
+
+Claude permission classifiers, Codex sandbox profiles, Cursor allowances and remote-session topology vary by version. There is no universal setup flag that safely fixes all of them. Fleet's bundled launch configuration does not override host restrictions. A cloud-only chat can help plan the work but requires an explicit local execution connection to operate this fleet.
+
+`fleet wait` defaults to 45 seconds and accepts at most 60 seconds. Use shorter waits when the host's command tool has a lower timeout. Provide progress updates between waits. A worker may use the same CLI as the lead; each tab is a distinct process and session.

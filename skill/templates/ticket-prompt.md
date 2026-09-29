@@ -1,18 +1,18 @@
 ## Your ticket
 
-Ticket: `{{ticket}}`
+Read the local ticket: `{{ticket}}`.
 
-<!-- LEAD: fill these three before launch, then delete this comment. -->
-**Files in scope:** <!-- the files this ticket is expected to touch; everything else belongs to other workers -->
+<!-- LEAD: fill all fields before launch; preserve the exact saved scope. -->
+**Files in scope:** {{files}}
 
-**Context you can't find by looking:** <!-- decisions already made, owner calls, gotchas from earlier waves -->
+**Context and decisions:** <!-- agreed spec and testing decisions; actual glossary/ADR paths; existing edits to preserve -->
 
-**Checks to run:** <!-- exact type-check / test commands for this repo -->
+**Checks to run:** <!-- exact bounded commands, working directory and success criteria; say explicitly if manual prose review is sufficient -->
 
 ## How to work
 
-1. **Read** the ticket end to end, then the code it touches, the domain glossary (`CONTEXT.md`) and any ADRs in that area. Use the project's own terms.
-2. **Test first**, one slice at a time: write a failing test for one acceptance criterion through the highest public seam, see it go red, write the smallest code that turns it green, then refactor. Repeat until every criterion has a passing test or a stated reason it can't have one (for example, visual-only).
-3. **Match the code around you**: naming, comment density, patterns, existing helpers.
-4. **Run the checks** listed above. Your work is done only when they pass, or when you have recorded exactly which failure is pre-existing and how you know.
-5. **Review your own diff** against every acceptance criterion and every hard rule before writing the report.
+1. Read the ticket, project instructions, scoped code and the specified context. Resolve glossary paths from project configuration: current upstream conventions use `GLOSSARY.md` and optional `GLOSSARY-MAP.md`; older projects may use `CONTEXT.md`. Read relevant ADRs if they exist.
+2. Follow the agreed testing approach. For behavior changes, test meaningful acceptance criteria through public behavior where practical; do not invent redundant tests for prose or mechanical edits. Record visual/manual criteria honestly.
+3. Match existing naming and patterns. Keep changes inside scope and preserve pre-existing owner or other-worker edits.
+4. Run the exact permitted checks. Report failures and distinguish a demonstrated pre-existing failure from an assumption. Ask the lead about checks requiring forbidden operations.
+5. Review your scoped diff against every criterion and rule. Write your report, then stop editing. Fleet owns implementation under a no-commit contract; do not invoke upstream `/implement` unchanged.

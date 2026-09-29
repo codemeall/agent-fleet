@@ -1,0 +1,63 @@
+{
+  "name": "@codemeall/agent-fleet",
+  "version": "0.1.0-preview.1",
+  "description": "Coordinate coding-agent CLIs in cmux with a portable Fleet skill.",
+  "license": "MIT",
+  "author": "codemeall",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/codemeall/agent-fleet.git"
+  },
+  "homepage": "https://github.com/codemeall/agent-fleet#readme",
+  "bugs": {
+    "url": "https://github.com/codemeall/agent-fleet/issues"
+  },
+  "bin": {
+    "fleet": "bin/fleet.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/*.js",
+    "skill/SKILL.md",
+    "skill/bin/fleet",
+    "skill/providers.toml",
+    "skill/templates/*.md",
+    "skill/references/*.md",
+    "skill/agents/*.yaml",
+    ".claude-plugin/plugin.json",
+    "install.sh",
+    "config.example.toml",
+    "skill/LICENSE",
+    "examples/",
+    "plugin-manifests/*.json",
+    "dist/codex/agent-fleet/.codex-plugin/plugin.json",
+    "dist/codex/agent-fleet/skills/fleet/SKILL.md",
+    "dist/codex/agent-fleet/skills/fleet/bin/fleet",
+    "dist/codex/agent-fleet/skills/fleet/providers.toml",
+    "dist/codex/agent-fleet/skills/fleet/templates/*.md",
+    "dist/codex/agent-fleet/skills/fleet/references/*.md",
+    "dist/codex/agent-fleet/skills/fleet/agents/*.yaml",
+    "dist/codex/agent-fleet/skills/fleet/LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "python3 -m unittest discover -s tests",
+    "check": "node --check bin/fleet.js && node --check bin/setup.js && node --check bin/build.js",
+    "build": "node bin/build.js",
+    "prepack": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "preview"
+  },
+  "keywords": [
+    "cmux",
+    "agents",
+    "skills",
+    "claude-code",
+    "codex",
+    "cursor"
+  ]
+}

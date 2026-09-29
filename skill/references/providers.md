@@ -1,37 +1,31 @@
-# Provider gotchas
+# Provider adapters
 
-Launch flags, quit keys, login checks and tier models live in `providers.toml` and `fleet providers`. This file holds what the config can't say.
+`providers.toml` is the shipped adapter configuration; `fleet providers` prints it merged with personal overrides. Adapter command templates are trusted local executable configuration, not safe inputs from tickets. Model, effort and prompt substitutions are shell-quoted by the runtime. Keep account setup separate from model data.
 
-## claude and claude-co
+All model IDs and efforts are examples tied to accounts and CLI versions. Before routing, check the local CLI's model list/help and authenticate through the owner's normal process. `doctor` checks binary presence and login signals, including the login command's exit status; it does not spend a model call or guarantee model access. A passing doctor is a preflight check, not an end-to-end compatibility claim.
 
-- `claude-co` is the owner's second subscription: the same binary with `CLAUDE_CONFIG_DIR=$HOME/.claude-co`. It has **no plugins**, so its prompt must spell out the whole workflow. The ticket template already does.
-- Its login expires. The pane then shows a login prompt; only the owner can run `/login` there.
-- Workers run `--permission-mode auto`. If the auto-mode classifier blocks something reasonable, answer in the pane or give the step to another worker.
+## Claude Code
 
-## codex
+The default `claude` adapter uses the normal account and interactive permission controls. `opus` and `sonnet` are example aliases. Effort support depends on the installed CLI and model. Do not respond to a permission denial by switching account or bypassing the host's controls.
 
-- Workers run `-s workspace-write -a never`: they write inside the repo, have no network, and can't reach cmux. Tickets that need the network are routed elsewhere.
-- Use the full model ids (`gpt-6-sol`, `gpt-6-luna`); the account rejects bare family names. Efforts: `low`, `medium`, `high`, `xhigh`.
-- The owner can switch the model in the tab (`/model`). Afterwards, `fleet send` the worker a line saying its partial edits in the tree are its own.
+`claude-co` is a disabled example of a second account using `CLAUDE_CONFIG_DIR=$HOME/.claude-co`. Enable it only after explicitly configuring and authenticating that account. It must receive a self-contained prompt; do not assume the same plugins exist under both configurations. Both accounts use Anthropic-family models, so switching between them does not satisfy cross-family review.
 
-## cursor (cursor-agent)
+## Codex
 
-- Effort is part of the model id (`grok-4.7-high`, `kimi-k3-high`, `muse-spark-1.3-max`), and the ids drift between releases. Check with `cursor-agent --list-models` before pinning a new one.
-- Muse Spark runs **through Cursor**; there is no separate Muse subscription.
-- Workers run `--force --trust`: no approval prompts. The preamble is the only fence, so give Cursor tickets whose files are cleanly scoped.
+The example adapter uses `workspace-write` with `on-request` approval. Effective network and filesystem permissions still come from the host configuration; neither the adapter nor the preamble guarantees OS isolation. Fleet's worker contract prohibits network calls and package installation regardless of those capabilities. Request owner help for a necessary permission instead of weakening the sandbox.
 
-## agy (Antigravity)
+Use model IDs and effort levels supported by the authenticated account. The shipped OpenAI IDs are examples. Model changes must be reflected in the plan and recorded worker metadata; do not silently switch a running worker's model in its UI and leave routing records stale.
 
-- The only route to Gemini (3.1 Pro, 3.8 Flash). It also serves Claude 4.6 and GPT-OSS without spending a Claude or OpenAI subscription. See `agy models`.
-- Workers run `--mode accept-edits`, which accepts edits but asks before running commands. Expect approval prompts for test runs: peek at its tab more often than the others, or pin a stronger mode in config once you trust it.
-- Quit is a double `ctrl+c`.
+## Cursor
 
-## Planned: grok (Grok Build) and muse (Muse Code)
+The default launches `cursor-agent` with the chosen model and repository trust, retaining interactive permission handling; it does not use `--force`. A trusted workspace is not permission for an arbitrary command. Inspect trust or command prompts as part of launch verification.
 
-These are off in `providers.toml`. To turn one on:
-- check its interactive launch syntax, model flag, quit key and a no-model login check;
-- fill in its adapter;
-- set `enabled = true`;
-- run `fleet doctor`.
+Cursor can serve several families. The example tiers identify xAI (`grok-…`), Moonshot (`kimi-…`) and Meta (`muse-…`) separately. Use `cursor-agent --list-models` to confirm your account's exact IDs; parameterized IDs must remain a single argument. A model override needs accurate family metadata, especially for cross-family review. A different CLI name alone is not evidence of a different family.
 
-The `grok` on PATH inside cmux is a cmux-bundled binary. Confirm it is Grok Build before relying on it.
+## Optional and experimental adapters
+
+Antigravity (`agy`) is disabled by default. Its example tiers describe Google models, but the adapter itself may serve multiple families. Validate its binary, authentication, model availability, command permissions and shutdown sequence before enabling it. No live compatibility claim is made.
+
+The disabled `grok` and `muse` entries are incomplete placeholders, not supported providers. Verify that a binary with the expected name is actually the intended product; fill in a no-model authentication check, known family/tier metadata and tested launch/shutdown commands before use.
+
+For every new adapter, test a harmless local ticket, multiple waves, a required review at capacity, process exit confirmation and recovery. Keep unavailable adapters out of auto routing. Login expiry or quota exhaustion can require owner intervention; they are not reasons to ignore the worker contract.

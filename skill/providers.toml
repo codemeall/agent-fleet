@@ -1,7 +1,8 @@
 # Provider adapters: the single source for how each agent CLI is launched,
 # checked and stopped. ~/.config/agent-fleet/config.toml overrides any field.
 #
-# launch placeholders: {bin} {model} {effort} {prompt} (prompt is shell-quoted).
+# launch placeholders: {bin} is trusted shell setup; model/effort/prompt are quoted data.
+# Shipped model IDs are account-dependent examples; verify them before routing.
 # quit: sequence sent to the pane; "enter" and "ctrl+c" are keys, anything else is text.
 # login: a cheap command that needs no model call; ready when its output contains login_ok.
 # tiers: model + effort per ticket weight (see references/routing.md).
@@ -10,7 +11,7 @@
 [providers.claude]
 enabled = true
 bin = "claude"
-launch = "{bin} --model {model} --effort {effort} --permission-mode auto {prompt}"
+launch = "{bin} --model {model} --effort {effort} {prompt}"
 quit = ["/exit", "enter"]
 login = "claude auth status"
 login_ok = '"loggedIn": true'
@@ -23,9 +24,9 @@ tiers.light = { model = "sonnet", effort = "medium" }
 tiers.review = { model = "opus", effort = "high" }
 
 [providers.claude-co]
-enabled = true
+enabled = false
 bin = "CLAUDE_CONFIG_DIR=$HOME/.claude-co claude"
-launch = "{bin} --model {model} --effort {effort} --permission-mode auto {prompt}"
+launch = "{bin} --model {model} --effort {effort} {prompt}"
 quit = ["/exit", "enter"]
 login = "CLAUDE_CONFIG_DIR=$HOME/.claude-co claude auth status"
 login_ok = '"loggedIn": true'
@@ -40,7 +41,7 @@ tiers.review = { model = "opus", effort = "high" }
 [providers.codex]
 enabled = true
 bin = "codex"
-launch = "{bin} -m {model} -c model_reasoning_effort={effort} -s workspace-write -a never {prompt}"
+launch = "{bin} -m {model} -c model_reasoning_effort={effort} -s workspace-write -a on-request {prompt}"
 quit = ["/quit", "enter"]
 login = "codex login status"
 login_ok = "Logged in"
@@ -56,7 +57,7 @@ tiers.review = { model = "gpt-6-sol", effort = "high" }
 enabled = true
 bin = "cursor-agent"
 # Cursor has no effort flag: effort is part of the model id.
-launch = "{bin} --model {model} --force --trust {prompt}"
+launch = "{bin} --model {model} --trust {prompt}"
 quit = ["/quit", "enter"]
 login = "cursor-agent status"
 login_ok = "Logged in"
@@ -64,26 +65,26 @@ models = "cursor-agent --list-models"
 family = "mixed"
 plugins = false
 max = 2
-tiers.heavy = { model = "grok-4.7-high" }
-tiers.standard = { model = "kimi-k3-high" }
-tiers.light = { model = "grok-4.7-high-fast" }
-tiers.review = { model = "muse-spark-1.3-max" }
+tiers.heavy = { model = "grok-4.7-high", family = "xai" }
+tiers.standard = { model = "kimi-k3-high", family = "moonshot" }
+tiers.light = { model = "grok-4.7-high-fast", family = "xai" }
+tiers.review = { model = "muse-spark-1.3-max", family = "meta" }
 
 [providers.agy]
-enabled = true
+enabled = false
 bin = "agy"
 launch = "{bin} --model {model} --effort {effort} --mode accept-edits -i {prompt}"
 quit = ["ctrl+c", "ctrl+c"]
 login = "agy models"
 login_ok = "gemini"
 models = "agy models"
-family = "google"
+family = "mixed"
 plugins = false
 max = 1
-tiers.heavy = { model = "gemini-3.1-pro-high", effort = "high" }
-tiers.standard = { model = "gemini-3.8-flash-high", effort = "high" }
-tiers.light = { model = "gemini-3.8-flash-medium", effort = "medium" }
-tiers.review = { model = "gemini-3.1-pro-high", effort = "high" }
+tiers.heavy = { model = "gemini-3.1-pro-high", effort = "high", family = "google" }
+tiers.standard = { model = "gemini-3.8-flash-high", effort = "high", family = "google" }
+tiers.light = { model = "gemini-3.8-flash-medium", effort = "medium", family = "google" }
+tiers.review = { model = "gemini-3.1-pro-high", effort = "high", family = "google" }
 
 # Planned: turned on once the CLI is set up and its adapter is checked.
 [providers.grok]

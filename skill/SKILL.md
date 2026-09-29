@@ -1,79 +1,83 @@
 ---
 name: fleet
-description: Lead a fleet of coding-agent CLIs (Claude Code, claude-co, Codex, Cursor, Antigravity) in visible cmux tabs that implement a batch of tickets in parallel in one checkout.
+description: Plan, launch, resume and verify a local fleet of coding-agent CLIs in visible cmux tabs for approved tickets, with saved dependencies and explicit file ownership.
 disable-model-invocation: true
 ---
 
 # Fleet
 
-You are the **lead**. Each worker is an interactive agent CLI in its own cmux tab, working one ticket in the shared checkout. You plan, route, launch, watch and verify. The owner commits; nobody in the fleet does.
+You are the lead. Workers are local interactive CLIs in cmux tabs sharing one checkout. You own planning, routing, decisions, review and final verification. Workers implement one ticket at a time. The owner controls commits and publishing.
 
-`fleet` (on PATH) does the mechanics. Run `fleet <cmd> --help` for flags. Invocation:
+Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute path and invoke `<absolute-skill-path>/bin/fleet`. Never guess a checkout path. Read `fleet <command> --help` when a flag is unclear.
 
+```text
+/fleet [auto | single:<provider> | agents=<provider>[:<model>],...]
+       [workspace=<ref>] [review=off|cross-heavy|cross-all]
+       -- <local tickets directory or task list>
 ```
-/fleet [auto | single:<provider> | agents=<provider>[:<model>],...] [workspace=<ref>] [review=off|cross-heavy|cross-all] -- <tickets dir | task list>
+
+These are conversational options for you to translate into CLI flags, not an autonomous scheduler. Defaults come from `fleet providers`. Read [harness requirements](references/harnesses.md), [routing](references/routing.md), and [provider notes](references/providers.md) as needed.
+
+## 1. Establish or resume the run
+
+- Read repository instructions, `.fleet/rules.md`, the agreed spec and the full tickets. Export remote issue content to local files first; a URL is not a `--ticket` input. Preserve original IDs and source links, using safe slug IDs for Fleet (`settings-copy`, not a path or URL).
+- Verify the active machine's absolute repository path. Run `fleet doctor` from it. Route only to adapters whose executable and authentication checks pass, and verify the selected model/effort is available. Doctor does not prove launch readiness.
+- If the named run exists, use `fleet resume <run>`, then inspect its complete saved plan, reports, decisions, any `notes.md` and reconciled process states. Do not initialize a replacement or relaunch a worker whose exit is unconfirmed.
+- Otherwise use `fleet init <run> [--workspace <ref>] [--routing <mode>] [--review <mode>]`. Map conversational `workspace=`, routing and `review=` directly to these flags. Init validates the selected cmux workspace; never fall back to an unrelated workspace.
+
+## 2. Save a complete plan
+
+Discover the exact repository-relative files each ticket needs. Preserve blockers, acceptance criteria, spec decisions and testing requirements. A wave contains tickets with satisfied blockers and disjoint file scopes. Existing owner edits require careful review and must be preserved.
+
+Show a compact table: wave, ticket, tier, provider/model/effort, exact files. Persist the complete graph with `fleet plan <run> --file <plan.json>` before launch:
+
+```json
+{
+  "tickets": [
+    {"id":"copy","ticket":".scratch/feature/issues/copy.md","files":["docs/copy.md"],"blockers":[],"provider":"codex","tier":"light"},
+    {"id":"guide","ticket":".scratch/feature/issues/guide.md","files":["docs/guide.md"],"blockers":["copy"],"provider":"claude","tier":"standard"}
+  ],
+  "decisions": ["Checks and context are specified in each generated prompt."]
+}
 ```
 
-Unset options come from `~/.config/agent-fleet/config.toml` (`fleet providers` prints the merged config). Routing rules: [references/routing.md](references/routing.md). Provider gotchas: [references/providers.md](references/providers.md).
+Optional per-ticket `model`, `effort` and `family` pin routing. The CLI validates dependencies, cycles, scope and assignments. Use exact files, not directories or globs. Record decisions and agreed routing before the first launch; the plan is immutable once workers have launched. Use one active run per checkout. Serialize CLI mutations through this lead; concurrent leads must not edit the same run.
 
-## 1. Preflight
+## 3. Generate prompts and launch ready tickets
 
-- Read [references/harnesses.md](references/harnesses.md) for the harness you are running in, and meet its lead requirements.
-- `fleet doctor` → every provider you plan to route to reads `ready`. A `NOT LOGGED IN` provider leaves the pool until the owner logs it in; say so in the plan.
-- `fleet init <run>` (run = feature slug) records the git baseline for the no-commit check.
+- `fleet prompt <run> <id>` uses the planned local ticket (`--ticket <local-path>` may supply it explicitly). Inspect the generated prompt, preserve the worker rules, and fill its context and exact checks, then remove the LEAD instruction comment before launch. Its file list must match the saved plan.
+- Resolve the actual glossary/ADR paths from project configuration. Prefer `GLOSSARY.md` and optional `GLOSSARY-MAP.md`, with `CONTEXT.md` for older repositories. Carry upstream `to-spec` testing and design decisions forward. Do not blindly invoke upstream `/implement`: it includes commits that Fleet forbids.
+- `fleet launch <run> <id> <provider> --tier <tier> [--model <model>] [--effort <effort>] [--family <family>]` must match the saved assignment. The CLI enforces blockers, active file ownership and capacity.
+- `fleet peek <run> <id>` after launch confirms progress or reveals a login, trust, model or permission prompt. Never assume creating a tab means work started.
 
-Done when doctor is green for the routed providers and the run dir exists.
+## 4. Watch and resolve blockers
 
-## 2. Plan waves
+Use `fleet wait <run>` (45-second default; `--timeout` is bounded at 60 seconds) and report meaningful progress within your host's time limits. On `needs-verification`, inspect the report and go to verification. On `blocked`, clarify an authorized task decision with `fleet send <run> <id> <answer>` and save the decision in `.fleet/runs/<run>/notes.md` (the saved plan is frozen after launch). On timeout, inspect `fleet status` and `fleet peek` for stale or missing reports.
 
-For every ticket: its blockers, the files it will touch (search the code, don't guess from the title), and its tier (heavy / standard / light, per the routing reference).
+Respect host approval boundaries. Task clarification does not authorize accepting a permission request, logging into an account, disabling a sandbox or rerouting to evade a denial. Stop and ask the owner when their action is required. A report never proves that the worker process exited.
 
-A **wave** is a set of tickets whose blockers are all resolved and whose file sets are pairwise disjoint. Tickets that share a hot file (a layout, a shared header, a schema) go in different waves, blockers-first.
+## 5. Stop, review and verify
 
-Show the owner one table: wave · ticket · tier · provider:model · files. Then launch. Owner corrections override the plan.
+Read the implementation report and scoped changes against all criteria. Run the exact agreed checks yourself, plus appropriate combined-tree checks and visual inspection for UI work. Do not add low-value tests for prose or mechanical changes merely to satisfy a template.
 
-Done when every ticket sits in exactly one wave with a provider, and no two tickets in a wave share a file.
+- For gaps while the worker is active: set the report to `Status: changes-requested`, send a bounded fix list, and wait for a new `needs-verification` report. Never mark a ticket verified by editing its report alone.
+- When ready for stable review, `fleet stop <run> <id>`. It waits for confirmed exit. A failed stop retains capacity: inspect the process before proceeding. This releases the writer slot before a reviewer is launched, including at `max_parallel=1`.
+- If required by the saved review mode, run `fleet diff <run> <id> --output <diff-path>` to capture changes against the launch baseline, including new files. Then `fleet prompt <run> <review-id> --review-of <id> --diff <diff-path>`. Inspect the dedicated reviewer prompt, which permits writing only its report; this is an instruction boundary, not OS isolation.
+- Launch that reviewer with `--tier review` on a permitted provider/model whose known family differs from the writer. Read its findings and run any necessary checks. Resolve findings before acceptance. Any changes after the reviewed diff invalidate review; stop writers, regenerate the diff and obtain a fresh review.
+- Stop the reviewer, write concrete verification evidence to a local file, then `fleet verify <run> <review-id> --evidence <evidence-file>`. Verify the writer separately with its own evidence file using the same command. The writer's process must have exited, its report must need verification, required review must be verified, and its current diff must match the reviewed content.
+- Only after successful writer verification update the source ticket's resolved status/acceptance boxes and launch newly unblocked tickets. Reviewers never resolve tickets themselves.
 
-## 3. Prompt and launch
+Evidence records commands, outcomes, acceptance criteria and review disposition. Preserve failures and limits honestly. If a stopped worker needs repair within its existing assignment, relaunch only after its prior exit is confirmed; give it the existing edits and remaining scope explicitly. Scope or routing changes after the first launch need a new follow-up run: first stop every worker that could overlap, then carry forward unresolved tickets, partial edits and decisions. Do not edit run.json to bypass immutable planning.
 
-- `fleet prompt <run> <id> --ticket <path>` scaffolds `prompts/<id>.md` from the preamble, the repo's `.fleet/rules.md` and the ticket template. Fill its three LEAD fields: files in scope, context the worker can't find by looking, and exact check commands.
-- `fleet launch <run> <id> <provider> --tier <tier>` opens a background tab named `<id> · provider:model` and passes the worker one line: read the prompt file. Caps (`max_parallel`, per-provider `max`) are enforced.
-- A few seconds later, `fleet peek <run> <id>` on each new tab shows the agent working, not stuck on a trust, login or model prompt.
+## 6. Recovery and completion
 
-Done when every worker in the wave is visibly working.
+Use `fleet resume <run>` after interruption. Exit receipts reconcile process state; reports and missing tabs are not exit evidence. If normal stop cannot establish exit, independently verify that the recorded worker process is truly gone, write that evidence to a file, then use `fleet recover <run> <id> --evidence <file>`. Recovery releases process state only; it does not accept implementation. Never use it just because a tab disappeared.
 
-## 4. Watch
+Before finishing, run combined-tree gates and `fleet check <run>`. Check compares captured HEAD and full index entries (including already-staged content); investigate differences with the owner. It cannot prove no intervening Git action occurred. Stop remaining workers; use `--close` only when exit is confirmed and tabs are no longer needed. Report ticket outcomes, resolved model/effort, evidence, decisions, remaining limits and the owner's review/commit steps.
 
-Loop `fleet wait <run>`. It blocks up to 9 minutes and exits `0` with `REPORT <id> [<status>]` lines when a report reaches `needs-verification` or `blocked`, or `2` on timeout. On each wake:
+## Shared-checkout rules
 
-- `needs-verification` → step 5.
-- `blocked` → answer the question with a decision (`fleet send <run> <id> <answer>`) and record the decision where the project keeps them.
-- Timeout → `fleet status <run>`, then `fleet peek` any tab whose report is missing or stale. Answer approval or model prompts yourself. Only the owner can fix a login or permission prompt: `cmux notify --title fleet --body "<id> needs <what>"`.
-
-Done when every ticket in the run is resolved or explicitly handed back to the owner.
-
-## 5. Verify (lead only)
-
-Per ticket: read the report and the diff of its files, then run the repo's gates from `.fleet/rules.md` yourself: type-check, tests, and a build from a snapshot copy when the repo says so. Add a visual check when the ticket touches UI.
-
-Whenever you edit a report, rewrite its `Status:` line first. That line is what `fleet wait` wakes on.
-
-- Gaps → set the report to `Status: changes-requested`, `fleet send` the fix list to the same worker, and tell it to set `needs-verification` again when done. Then back to step 4. Fix trivial things yourself.
-- Pass → set the report to `Status: verified` and append `## Lead verification` (commands + results). Set the ticket's own `Status:` to resolved and check its acceptance boxes.
-- `review=cross-*` → after your pass, launch a read-only reviewer from a different model family (`--tier review`) on the ticket's diff, and act on its findings.
-- Then launch whatever the resolved ticket unblocked.
-
-Done when every acceptance criterion has evidence and every gate is green on the combined tree.
-
-## 6. Close
-
-- `fleet check <run>` → `OK`. Anything else means someone committed or staged. Stop and tell the owner.
-- `fleet stop <run> --all` (add `--close` only once the owner no longer needs the tabs).
-- Report to the owner: each ticket with provider:model and result, gates run, decisions made, follow-ups, and the owner's next steps (review, commit, deploy order).
-
-## Guardrails
-
-- Workers get the preamble verbatim. Soften nothing; add repo rules through `.fleet/rules.md`.
-- Drive cmux only through `fleet` or non-focusing verbs (`send`, `send-key`, `read-screen`, `new-surface --focus false`). The owner's focus belongs to the owner.
-- Build output shared with a live dev server (for example `.next`) stays untouched: build from an rsync snapshot with symlinked `node_modules`.
-- Commits, pushes, deploys, migrations, provisioning and key rotation belong to the owner.
+- Preserve the worker preamble and exact scope. Scope additions need a conflict check and, after launch, a follow-up run before editing.
+- Use Fleet or non-focusing cmux actions. Do not take the owner's focus.
+- Run builds that would disturb a live dev server in an appropriate isolated copy; never run them over shared build output without checking repository instructions.
+- No worker commits, stages, pushes, deploys, installs packages, migrates data or accesses secrets. Network-dependent work must be handled separately under explicit owner authorization; changing providers does not remove these rules.

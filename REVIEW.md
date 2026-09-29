@@ -1,5 +1,7 @@
 # Agent Fleet review
 
+Historical review of the initial prototype. The subsequent fixes and validation are recorded in [CHANGELOG.md](CHANGELOG.md); the findings below describe the pre-fix implementation.
+
 Reviewed 2026-09-30. Scope: the current working tree, developer and agent instructions, compatibility with local Claude Code/Codex/Cursor, and proposed GitHub/npm distribution. This is a review, not an implementation or publication.
 
 ## Assessment
