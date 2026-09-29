@@ -1,0 +1,20 @@
+# ~/.config/agent-fleet/config.toml — personal overrides on top of skill/providers.toml.
+# Only list what you change. `fleet providers` prints the merged result.
+
+[defaults]
+workspace = "workspace:2"          # cmux workspace for worker tabs; falls back to the lead's own workspace
+routing = "auto"                   # auto | single:<provider>
+prefer = ["claude-co", "codex", "cursor", "claude", "agy"]   # quota order for auto routing
+max_parallel = 6
+review = "cross-heavy"             # off | cross-heavy | cross-all
+
+# Examples:
+# [providers.agy]
+# enabled = false
+#
+# [providers.codex.tiers.standard]
+# model = "gpt-6-luna"
+# effort = "high"
+#
+# [providers.claude]
+# max = 1                          # keep the primary subscription mostly free for yourself

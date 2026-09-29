@@ -1,0 +1,6 @@
+interface:
+  display_name: "Fleet"
+  short_description: "Lead parallel agent CLIs in cmux tabs through a batch of tickets"
+  default_prompt: "Use $fleet to implement these tickets with a fleet of agent CLIs."
+policy:
+  allow_implicit_invocation: false

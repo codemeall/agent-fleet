@@ -1,0 +1,514 @@
+#!/usr/bin/env python3
+"""fleet: the mechanics of running coding agents in cmux panes.
+
+The lead agent decides what to run; this tool launches, watches and stops it.
+Standard library only (Python 3.11+), so any harness with a shell can drive it.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+import tomllib
+from pathlib import Path
+
+SKILL_DIR = Path(__file__).resolve().parent.parent
+USER_CONFIG = Path(os.environ.get("FLEET_CONFIG", "~/.config/agent-fleet/config.toml")).expanduser()
+HARNESS_SKILL_DIRS = {
+    "claude": "~/.claude/skills",
+    "claude-co": "~/.claude-co/skills",
+    "codex": "~/.codex/skills",
+    "cursor": "~/.cursor/skills",
+}
+DEFAULTS = {
+    "workspace": None,
+    "routing": "auto",
+    "prefer": ["claude-co", "codex", "cursor", "claude", "agy"],
+    "max_parallel": 6,
+    "review": "cross-heavy",
+}
+STATUS_RE = re.compile(r"^\s*[*_`]*\s*status\s*[*_`]*\s*:\s*[*_`]*\s*(.+?)\s*[*_`]*\s*$", re.I)
+SURFACE_RE = re.compile(r"surface:\d+")
+
+
+class FleetError(Exception):
+    pass
+
+
+# ---------- config ----------
+
+def deep_merge(base: dict, over: dict) -> dict:
+    out = dict(base)
+    for key, value in over.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def load_config(user_path: Path = USER_CONFIG) -> dict:
+    with open(SKILL_DIR / "providers.toml", "rb") as fh:
+        cfg = tomllib.load(fh)
+    if user_path.exists():
+        with open(user_path, "rb") as fh:
+            cfg = deep_merge(cfg, tomllib.load(fh))
+    cfg["defaults"] = deep_merge(DEFAULTS, cfg.get("defaults", {}))
+    return cfg
+
+
+def provider(cfg: dict, name: str) -> dict:
+    p = cfg.get("providers", {}).get(name)
+    if p is None:
+        raise FleetError(f"unknown provider '{name}'. Known: {', '.join(cfg.get('providers', {}))}")
+    return p
+
+
+# ---------- pure helpers ----------
+
+def resolve_model(pcfg: dict, tier: str | None, model: str | None, effort: str | None) -> tuple[str, str | None]:
+    tier_cfg = pcfg.get("tiers", {}).get(tier or "standard", {})
+    model = model or tier_cfg.get("model")
+    if not model:
+        raise FleetError(f"no model: pass --model or define tiers.{tier or 'standard'} for this provider")
+    return model, effort or tier_cfg.get("effort")
+
+
+def build_launch(pcfg: dict, model: str, effort: str | None, prompt: str) -> str:
+    template = pcfg["launch"]
+    if "{effort}" in template and not effort:
+        raise FleetError("this provider's launch needs an effort: pass --effort or set it on the tier")
+    return template.format(bin=pcfg["bin"], model=model, effort=effort or "", prompt=shlex.quote(prompt))
+
+
+def worker_prompt_line(prompt_path: Path, ticket_id: str) -> str:
+    return (f"Read {prompt_path} and follow it exactly. You are fleet worker {ticket_id}. "
+            f"Your report path and hard rules are in that file.")
+
+
+def parse_status(text: str) -> str | None:
+    for line in text.splitlines():
+        m = STATUS_RE.match(line)
+        if m:
+            return m.group(1).strip("*_` ").strip()
+    return None
+
+
+def compare_snapshots(before: dict, after: dict) -> list[str]:
+    problems = []
+    for path, sha in before["heads"].items():
+        now = after["heads"].get(path)
+        if now != sha:
+            problems.append(f"HEAD moved in {path}: {sha[:10]} -> {(now or 'missing')[:10]}")
+    for path, staged in after["staged"].items():
+        new = sorted(set(staged) - set(before["staged"].get(path, [])))
+        if new:
+            problems.append(f"newly staged in {path}: {', '.join(new[:10])}" + (" …" if len(new) > 10 else ""))
+    return problems
+
+
+# ---------- shell ----------
+
+def sh(args: list[str] | str, *, cwd: Path | None = None, timeout: int = 60, check: bool = True) -> str:
+    res = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                         shell=isinstance(args, str))
+    if check and res.returncode != 0:
+        cmd = args if isinstance(args, str) else " ".join(args)
+        raise FleetError(f"`{cmd}` failed ({res.returncode}): {(res.stderr or res.stdout).strip()}")
+    return res.stdout
+
+
+def cmux(*args: str, timeout: int = 30) -> str:
+    return sh(["cmux", *args], timeout=timeout)
+
+
+def repo_root(start: Path | None = None) -> Path:
+    return Path(sh(["git", "rev-parse", "--show-toplevel"], cwd=start or Path.cwd()).strip())
+
+
+def git_snapshot(repo: Path) -> dict:
+    paths = ["."]
+    out = sh(["git", "submodule", "foreach", "--quiet", "--recursive", "echo $displaypath"], cwd=repo, check=False)
+    paths += [p for p in out.splitlines() if p.strip()]
+    heads, staged = {}, {}
+    for p in paths:
+        d = repo / p
+        heads[p] = sh(["git", "rev-parse", "HEAD"], cwd=d, check=False).strip()
+        staged[p] = sorted(x for x in sh(["git", "diff", "--cached", "--name-only"], cwd=d, check=False).splitlines() if x)
+    return {"heads": heads, "staged": staged}
+
+
+# ---------- run state ----------
+
+def run_dir(repo: Path, run: str) -> Path:
+    return repo / ".fleet" / "runs" / run
+
+
+def load_run(repo: Path, run: str) -> dict:
+    f = run_dir(repo, run) / "run.json"
+    if not f.exists():
+        raise FleetError(f"no run '{run}' in {repo}. Start one with: fleet init {run}")
+    return json.loads(f.read_text())
+
+
+def save_run(repo: Path, run: str, state: dict) -> None:
+    (run_dir(repo, run) / "run.json").write_text(json.dumps(state, indent=2) + "\n")
+
+
+def worker(state: dict, ticket_id: str) -> dict:
+    w = state["workers"].get(ticket_id)
+    if not w:
+        raise FleetError(f"no worker '{ticket_id}' in this run")
+    return w
+
+
+def active(state: dict) -> list[dict]:
+    return [w for w in state["workers"].values() if w.get("state") == "running"]
+
+
+# ---------- commands ----------
+
+def cmd_init(a, cfg):
+    repo = repo_root()
+    d = run_dir(repo, a.run)
+    if (d / "run.json").exists():
+        raise FleetError(f"run '{a.run}' already exists at {d}")
+    for sub in ("prompts", "reports", ".seen"):
+        (d / sub).mkdir(parents=True, exist_ok=True)
+    gi = repo / ".fleet" / ".gitignore"
+    if not gi.exists():
+        gi.write_text("runs/\n")
+    workspace = a.workspace or cfg["defaults"]["workspace"] or os.environ.get("CMUX_WORKSPACE_ID")
+    if not workspace:
+        raise FleetError("no cmux workspace: pass --workspace or set defaults.workspace")
+    state = {"run": a.run, "repo": str(repo), "workspace": workspace,
+             "created": time.strftime("%Y-%m-%dT%H:%M:%S"), "baseline": git_snapshot(repo), "workers": {}}
+    save_run(repo, a.run, state)
+    rules = repo / ".fleet" / "rules.md"
+    print(f"run dir: {d}\nworkspace: {workspace}\nrepo rules: {rules if rules.exists() else 'none (add .fleet/rules.md)'}")
+
+
+def cmd_prompt(a, cfg):
+    repo = repo_root()
+    load_run(repo, a.run)
+    d = run_dir(repo, a.run)
+    out = d / "prompts" / f"{a.id}.md"
+    if out.exists() and not a.force:
+        raise FleetError(f"{out} exists (use --force to overwrite)")
+    fields = {"id": a.id, "ticket": str(Path(a.ticket).resolve()) if a.ticket else "(see task below)",
+              "report": str(d / "reports" / f"{a.id}.md"), "repo": str(repo)}
+    parts = [(SKILL_DIR / "templates" / "preamble.md").read_text()]
+    rules = repo / ".fleet" / "rules.md"
+    if rules.exists():
+        parts.append("## Repo rules\n\n" + rules.read_text())
+    parts.append((SKILL_DIR / "templates" / "ticket-prompt.md").read_text())
+    parts.append("## Report format\n\n" + (SKILL_DIR / "templates" / "report.md").read_text())
+    text = "\n\n".join(p.strip() for p in parts) + "\n"
+    for k, v in fields.items():
+        text = text.replace("{{" + k + "}}", v)
+    out.write_text(text)
+    print(out)
+
+
+def cmd_launch(a, cfg):
+    repo = repo_root()
+    state = load_run(repo, a.run)
+    pcfg = provider(cfg, a.provider)
+    if not pcfg.get("enabled", True):
+        raise FleetError(f"provider '{a.provider}' is turned off in config")
+    prompt_path = run_dir(repo, a.run) / "prompts" / f"{a.id}.md"
+    if not prompt_path.exists():
+        raise FleetError(f"write the prompt first: fleet prompt {a.run} {a.id} --ticket <path>")
+    w = state["workers"].get(a.id)
+    if w and w.get("state") == "running":
+        raise FleetError(f"worker {a.id} is already running on {w['surface']}")
+    running = active(state)
+    if not a.over_cap:
+        if len(running) >= cfg["defaults"]["max_parallel"]:
+            raise FleetError(f"max_parallel={cfg['defaults']['max_parallel']} reached; wait for a worker to finish")
+        mine = [x for x in running if x["provider"] == a.provider]
+        if len(mine) >= pcfg.get("max", 2):
+            raise FleetError(f"{a.provider} is at its max={pcfg.get('max', 2)}; pick another provider or wait")
+    model, effort = resolve_model(pcfg, a.tier, a.model, a.effort)
+    command = build_launch(pcfg, model, effort, worker_prompt_line(prompt_path, a.id))
+    args = ["new-surface", "--workspace", state["workspace"], "--working-directory", str(repo),
+            "--command", command, "--focus", "false"]
+    if a.pane:
+        args += ["--pane", a.pane]
+    out = cmux(*args)
+    m = SURFACE_RE.search(out)
+    if not m:
+        raise FleetError(f"could not read the new surface ref from cmux output: {out.strip()}")
+    surface = m.group(0)
+    label = f"{a.id} · {a.provider}:{model}" + (f"@{effort}" if effort and a.provider != "cursor" else "")
+    sh(["cmux", "rename-tab", "--workspace", state["workspace"], "--surface", surface, label], check=False)
+    state["workers"][a.id] = {"provider": a.provider, "model": model, "effort": effort, "tier": a.tier,
+                              "surface": surface, "state": "running", "command": command,
+                              "launched": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    save_run(repo, a.run, state)
+    print(f"{a.id}: {label} on {surface}")
+
+
+def send_keys(workspace: str, surface: str, items: list[str]) -> None:
+    for item in items:
+        if item in ("enter", "ctrl+c", "escape", "tab"):
+            cmux("send-key", "--workspace", workspace, "--surface", surface, item)
+        else:
+            cmux("send", "--workspace", workspace, "--surface", surface, "--", item)
+        time.sleep(0.4)
+
+
+def cmd_send(a, cfg):
+    repo = repo_root()
+    state = load_run(repo, a.run)
+    w = worker(state, a.id)
+    send_keys(state["workspace"], w["surface"], [" ".join(a.text), "enter"])
+    print(f"sent to {a.id} ({w['surface']})")
+
+
+def cmd_peek(a, cfg):
+    repo = repo_root()
+    state = load_run(repo, a.run)
+    w = worker(state, a.id)
+    print(cmux("read-screen", "--workspace", state["workspace"], "--surface", w["surface"], "--lines", str(a.lines)))
+
+
+def report_rows(repo: Path, state: dict) -> list[dict]:
+    d = run_dir(repo, state["run"]) / "reports"
+    ids = set(state["workers"]) | {p.stem for p in d.glob("*.md")}
+    rows = []
+    for i in sorted(ids):
+        w = state["workers"].get(i, {})
+        f = d / f"{i}.md"
+        status = parse_status(f.read_text()) if f.exists() else None
+        age = int(time.time() - f.stat().st_mtime) if f.exists() else None
+        rows.append({"id": i, "worker": f"{w.get('provider', '?')}:{w.get('model', '?')}",
+                     "surface": w.get("surface", "-"), "state": w.get("state", "-"),
+                     "report": status or ("-" if not f.exists() else "no status line"),
+                     "report_age_s": age})
+    return rows
+
+
+def cmd_status(a, cfg):
+    repo = repo_root()
+    state = load_run(repo, a.run)
+    rows = report_rows(repo, state)
+    if a.json:
+        print(json.dumps(rows, indent=2))
+        return
+    print(f"run {state['run']}  workspace {state['workspace']}  running {len(active(state))}/{cfg['defaults']['max_parallel']}")
+    for r in rows:
+        age = f"{r['report_age_s'] // 60}m ago" if r["report_age_s"] is not None else ""
+        print(f"  {r['id']:<10} {r['worker']:<34} {r['surface']:<12} {r['state']:<9} {r['report']} {age}")
+
+
+WAKE_STATUSES = ("needs-verification", "blocked")
+
+
+def scan_reports(reports: Path, seen: Path, statuses: tuple[str, ...] | None) -> list[tuple[str, str, Path]]:
+    """Reports that reached a wake status since last seen. statuses=None wakes on any change.
+
+    The lead parks a report by rewriting its Status (verified, changes-requested); a worker
+    flipping it back to needs-verification wakes the lead again.
+    """
+    fresh = []
+    for f in sorted(reports.glob("*.md")):
+        status = parse_status(f.read_text()) or "no status line"
+        if statuses is not None and status.lower() not in statuses:
+            continue
+        key = f"{status}|{f.stat().st_mtime_ns}"
+        marker = seen / f.stem
+        if not marker.exists() or marker.read_text() != key:
+            marker.write_text(key)
+            fresh.append((f.stem, status, f))
+    return fresh
+
+
+def cmd_wait(a, cfg):
+    repo = repo_root()
+    load_run(repo, a.run)
+    d = run_dir(repo, a.run)
+    seen = d / ".seen"
+    seen.mkdir(exist_ok=True)
+    statuses = None if a.any_change else WAKE_STATUSES
+    deadline = time.time() + a.timeout
+    while True:
+        fresh = scan_reports(d / "reports", seen, statuses)
+        if fresh:
+            for i, status, f in fresh:
+                print(f"REPORT {i} [{status}] {f}")
+            return 0
+        if time.time() >= deadline:
+            print(f"TIMEOUT no new report in {a.timeout}s; check panes: fleet status {a.run}")
+            return 2
+        time.sleep(a.interval)
+
+
+def cmd_stop(a, cfg):
+    repo = repo_root()
+    state = load_run(repo, a.run)
+    ids = [i for i, w in state["workers"].items() if w.get("state") == "running"] if a.all else a.ids
+    if not ids:
+        raise FleetError("name workers to stop, or pass --all")
+    for i in ids:
+        w = worker(state, i)
+        pcfg = provider(cfg, w["provider"])
+        try:
+            send_keys(state["workspace"], w["surface"], pcfg.get("quit", ["/exit", "enter"]))
+            if a.close:
+                time.sleep(2)
+                cmux("close-surface", "--workspace", state["workspace"], "--surface", w["surface"])
+        except FleetError as e:
+            print(f"{i}: {e}", file=sys.stderr)
+        w["state"] = "closed" if a.close else "stopped"
+        print(f"{i}: {w['state']} ({w['surface']})")
+    save_run(repo, a.run, state)
+
+
+def cmd_check(a, cfg):
+    repo = repo_root()
+    state = load_run(repo, a.run)
+    problems = compare_snapshots(state["baseline"], git_snapshot(repo))
+    if problems:
+        print("CHANGED since the run started (fleet never commits or stages; find out who did):")
+        for p in problems:
+            print(f"  - {p}")
+        return 1
+    print("OK: no commits and nothing newly staged since the run started")
+    return 0
+
+
+def first_binary(bin_field: str) -> str:
+    tokens = [t for t in shlex.split(bin_field) if "=" not in t or t.startswith("-")]
+    return tokens[0] if tokens else bin_field
+
+
+def cmd_doctor(a, cfg):
+    ok = True
+    try:
+        cmux("ping", timeout=5)
+        print("cmux          ready")
+    except (FleetError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+        ok = False
+        print(f"cmux          NOT REACHABLE: {e}")
+        if os.environ.get("CODEX_SANDBOX") or os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED"):
+            print("              Codex lead: run with -c sandbox_workspace_write.network_access=true")
+    print(f"config        {USER_CONFIG if USER_CONFIG.exists() else 'none (built-in defaults)'}")
+    names = a.providers or list(cfg["providers"])
+    for name in names:
+        p = provider(cfg, name)
+        if not p.get("enabled", True):
+            print(f"{name:<13} off")
+            continue
+        binary = first_binary(p["bin"])
+        if not shutil.which(binary):
+            ok = False
+            print(f"{name:<13} MISSING binary '{binary}'")
+            continue
+        if "login" not in p:
+            print(f"{name:<13} installed (no login check defined)")
+            continue
+        try:
+            res = subprocess.run(p["login"], shell=True, capture_output=True, text=True, timeout=60)
+            ready = p.get("login_ok", "") in res.stdout + res.stderr  # codex prints its status to stderr
+        except subprocess.TimeoutExpired:
+            ready, out = False, "timed out"
+        ok &= ready
+        tiers = ", ".join(f"{t}={v.get('model')}" for t, v in p.get("tiers", {}).items())
+        print(f"{name:<13} {'ready' if ready else 'NOT LOGGED IN'}  max={p.get('max', 2)}  {tiers}")
+    for harness, d in HARNESS_SKILL_DIRS.items():
+        target = Path(d).expanduser() / "fleet"
+        print(f"skill@{harness:<7} {'installed' if (target / 'SKILL.md').exists() else 'not installed'}")
+    return 0 if ok else 1
+
+
+def cmd_providers(a, cfg):
+    print(json.dumps({"defaults": cfg["defaults"], "providers": cfg["providers"]}, indent=2))
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="fleet", description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("doctor", help="check cmux, provider logins and skill installs")
+    s.add_argument("providers", nargs="*")
+    s.set_defaults(fn=cmd_doctor)
+
+    s = sub.add_parser("providers", help="print the merged provider config")
+    s.set_defaults(fn=cmd_providers)
+
+    s = sub.add_parser("init", help="start a run: dirs + git baseline")
+    s.add_argument("run")
+    s.add_argument("--workspace")
+    s.set_defaults(fn=cmd_init)
+
+    s = sub.add_parser("prompt", help="scaffold a worker prompt from the templates")
+    s.add_argument("run")
+    s.add_argument("id")
+    s.add_argument("--ticket")
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(fn=cmd_prompt)
+
+    s = sub.add_parser("launch", help="launch a worker in a new cmux tab")
+    s.add_argument("run")
+    s.add_argument("id")
+    s.add_argument("provider")
+    s.add_argument("--tier", choices=["heavy", "standard", "light", "review"], default="standard")
+    s.add_argument("--model")
+    s.add_argument("--effort")
+    s.add_argument("--pane")
+    s.add_argument("--over-cap", action="store_true", help="ignore max_parallel and per-provider max")
+    s.set_defaults(fn=cmd_launch)
+
+    s = sub.add_parser("send", help="type a message into a worker's pane and press enter")
+    s.add_argument("run")
+    s.add_argument("id")
+    s.add_argument("text", nargs="+")
+    s.set_defaults(fn=cmd_send)
+
+    s = sub.add_parser("peek", help="read the bottom of a worker's screen")
+    s.add_argument("run")
+    s.add_argument("id")
+    s.add_argument("--lines", type=int, default=40)
+    s.set_defaults(fn=cmd_peek)
+
+    s = sub.add_parser("status", help="workers and their report status")
+    s.add_argument("run")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_status)
+
+    s = sub.add_parser("wait", help="block until a report reaches needs-verification or blocked (exit 0), "
+                                    "or timeout (exit 2)")
+    s.add_argument("run")
+    s.add_argument("--timeout", type=int, default=540)
+    s.add_argument("--interval", type=int, default=10)
+    s.add_argument("--any-change", action="store_true", help="wake on any report change, whatever its status")
+    s.set_defaults(fn=cmd_wait)
+
+    s = sub.add_parser("stop", help="send each worker its quit sequence")
+    s.add_argument("run")
+    s.add_argument("ids", nargs="*")
+    s.add_argument("--all", action="store_true")
+    s.add_argument("--close", action="store_true", help="also close the tab")
+    s.set_defaults(fn=cmd_stop)
+
+    s = sub.add_parser("check", help="prove no commits or new staging since the run started")
+    s.add_argument("run")
+    s.set_defaults(fn=cmd_check)
+
+    a = ap.parse_args(argv)
+    try:
+        return a.fn(a, load_config()) or 0
+    except FleetError as e:
+        print(f"fleet: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
