@@ -16,8 +16,8 @@ The lead turns approved tickets into a saved execution plan, picks a worker mode
 ## Quick start
 
 ```sh
-# 1. Install the skill for every supported host, straight from GitHub
-npx github:codemeall/agent-fleet setup --harness all
+# 1. Install the skill globally with the skills CLI
+npx skills add codemeall/agent-fleet -g -a claude-code -a codex -a cursor
 
 # 2. Check cmux, Python and worker CLIs
 ~/.claude/skills/fleet/bin/fleet doctor
@@ -41,18 +41,38 @@ The lead host must be allowed to use the local shell, the repository and cmux. I
 
 | Method | Best for | Command |
 | --- | --- | --- |
-| **npx from GitHub** (recommended) | Claude Code, Codex, Cursor | `npx github:codemeall/agent-fleet setup --harness all` |
+| **skills CLI** (recommended) | Claude Code, Codex, Cursor and other agents | `npx skills add codemeall/agent-fleet` |
+| **Fleet installer (npm)** | Version-tracked installs, `fleet` on PATH | `npx @codemeall/agent-fleet@preview setup --harness all` |
 | **Claude Code plugin** | Claude Code only, managed updates | `/plugin marketplace add codemeall/agent-fleet` |
 | **Git clone** | Contributors, pinned checkouts | `./install.sh --harness all` |
-| **npm registry** | Everyone | *Coming soon* |
 
-#### Option 1: npx from GitHub (recommended)
+Pick one method per host. Installing the same skill twice (for example, with the skills CLI and the Fleet installer) leaves duplicate copies; the Fleet installer refuses to overwrite a directory it didn't create.
 
-This runs the installer from the GitHub repository. You don't need to clone it or have a published npm package.
+#### Option 1: skills CLI (recommended)
+
+The [skills CLI](https://github.com/vercel-labs/skills) installs the `fleet` skill, including its bundled `bin/fleet` runtime, into your agents' skill directories:
 
 ```sh
-npx github:codemeall/agent-fleet setup --harness all
+npx skills add codemeall/agent-fleet                                     # interactive: pick agents and scope
+npx skills add codemeall/agent-fleet -g -a claude-code -a codex -a cursor # user-level, no prompts
+npx skills add codemeall/agent-fleet -a claude-code -y                    # current project only
 ```
+
+Without `-g`, the skill goes into the current project (`.agents/skills/fleet`, symlinked into `.claude/skills/fleet` for Claude Code). With `-g`, it goes into your user-level skill directories. Pass `-a` once per agent. Run `npx skills add codemeall/agent-fleet --list` to preview what will be installed.
+
+To update, run `npx skills update fleet`. To remove, run `npx skills remove fleet`.
+
+#### Option 2: Fleet installer from npm
+
+The package's own installer copies the skill to each host and records the installed version, so later runs can upgrade it safely:
+
+```sh
+npx @codemeall/agent-fleet@preview setup --harness all   # one-off install
+npm install -g @codemeall/agent-fleet@preview            # also adds `fleet` to PATH
+fleet setup --harness all
+```
+
+The package is published under the `preview` tag during the preview period. To install straight from GitHub instead of npm, use `npx github:codemeall/agent-fleet setup --harness all`.
 
 Use `--harness claude`, `codex`, `cursor` or `all`. The skill is copied to:
 
@@ -65,12 +85,12 @@ Use `--harness claude`, `codex`, `cursor` or `all`. The skill is copied to:
 For a single repository:
 
 ```sh
-npx github:codemeall/agent-fleet setup --harness codex --scope project --root /absolute/path/to/repo
+npx @codemeall/agent-fleet@preview setup --harness codex --scope project --root /absolute/path/to/repo
 ```
 
-To update, run `setup` again. npx may reuse a cached copy of the repository, so pin a tag or commit to be sure you get a fresh fetch (for example, `npx github:codemeall/agent-fleet#<tag-or-sha> setup --harness all`). You can also clear `~/.npm/_npx`. Each installed copy records its version in `.fleet-install.json`. Setup replaces only copies it installed itself. If you edited an installed copy, or another skill already uses that directory, setup stops and reports it without overwriting anything.
+To update, run `setup` again with the newest version (for example, `npx @codemeall/agent-fleet@preview setup --harness all`, or `npm update -g @codemeall/agent-fleet` for a global install). Each installed copy records its version in `.fleet-install.json`. Setup replaces only copies it installed itself. If you edited an installed copy, or another skill already uses that directory, setup stops and reports it without overwriting anything.
 
-#### Option 2: Claude Code plugin marketplace
+#### Option 3: Claude Code plugin marketplace
 
 This repository is also a Claude Code plugin marketplace. In Claude Code:
 
@@ -88,7 +108,7 @@ claude plugin install agent-fleet@agent-fleet
 
 Plugin skills are namespaced, so you invoke this one as `/agent-fleet:fleet`. To update, run `claude plugin marketplace update agent-fleet`, then `claude plugin update agent-fleet@agent-fleet`. The plugin does not add `fleet` to your PATH. The skill finds its bundled runtime itself, and you can [add a PATH command](#put-fleet-on-your-path-optional) if you want one.
 
-#### Option 3: Git clone
+#### Option 4: Git clone
 
 ```sh
 git clone https://github.com/codemeall/agent-fleet.git
@@ -98,17 +118,6 @@ cd agent-fleet
 ```
 
 Claude Code can also load the checkout directly as a plugin: `claude --plugin-dir /absolute/path/to/agent-fleet`.
-
-#### Coming soon: npm registry
-
-A published npm package is planned. Once it's released, you'll be able to install it with:
-
-```sh
-npx @codemeall/agent-fleet setup --harness all     # one-off install
-npm install -g @codemeall/agent-fleet               # adds `fleet` to PATH
-```
-
-Until then, use Option 1. Those commands will fail because the package hasn't been published.
 
 ### Put `fleet` on your PATH (optional)
 
@@ -135,7 +144,8 @@ Personal overrides live in `~/.config/agent-fleet/config.toml`; start from [conf
 ### Uninstall
 
 ```sh
-npx github:codemeall/agent-fleet uninstall --harness all     # same --scope/--root as setup
+npx skills remove fleet                                         # if installed with the skills CLI (add -g for global)
+npx @codemeall/agent-fleet@preview uninstall --harness all     # same --scope/--root as setup
 claude plugin uninstall agent-fleet@agent-fleet              # if installed as a Claude plugin
 ```
 

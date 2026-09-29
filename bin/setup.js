@@ -112,7 +112,7 @@ function run(action, args) {
     else console.log(`absent ${target}`);
   }
   if (action === 'setup') {
-    console.log('Restart your harness to discover Fleet. fleet is not added to PATH; use the copied runtime (or npx github:codemeall/agent-fleet):');
+    console.log('Restart your harness to discover Fleet. fleet is not added to PATH; use the copied runtime (or npx @codemeall/agent-fleet@preview):');
     console.log(path.join(targets[0], 'bin', 'fleet'));
   }
 }

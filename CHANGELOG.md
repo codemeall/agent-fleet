@@ -1,16 +1,14 @@
 # Changelog
 
-## Unreleased
-
-- Install from GitHub without npm publication: `npx github:codemeall/agent-fleet setup`.
-- Add a Claude Code plugin marketplace manifest (`/plugin marketplace add codemeall/agent-fleet`).
-- Restructure the README around installation methods; mark the npm registry package as coming soon.
-- Setup no longer points to the unpublished npm package in its completion message.
-
 ## 0.1.0-preview.1
 
 Initial distributable preview, under the MIT license.
 
+- Published to npm as `@codemeall/agent-fleet` under the `preview` tag: `npx @codemeall/agent-fleet@preview setup`.
+- Install with the skills CLI: `npx skills add codemeall/agent-fleet`.
+- Install from GitHub without npm: `npx github:codemeall/agent-fleet setup`.
+- Add a Claude Code plugin marketplace manifest (`/plugin marketplace add codemeall/agent-fleet`).
+- Restructure the README around installation methods.
 - Persist ticket dependencies, exact ownership, model/effort assignments and decisions; resume existing runs.
 - Track worker exit receipts independently from reports. Failed stops retain capacity; reviewers can use a released writer slot even at capacity one.
 - Gate acceptance on lead evidence and required cross-family review of the current scoped diff.
