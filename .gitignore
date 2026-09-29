@@ -7,3 +7,5 @@ node_modules/
 /.fleet/.lock
 skills/
 dist/
+.npmrc
+.env
