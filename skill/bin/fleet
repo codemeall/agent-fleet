@@ -28,7 +28,6 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 USER_CONFIG = Path(os.environ.get("FLEET_CONFIG", "~/.config/agent-fleet/config.toml")).expanduser()
 HARNESS_SKILL_DIRS = {
     "claude": "~/.claude/skills",
-    "claude-co": "~/.claude-co/skills",
     "codex": "~/.agents/skills",
     "cursor": "~/.cursor/skills",
 }
@@ -41,6 +40,7 @@ DEFAULTS = {
 }
 STATUS_RE = re.compile(r"^\s*[*_`]*\s*status\s*[*_`]*\s*:\s*[*_`]*\s*(.+?)\s*[*_`]*\s*$", re.I)
 SURFACE_RE = re.compile(r"surface:\d+")
+ACCOUNT_RE = re.compile(r'"email"\s*:\s*"([^"]+)"')
 
 
 class FleetError(Exception):
@@ -59,13 +59,15 @@ def deep_merge(base: dict, over: dict) -> dict:
     return out
 
 
-def load_config(user_path: Path = USER_CONFIG) -> dict:
+def load_config(user_path: Path | None = None) -> dict:
+    user_path = user_path or USER_CONFIG
     with open(SKILL_DIR / "providers.toml", "rb") as fh:
         cfg = tomllib.load(fh)
     if user_path.exists():
         with open(user_path, "rb") as fh:
             cfg = deep_merge(cfg, tomllib.load(fh))
     cfg["defaults"] = deep_merge(DEFAULTS, cfg.get("defaults", {}))
+    cfg["providers"] = {name: resolve_extends(cfg["providers"], name) for name in cfg["providers"]}
     if not isinstance(cfg["defaults"]["max_parallel"], int) or cfg["defaults"]["max_parallel"] < 1:
         raise FleetError("defaults.max_parallel must be a positive integer")
     if cfg["defaults"]["review"] not in ("off", "cross-heavy", "cross-all"):
@@ -73,7 +75,46 @@ def load_config(user_path: Path = USER_CONFIG) -> dict:
     for name, adapter in cfg["providers"].items():
         if not isinstance(adapter.get("max", 2), int) or adapter.get("max", 2) < 1:
             raise FleetError(f"{name}.max must be a positive integer")
+        if not isinstance(adapter.get("env", {}), dict):
+            raise FleetError(f"{name}.env must be a table")
     return cfg
+
+
+def resolve_extends(providers: dict, name: str, seen: tuple[str, ...] = ()) -> dict:
+    """An adapter with `extends` copies its parent's fields, except `enabled`, then applies its own."""
+    own = providers[name]
+    parent = own.get("extends")
+    if not parent:
+        return own
+    if parent in seen or parent == name:
+        raise FleetError(f"provider '{name}' has an extends cycle")
+    if parent not in providers:
+        raise FleetError(f"provider '{name}' extends unknown provider '{parent}'")
+    base = {k: v for k, v in resolve_extends(providers, parent, seen + (name,)).items() if k != "enabled"}
+    return deep_merge(base, own)
+
+
+def account_env(pcfg: dict) -> tuple[dict[str, str], list[str]]:
+    """Variables to set and to clear so an adapter reaches its own account, never an inherited one."""
+    sets = {k: str(Path(v).expanduser()) if k == pcfg.get("account_env") else str(v)
+            for k, v in pcfg.get("env", {}).items()}
+    var = pcfg.get("account_env")
+    return sets, [var] if var and var not in sets else []
+
+
+def env_prefix(pcfg: dict) -> str:
+    sets, unsets = account_env(pcfg)
+    if not sets and not unsets:
+        return ""
+    parts = ["env"] + [f"-u {shlex.quote(v)}" for v in unsets] + [f"{k}={shlex.quote(v)}" for k, v in sets.items()]
+    return " ".join(parts) + " "
+
+
+def child_env(pcfg: dict) -> dict[str, str]:
+    sets, unsets = account_env(pcfg)
+    env = {k: v for k, v in os.environ.items() if k not in unsets}
+    env.update(sets)
+    return env
 
 
 def provider(cfg: dict, name: str) -> dict:
@@ -97,7 +138,7 @@ def build_launch(pcfg: dict, model: str, effort: str | None, prompt: str) -> str
     template = pcfg["launch"]
     if "{effort}" in template and not effort:
         raise FleetError("this provider's launch needs an effort: pass --effort or set it on the tier")
-    return template.format(bin=pcfg["bin"], model=shlex.quote(model), effort=shlex.quote(effort or ""), prompt=shlex.quote(prompt))
+    return env_prefix(pcfg) + template.format(bin=pcfg["bin"], model=shlex.quote(model), effort=shlex.quote(effort or ""), prompt=shlex.quote(prompt))
 
 
 def worker_prompt_line(prompt_path: Path, ticket_id: str) -> str:
@@ -866,6 +907,7 @@ def first_binary(bin_field: str) -> str:
 
 def cmd_doctor(a, cfg):
     ok = True
+    accounts: dict[tuple[str, str], list[str]] = {}
     try:
         cmux("ping", timeout=5)
         print("cmux          ready")
@@ -890,17 +932,72 @@ def cmd_doctor(a, cfg):
             print(f"{name:<13} installed (no login check defined)")
             continue
         try:
-            res = subprocess.run(p["login"], shell=True, capture_output=True, text=True, timeout=60)
-            ready = res.returncode == 0 and bool(p.get("login_ok")) and p["login_ok"] in res.stdout + res.stderr  # codex prints its status to stderr
+            res = subprocess.run(p["login"], shell=True, capture_output=True, text=True, timeout=60, env=child_env(p))
+            output = res.stdout + res.stderr  # codex prints its status to stderr
+            ready = res.returncode == 0 and bool(p.get("login_ok")) and p["login_ok"] in output
         except subprocess.TimeoutExpired:
-            ready = False
+            ready, output = False, ""
         ok &= ready
+        m = ACCOUNT_RE.search(output)
+        if ready and m:
+            accounts.setdefault((binary, m.group(1)), []).append(name)
         tiers = ", ".join(f"{t}={v.get('model')}" for t, v in p.get("tiers", {}).items())
         print(f"{name:<13} {'authenticated (models unverified)' if ready else 'LOGIN CHECK FAILED'}  max={p.get('max', 2)}  {tiers}")
-    for harness, d in HARNESS_SKILL_DIRS.items():
+    for (binary, account), same in accounts.items():
+        if len(same) > 1:
+            ok = False
+            print(f"accounts      SAME ACCOUNT: {', '.join(same)} all log in as {account}; give each its own account directory")
+    for harness, d in skill_dirs(cfg).items():
         target = Path(d).expanduser() / "fleet"
         print(f"skill@{harness:<7} {'installed' if (target / 'SKILL.md').exists() else 'not installed'}")
     return 0 if ok else 1
+
+
+def skill_dirs(cfg: dict) -> dict[str, str]:
+    dirs = dict(HARNESS_SKILL_DIRS)
+    for name, p in cfg["providers"].items():
+        if p.get("enabled", True) and p.get("account_env") == "CLAUDE_CONFIG_DIR":
+            home = account_env(p)[0].get("CLAUDE_CONFIG_DIR")
+            if home:
+                dirs[name] = str(Path(home) / "skills")
+    return dirs
+
+
+def cmd_account_add(a, cfg):
+    valid_id(a.name)
+    if a.name in cfg["providers"]:
+        raise FleetError(f"provider '{a.name}' already exists; edit {USER_CONFIG} instead")
+    base = provider(cfg, a.base)
+    var = base.get("account_env")
+    if not var:
+        raise FleetError(f"provider '{a.base}' has no account_env, so Fleet cannot point it at a second account")
+    home = Path(a.dir).expanduser()
+    if not home.is_absolute():
+        raise FleetError("--dir must be an absolute path or start with ~")
+    text = USER_CONFIG.read_text() if USER_CONFIG.exists() else ""
+    if re.search(rf"^\s*\[\s*providers\.{re.escape(a.name)}[\].]", text, re.M):
+        raise FleetError(f"{USER_CONFIG} already configures '{a.name}'")
+    block = (f"\n# Added by `fleet account add`: a second {a.base} account.\n"
+             f"[providers.{a.name}]\n"
+             f"extends = {json.dumps(a.base)}\n"
+             f"enabled = {'false' if a.disabled else 'true'}\n"
+             f"env = {{ {var} = {json.dumps(a.dir)} }}\n"
+             f"plugins = false\n"
+             f"max = {a.max}\n")
+    new = text + ("" if not text or text.endswith("\n") else "\n") + block
+    tomllib.loads(new)
+    USER_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    temp = USER_CONFIG.with_name(USER_CONFIG.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        temp.write_text(new)
+        temp.replace(USER_CONFIG)
+    finally:
+        temp.unlink(missing_ok=True)
+    print(f"added provider '{a.name}' ({a.base} with {var}={home}) to {USER_CONFIG}")
+    print(f"next: sign that account in yourself:  {var}={shlex.quote(str(home))} {first_binary(base['bin'])}")
+    print(f"then: fleet doctor {a.name}")
+    if a.name not in cfg["defaults"]["prefer"]:
+        print(f"auto routing: add '{a.name}' to defaults.prefer in {USER_CONFIG} to include it")
 
 
 def cmd_providers(a, cfg):
@@ -920,6 +1017,16 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("providers", help="print the merged provider config")
     s.set_defaults(fn=cmd_providers)
+
+    s = sub.add_parser("account", help="manage extra subscriptions of an existing provider")
+    acct = s.add_subparsers(dest="action", required=True)
+    s = acct.add_parser("add", help="add a provider that reuses an adapter with its own account directory")
+    s.add_argument("name", help="new provider name, e.g. claude-co")
+    s.add_argument("--from", dest="base", required=True, help="adapter to reuse, e.g. claude or codex")
+    s.add_argument("--dir", required=True, help="account directory, e.g. ~/.claude-co")
+    s.add_argument("--max", type=int, default=1, choices=range(1, 7), metavar="N", help="parallel workers (default 1)")
+    s.add_argument("--disabled", action="store_true", help="add it turned off")
+    s.set_defaults(fn=cmd_account_add)
 
     s = sub.add_parser("init", help="start a run: dirs + git baseline")
     s.add_argument("run")

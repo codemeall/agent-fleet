@@ -16,12 +16,12 @@ Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute pat
        -- <local tickets directory or task list>
 ```
 
-These are conversational options for you to translate into CLI flags, not an autonomous scheduler. Defaults come from `fleet providers`. Read [harness requirements](references/harnesses.md), [routing](references/routing.md), and [provider notes](references/providers.md) as needed.
+These are conversational options for you to translate into CLI flags, not an autonomous scheduler. To add another subscription to the fleet (for example a second Claude or Codex account), run `fleet account add <name> --from <adapter> --dir <path>` without tickets; see [provider notes](references/providers.md#extra-subscriptions). Defaults come from `fleet providers`. Read [harness requirements](references/harnesses.md), [routing](references/routing.md), and [provider notes](references/providers.md) as needed.
 
 ## 1. Establish or resume the run
 
 - Read repository instructions, `.fleet/rules.md`, the agreed spec and the full tickets. Export remote issue content to local files first; a URL is not a `--ticket` input. Preserve original IDs and source links, using safe slug IDs for Fleet (`settings-copy`, not a path or URL).
-- Verify the active machine's absolute repository path. Run `fleet doctor` from it. Route only to adapters whose executable and authentication checks pass, and verify the selected model/effort is available. Doctor does not prove launch readiness.
+- Verify the active machine's absolute repository path. Run `fleet doctor` from it. If the owner wants another subscription in the fleet, use `fleet account add <name> --from <adapter> --dir <path>` and let the owner sign it in; never sign in for them. Route only to adapters whose executable and authentication checks pass, and verify the selected model/effort is available. Doctor does not prove launch readiness.
 - If the named run exists, use `fleet resume <run>`, then inspect its complete saved plan, reports, decisions, any `notes.md` and reconciled process states. Do not initialize a replacement or relaunch a worker whose exit is unconfirmed.
 - Otherwise use `fleet init <run> [--workspace <ref>] [--routing <mode>] [--review <mode>]`. Map conversational `workspace=`, routing and `review=` directly to these flags. Init validates the selected cmux workspace; never fall back to an unrelated workspace.
 

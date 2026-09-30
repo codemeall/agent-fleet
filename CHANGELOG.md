@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Add extra subscriptions as providers: `extends` reuses an adapter, `env` points it at its own account directory, and `fleet account add` writes the block to the user config.
+- The bundled `claude-co` example now uses `extends = "claude"` with `env`, and `max = 1`.
+- Fix: the `claude` and `codex` login checks inherited `CLAUDE_CONFIG_DIR`/`CODEX_HOME` from the lead, so a lead running under a second account could report the wrong account. Adapters with `account_env` now clear it unless their `env` sets it. If your primary account uses a custom directory, set it in that provider's `env`.
+- README: add an Updating section and the missing git-clone update step.
+- `doctor` fails when two providers are signed in to the same account, and lists skill installs for extra Claude accounts from config.
+
 ## 0.1.0-preview.1
 
 Initial distributable preview, under the MIT license.

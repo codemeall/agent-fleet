@@ -7,6 +7,11 @@
 # login: a cheap command that needs no model call; ready when its output contains login_ok.
 # tiers: model + effort per ticket weight (see references/routing.md).
 # family: model family, used to pick a reviewer from a different family.
+# account_env: the CLI's account-directory variable. Fleet clears it unless `env` sets it,
+#   so an adapter never borrows the account the lead happens to run under.
+# extends: copy another adapter (all fields except `enabled`) and override some, e.g. a second
+#   subscription: extends = "claude" + env = { CLAUDE_CONFIG_DIR = "~/.claude-co" }.
+#   `fleet account add <name> --from <adapter> --dir <path>` writes one for you.
 
 [providers.claude]
 enabled = true
@@ -15,6 +20,7 @@ launch = "{bin} --model {model} --effort {effort} {prompt}"
 quit = ["/exit", "enter"]
 login = "claude auth status"
 login_ok = '"loggedIn": true'
+account_env = "CLAUDE_CONFIG_DIR"
 family = "anthropic"
 plugins = true
 max = 2
@@ -23,20 +29,13 @@ tiers.standard = { model = "sonnet", effort = "high" }
 tiers.light = { model = "sonnet", effort = "medium" }
 tiers.review = { model = "opus", effort = "high" }
 
+# Example second subscription. Sign it in (CLAUDE_CONFIG_DIR=~/.claude-co claude), then enable it.
 [providers.claude-co]
+extends = "claude"
 enabled = false
-bin = "CLAUDE_CONFIG_DIR=$HOME/.claude-co claude"
-launch = "{bin} --model {model} --effort {effort} {prompt}"
-quit = ["/exit", "enter"]
-login = "CLAUDE_CONFIG_DIR=$HOME/.claude-co claude auth status"
-login_ok = '"loggedIn": true'
-family = "anthropic"
+env = { CLAUDE_CONFIG_DIR = "~/.claude-co" }
 plugins = false
-max = 2
-tiers.heavy = { model = "opus", effort = "high" }
-tiers.standard = { model = "sonnet", effort = "high" }
-tiers.light = { model = "sonnet", effort = "medium" }
-tiers.review = { model = "opus", effort = "high" }
+max = 1
 
 [providers.codex]
 enabled = true
@@ -45,6 +44,7 @@ launch = "{bin} -m {model} -c model_reasoning_effort={effort} -s workspace-write
 quit = ["/quit", "enter"]
 login = "codex login status"
 login_ok = "Logged in"
+account_env = "CODEX_HOME"
 family = "openai"
 plugins = false
 max = 2

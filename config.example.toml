@@ -15,7 +15,8 @@ review = "cross-heavy"
 # effort = "medium"
 # family = "openai"
 
-# Optional second account. Authenticate it separately before enabling.
+# Optional second account. Sign it in first (CLAUDE_CONFIG_DIR=~/.claude-co claude).
+# Other accounts: fleet account add <name> --from claude|codex --dir <path>
 # [providers.claude-co]
 # enabled = true
 # max = 1

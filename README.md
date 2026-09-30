@@ -119,6 +119,8 @@ cd agent-fleet
 
 Claude Code can also load the checkout directly as a plugin: `claude --plugin-dir /absolute/path/to/agent-fleet`.
 
+To update, run `git pull`, then `./install.sh` again with the same options.
+
 ### Put `fleet` on your PATH (optional)
 
 The skill never needs `fleet` on PATH; it calls its own copied runtime. For convenience in your shell:
@@ -140,6 +142,23 @@ fleet doctor
 ### Configure
 
 Personal overrides live in `~/.config/agent-fleet/config.toml`; start from [config.example.toml](config.example.toml). No cmux workspace is pinned by default. Start the lead in the intended workspace, or pass `workspace=<ref>` explicitly.
+
+### Updating
+
+1. **Finish or stop active runs.** An update replaces the runtime that live workers report back to. Run `fleet stop <run> --all` and confirm the exits first.
+2. **Read [CHANGELOG.md](CHANGELOG.md)** for changes that need action from you, such as a config field that now behaves differently.
+3. **Update with the method you installed with:**
+
+   | Method | Command |
+   | --- | --- |
+   | skills CLI | `npx skills update fleet` |
+   | Fleet installer (npm) | `npx @codemeall/agent-fleet@preview setup --harness all` (same `--scope`/`--root` as before), or `npm update -g @codemeall/agent-fleet` then `fleet setup --harness all` |
+   | Claude Code plugin | `claude plugin marketplace update agent-fleet`, then `claude plugin update agent-fleet@agent-fleet` |
+   | Git clone | `git pull`, then `./install.sh` with the same options |
+
+4. **Restart your agent host** so it loads the new skill, then run `fleet doctor`.
+
+Your personal settings in `~/.config/agent-fleet/config.toml` live outside the skill, so updates keep them, including any extra accounts you added. Saved runs in `.fleet/runs/` stay too; use `fleet resume <run>` to continue one. Only Fleet-installer copies record their version (in `.fleet-install.json`); skills CLI and plugin copies carry no version marker.
 
 ### Uninstall
 
@@ -202,7 +221,19 @@ More: [safe first run](examples/README.md) · [agent workflow](skill/SKILL.md) �
 
 The lead host, worker CLI, provider account and model family are independent choices. For example, a Claude lead can run Codex workers, and Cursor can serve several model families. The bundled model IDs are examples that depend on your account, so check which IDs and effort levels you can actually use before assigning work.
 
-[providers.toml](skill/providers.toml) holds launch templates, login checks, shutdown keys and tiers. Optional `claude-co`, Antigravity and placeholder adapters ship disabled. Before relying on a new adapter, test authentication, model selection, the full launch → report → confirmed exit → verify loop, crash recovery, and a full-capacity review cycle. Passing `doctor` alone doesn't certify an adapter. See [provider notes](skill/references/providers.md).
+[providers.toml](skill/providers.toml) holds launch templates, login checks, shutdown keys and tiers. Optional `claude-co`, Antigravity and placeholder adapters ship disabled.
+
+### More than one subscription
+
+If you pay for a second Claude Code or Codex account, add it as its own provider so Fleet can spread workers across both quotas. Each account needs its own directory:
+
+```sh
+CLAUDE_CONFIG_DIR=~/.claude-co claude          # sign in to the second account once (/login)
+fleet account add claude-co --from claude --dir ~/.claude-co --max 2
+fleet doctor claude claude-co
+```
+
+For Codex, use `--from codex --dir ~/.codex-2` and sign in with `CODEX_HOME=~/.codex-2 codex login`. The bundled `claude-co` example uses `~/.claude-co` and only needs enabling: add `[providers.claude-co]` with `enabled = true` to your config. Put the new name in `defaults.prefer` to use it in auto routing. `doctor` fails if two Claude providers turn out to be signed in to the same account; Codex doesn't report an identity, so its accounts are told apart only by directory. A second Claude account is still Anthropic, so it can't be the cross-family reviewer. Before relying on a new adapter, test authentication, model selection, the full launch → report → confirmed exit → verify loop, crash recovery, and a full-capacity review cycle. Passing `doctor` alone doesn't certify an adapter. See [provider notes](skill/references/providers.md).
 
 ## Development
 
