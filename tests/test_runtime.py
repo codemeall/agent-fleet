@@ -191,8 +191,12 @@ class Runtime(unittest.TestCase):
         self.launch()
         self.receipt(returncode=1)
         output = self.call("resume", "demo")
+        self.assertIn("  02  pending  standard  writer:writer-model@high", output)
+        self.assertIn("blockers=[01]  ticket=02.md  files=next.txt", output)
+        self.assertIn("  - Use bounded local checks.", output)
+        full = self.call("resume", "demo", "--json")
         state = self.state()
-        self.assertIn('"02"', output)
+        self.assertIn('"02"', full)
         self.assertEqual(state["tickets"]["02"]["status"], "pending")
         self.assertEqual(state["tickets"]["02"]["blockers"], ["01"])
         self.assertEqual(state["tickets"]["02"]["files"], ["next.txt"])
@@ -289,6 +293,205 @@ class Runtime(unittest.TestCase):
             {"id": "b", "ticket": str(ticket), "provider": "writer", "files": ["b.txt"], "blockers": ["a"]}]}))
         self.assertIn("cycle", self.call("plan", "demo", "--file", str(plan), expected=1))
         self.assertEqual(self.state()["tickets"], {})
+
+
+    def test_plan_context_and_checks_complete_the_prompt(self):
+        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off")
+        ticket = self.repo / "01.md"
+        ticket.write_text("# Ticket 01\n")
+        plan = self.repo / "plan.json"
+        plan.write_text(json.dumps({"tickets": [
+            {"id": "01", "ticket": str(ticket), "files": ["owned.txt"], "provider": "writer", "tier": "standard",
+             "context": "Spec in docs/spec.md; keep the owner's edit.", "checks": ["python3 -m unittest", "read the prose"]},
+            {"id": "02", "ticket": str(ticket), "files": ["next.txt"], "provider": "writer", "tier": "standard"}]}))
+        self.call("plan", "demo", "--file", str(plan))
+        out = self.call("prompt", "demo", "01")
+        self.assertNotIn("fill before launch", out)
+        text = (self.repo / ".fleet/runs/demo/prompts/01.md").read_text()
+        self.assertIn("**Context and decisions:** Spec in docs/spec.md; keep the owner's edit.", text)
+        self.assertIn("**Checks to run:**\n\n- python3 -m unittest\n- read the prose\n", text)
+        self.assertNotIn("<!--", text)
+        self.launch("01")
+        # Without plan fields the prompt keeps LEAD comments, and launch refuses it until they are filled.
+        self.assertIn("fill before launch: context, checks", self.call("prompt", "demo", "02"))
+        self.stop_with_receipt("01")
+        self.assertIn("fill LEAD comments", self.launch("02", expected=1))
+
+    def test_plan_rejects_empty_checks(self):
+        self.call("init", "demo", "--workspace", "workspace:1")
+        ticket = self.repo / "01.md"
+        ticket.write_text("# Ticket 01\n")
+        plan = self.repo / "plan.json"
+        for checks in ("  ", [], [""], 3):
+            plan.write_text(json.dumps({"tickets": [{"id": "01", "ticket": str(ticket), "files": ["owned.txt"],
+                                                     "provider": "writer", "checks": checks}]}))
+            with self.subTest(checks=checks):
+                self.assertIn("checks must be nonempty", self.call("plan", "demo", "--file", str(plan), expected=1))
+
+    def scan(self, stall=60):
+        seen = self.repo / ".fleet/runs/demo/.seen"
+        return fleet.scan_workers(self.repo, self.state(), seen, stall)
+
+    def test_wait_wakes_once_when_a_worker_exits_without_reporting(self):
+        self.setup_run()
+        self.launch()
+        self.assertEqual(self.scan(), [])
+        self.receipt(returncode=3)
+        self.assertIn("returncode=3", self.call("wait", "demo", "--timeout", "0"))
+        self.assertIn("TIMEOUT", self.call("wait", "demo", "--timeout", "0", expected=2))
+
+    def test_wait_wakes_once_on_an_unchanged_screen_but_not_while_waiting_on_the_lead(self):
+        self.setup_run()
+        self.launch()
+        marker = self.repo / ".fleet/runs/demo/.seen/01.screen"
+        self.assertEqual(self.scan(), [])                       # first sight starts the clock
+        key, since, flagged = marker.read_text().split("|")
+        marker.write_text(f"{key}|{float(since) - 61}|{flagged}")
+        events = self.scan()
+        self.assertEqual(len(events), 1)
+        self.assertIn("STALLED 01 screen unchanged for 6", events[0])
+        self.assertEqual(self.scan(), [])                       # same screen does not wake again
+        self.assertEqual(self.scan(stall=0), [])
+        marker.unlink()
+        self.report()                                           # report handed back: idle is expected
+        self.assertEqual(self.scan(), [])
+        self.assertEqual(self.scan(), [])
+
+    def test_wait_reports_a_pane_it_cannot_read(self):
+        self.setup_run()
+        self.launch()
+        real = self.fake_cmux
+        def gone(*args, **kwargs):
+            if args[0] == "read-screen":
+                raise fleet.FleetError("surface not found")
+            return real(*args, **kwargs)
+        with patch.object(fleet, "cmux", side_effect=gone):
+            self.assertIn("UNREACHABLE 01", self.scan()[0])
+            self.assertEqual(self.scan(), [])
+
+    def test_only_wait_accepts_long_timeouts(self):
+        self.setup_run()
+        self.launch()
+        self.receipt()
+        self.assertIn("EXITED 01", self.call("wait", "demo", "--timeout", "600"))
+        self.assertIn("between 0 and 600", self.call("wait", "demo", "--timeout", "601", expected=1))
+        self.assertIn("between 0 and 60 ", self.call("stop", "demo", "01", "--timeout", "61", expected=1))
+
+    def test_braces_in_context_checks_and_rules_are_content(self):
+        (self.repo / ".fleet").mkdir()
+        (self.repo / ".fleet/rules.md").write_text("CI reads ${{ secrets.TOKEN }}; never print it.\n")
+        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off")
+        ticket = self.repo / "01.md"
+        ticket.write_text("# Ticket 01\n")
+        plan = self.repo / "plan.json"
+        plan.write_text(json.dumps({"tickets": [{"id": "01", "ticket": str(ticket), "files": ["owned.txt"],
+            "provider": "writer", "context": "Keep the Handlebars `{{title}}` helper and {{checks}} text.",
+            "checks": "npm test"}]}))
+        self.call("plan", "demo", "--file", str(plan))
+        self.call("prompt", "demo", "01")
+        text = (self.repo / ".fleet/runs/demo/prompts/01.md").read_text()
+        self.assertIn("Keep the Handlebars `{{title}}` helper and {{checks}} text.", text)
+        self.assertIn("${{ secrets.TOKEN }}", text)
+        self.assertIn("**Checks to run:** npm test", text)
+        # Known placeholders left in content still block launch, and are named.
+        self.assertIn("{{checks}}", self.launch(expected=1))
+        path = self.repo / ".fleet/runs/demo/prompts/01.md"
+        path.write_text(text.replace("{{checks}}", "checks"))
+        self.launch()
+
+    def test_exit_after_a_handed_back_report_is_the_leads_stop_not_an_event(self):
+        self.setup_run()
+        self.launch()
+        self.report()
+        self.receipt()
+        self.assertEqual(self.scan(), [])
+
+    def test_answering_a_blocked_worker_re_enables_stall_detection(self):
+        self.setup_run()
+        self.launch()
+        report = self.repo / ".fleet/runs/demo/reports/01.md"
+        report.write_text("Status: blocked\n\nWhich copy?\n")
+        marker = self.repo / ".fleet/runs/demo/.seen/01.screen"
+        self.assertEqual(self.scan(), [])
+        self.assertFalse(marker.exists())                        # waiting on the lead: not watched
+        self.call("send", "demo", "01", "Use the short copy.")
+        self.assertEqual(self.scan(), [])                        # answered: the clock starts
+        key, since, flagged = marker.read_text().split("|")
+        marker.write_text(f"{key}|{float(since) - 61}|{flagged}")
+        self.assertIn("STALLED 01", self.scan()[0])
+
+    def test_failed_stop_is_not_reported_as_a_stall(self):
+        self.setup_run()
+        self.launch()
+        with patch.object(fleet, "send_keys"):
+            self.call("stop", "demo", "01", "--timeout", "0", expected=1)
+        self.assertEqual(self.state()["workers"]["01"]["state"], "stop-failed")
+        self.assertEqual(self.scan(), [])
+
+    def test_each_unreachable_episode_wakes_once(self):
+        self.setup_run()
+        self.launch()
+        real = self.fake_cmux
+        def gone(*args, **kwargs):
+            if args[0] == "read-screen":
+                raise fleet.FleetError("timed out")
+            return real(*args, **kwargs)
+        with patch.object(fleet, "cmux", side_effect=gone):
+            self.assertIn("UNREACHABLE 01", self.scan()[0])
+        self.assertEqual(self.scan(), [])                        # readable again
+        with patch.object(fleet, "cmux", side_effect=gone):
+            self.assertIn("UNREACHABLE 01", self.scan()[0])      # the real close still wakes
+
+    def test_relaunch_with_a_new_token_resets_exit_and_screen_markers(self):
+        self.setup_run()
+        self.launch()
+        self.receipt(returncode=1)
+        self.assertIn("EXITED 01", self.scan()[0])
+        self.call("status", "demo")                             # reconcile the exit
+        self.launch()
+        self.assertEqual(self.scan(), [])
+        self.receipt(returncode=2)
+        self.assertIn("returncode=2", self.scan()[0])
+
+    def test_timeout_lists_reports_another_wait_already_consumed(self):
+        self.setup_run()
+        self.launch()
+        self.report()
+        self.assertIn("REPORT 01 [needs-verification]", self.call("wait", "demo", "--timeout", "0"))
+        out = self.call("wait", "demo", "--timeout", "0", expected=2)
+        self.assertIn("TIMEOUT", out)
+        self.assertIn("PENDING 01 [needs-verification]", out)
+
+    def test_wait_validates_stall_and_compact_resume_handles_an_empty_run(self):
+        self.call("init", "demo", "--workspace", "workspace:1")
+        self.assertIn("stall must be", self.call("wait", "demo", "--stall", "-1", expected=1))
+        out = self.call("resume", "demo")
+        self.assertIn("decisions:\n  - (none)", out)
+        self.assertIn("workers:\n  (none)", out)
+
+    def test_compact_resume_shows_pid_and_returncode_for_recovery(self):
+        self.setup_run()
+        self.launch()
+        worker = self.state()["workers"]["01"]
+        Path(worker["exit_file"]).with_suffix(".started.json").write_text(
+            json.dumps({"token": worker["token"], "wrapper_pid": 10, "child_pid": 11}))
+        self.receipt(returncode=4)
+        self.assertIn("pid=11  returncode=4", self.call("resume", "demo"))
+
+    def test_peek_keeps_the_last_lines_after_dropping_padding(self):
+        self.setup_run()
+        self.launch()
+        screen = "\n".join(f"line {n}" for n in range(30)) + "\n" * 40
+        with patch.object(fleet, "cmux", return_value=screen) as read:
+            out = self.call("peek", "demo", "01", "--lines", "5")
+        self.assertEqual(out, "line 25\nline 26\nline 27\nline 28\nline 29\n")
+        self.assertIn("60", read.call_args.args)
+
+    def test_peek_drops_blank_padding(self):
+        self.setup_run()
+        self.launch()
+        with patch.object(fleet, "cmux", return_value="\n\nAllow edit?   \n\n\n\n  1. Yes  \n\n\n"):
+            self.assertEqual(self.call("peek", "demo", "01"), "Allow edit?\n\n  1. Yes\n")
 
 
 class ProcessRunner(unittest.TestCase):

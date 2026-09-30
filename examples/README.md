@@ -20,12 +20,12 @@ fleet prompt docs-demo overview
 fleet prompt docs-demo glossary
 ```
 
-Inspect both prompts, fill the LEAD context/check fields and remove the LEAD instruction comment. Ticket scopes are disjoint: `docs/fleet-demo/overview.md` and `docs/fleet-demo/glossary.md`. Use each ticket's exact check from `.fleet/rules.md`. Then launch up to your configured capacity:
+The plan gives each ticket its `context` and `checks`, so both prompts are complete; read one to see what a worker receives. Ticket scopes are disjoint: `docs/fleet-demo/overview.md` and `docs/fleet-demo/glossary.md`. Then launch up to your configured capacity:
 
 ```sh
 fleet launch docs-demo overview codex --tier light
 fleet launch docs-demo glossary codex --tier light
-fleet wait docs-demo
+fleet wait docs-demo --timeout 540   # your host's longest command timeout, at most 600
 ```
 
 With capacity one, launch only the first; stop and verify it before launching the second. If this shell cannot find `fleet`, use the absolute installed skill's `bin/fleet` path throughout.
@@ -49,7 +49,6 @@ Repeat for `glossary`. Only when both are verified can the dependent guide start
 
 ```sh
 fleet prompt docs-demo guide
-# Inspect/fill context and checks before launching.
 fleet launch docs-demo guide codex --tier light
 ```
 
