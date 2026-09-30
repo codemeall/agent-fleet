@@ -11,7 +11,7 @@
       "name": "agent-fleet",
       "source": "./",
       "description": "Plan, route, launch and verify coding-agent workers in visible cmux tabs.",
-      "version": "0.1.0-preview.4",
+      "version": "0.1.0-preview.5",
       "license": "MIT",
       "homepage": "https://github.com/codemeall/agent-fleet"
     }
