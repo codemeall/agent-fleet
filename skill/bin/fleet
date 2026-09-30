@@ -1016,15 +1016,57 @@ def parse_models(text: str) -> dict[str, set[str] | None]:
     return out
 
 
+_LISTINGS: dict[tuple, subprocess.CompletedProcess] = {}
+
+
+def model_listing(p: dict) -> subprocess.CompletedProcess:
+    """Runs the adapter's model-list command once per command and account."""
+    sets, unsets = account_env(p)
+    key = (p["models"], tuple(sorted(sets.items())), tuple(unsets))
+    if key not in _LISTINGS:
+        _LISTINGS[key] = subprocess.run(p["models"], shell=True, capture_output=True, text=True,
+                                        timeout=60, env=child_env(p))
+    return _LISTINGS[key]
+
+
 def available_models(p: dict) -> dict[str, set[str] | None] | None:
     """The account's models and their efforts, or None when the adapter has no way to list them."""
     if not p.get("models"):
         return None
-    res = subprocess.run(p["models"], shell=True, capture_output=True, text=True, timeout=60, env=child_env(p))
+    res = model_listing(p)
     ids = parse_models(res.stdout) or parse_models(res.stdout + res.stderr)
     if res.returncode != 0 or not ids:
         raise FleetError(f"`{p['models']}` listed no models ({res.returncode})")
     return ids
+
+
+def parse_retirements(text: str) -> dict[str, tuple[str | None, str | None]]:
+    """Models a JSON catalog marks for upgrade: ID -> (replacement, retirement date)."""
+    try:
+        catalog = json.loads(text)
+    except ValueError:
+        return {}
+    out = {}
+    for m in catalog.get("models", []) if isinstance(catalog, dict) else []:
+        up = m.get("upgrade")
+        slug = m.get("slug") or m.get("id")
+        if slug and isinstance(up, dict):
+            out[slug] = (up.get("model"), (up.get("retirement_at") or "")[:10] or None)
+    return out
+
+
+def retirements(p: dict) -> dict[str, tuple[str | None, str | None]]:
+    if not p.get("models"):
+        return {}
+    try:
+        return parse_retirements(model_listing(p).stdout)
+    except subprocess.TimeoutExpired:
+        return {}
+
+
+def retirement_text(model: str, info: tuple[str | None, str | None]) -> str:
+    replacement, date = info
+    return model + (f" retires {date}" if date else " is being retired") + (f", switch to {replacement}" if replacement else "")
 
 
 def configured_model(p: dict) -> str | None:
@@ -1080,6 +1122,10 @@ def model_problems(p: dict) -> tuple[list[str], str]:
         note = "models verified" if live else "models checked against models_allow"
     if stale:
         note += "; allowed but no longer offered: " + ", ".join(stale)
+    retiring = retirements(p)
+    used = dict.fromkeys(v["model"] for v in p.get("tiers", {}).values() if v.get("model") in retiring)
+    if used:
+        note += "; RETIRING: " + "; ".join(retirement_text(m, retiring[m]) for m in used)
     return missing, note
 
 
@@ -1099,6 +1145,7 @@ def cmd_models(a, cfg):
         tiers.setdefault(v.get("model"), []).append(t)
     default = configured_model(p)
     families = allowed_models(p) or {}
+    retiring = retirements(p)
     for model, efforts in offered.items():
         if a.filter and a.filter.lower() not in model.lower():
             continue
@@ -1107,6 +1154,9 @@ def cmd_models(a, cfg):
         notes = [f"family: {family}"] if family else []
         notes += [f"efforts: {', '.join(sorted(efforts, key=rank))}"] if efforts else []
         notes += [f"tiers.{t}" for t in tiers.get(model, [])] + (["CLI default"] if model == default else [])
+        if model in retiring:
+            replacement, date = retiring[model]
+            notes.append(f"retires {date or 'soon'}" + (f" -> {replacement}" if replacement else ""))
         print(model + (f"  ({'; '.join(notes)})" if notes else ""))
     if p.get("efforts"):
         print(f"efforts (any model): {', '.join(p['efforts'])}")

@@ -329,6 +329,23 @@ class Efforts(unittest.TestCase):
                          ["tiers.heavy=opus@ultra"])
 
 
+class Retirements(unittest.TestCase):
+    CATALOG = ('{"models": [{"slug": "old", "upgrade": {"model": "new", "retirement_at": "2026-10-14T19:00:00Z"}},'
+               ' {"slug": "new", "upgrade": null}]}')
+
+    def test_catalog_upgrade_notices_are_parsed(self):
+        self.assertEqual(fleet.parse_retirements(self.CATALOG), {"old": ("new", "2026-10-14")})
+        self.assertEqual(fleet.parse_retirements("a - A"), {})
+
+    def test_doctor_warns_but_does_not_fail_on_a_retiring_tier_model(self):
+        p = {"models": f"echo '{self.CATALOG}'", "tiers": {"heavy": {"model": "old"}, "review": {"model": "old"}}}
+        missing, note = fleet.model_problems(p)
+        self.assertEqual(missing, [])
+        self.assertTrue(note.endswith("; RETIRING: old retires 2026-10-14, switch to new"))
+        p["tiers"] = {"heavy": {"model": "new"}}
+        self.assertNotIn("RETIRING", fleet.model_problems(p)[1])
+
+
 class Binary(unittest.TestCase):
     def test_env_prefix_is_skipped(self):
         self.assertEqual(fleet.first_binary("CLAUDE_CONFIG_DIR=$HOME/.claude-co claude"), "claude")
