@@ -216,6 +216,119 @@ class Accounts(unittest.TestCase):
             fleet.cmux = orig
 
 
+class Models(unittest.TestCase):
+    def test_listing_formats(self):
+        text = ("Available models\n\nauto - Auto (default)\ngrok-4.7-high - Grok 4.7  High\n"
+                "Fetching available models...\ngemini-3.1-pro-high\tGemini 3.1 Pro (High)\n")
+        self.assertEqual(list(fleet.parse_models(text)), ["auto", "grok-4.7-high", "gemini-3.1-pro-high"])
+        catalog = ('{"models": [{"slug": "sol", "visibility": "list", "supported_reasoning_levels": '
+                   '[{"effort": "low"}, {"effort": "high"}]}, {"slug": "secret", "visibility": "hide"}]}')
+        self.assertEqual(fleet.parse_models(catalog), {"sol": {"low", "high"}})
+
+    def test_catalog_efforts_are_checked(self):
+        cat = '{"models": [{"slug": "sol", "supported_reasoning_levels": [{"effort": "low"}]}]}'
+        p = {"models": f"echo '{cat}'", "tiers": {"heavy": {"model": "sol", "effort": "high"}}}
+        self.assertEqual(fleet.model_problems(p)[0], ["tiers.heavy=sol@high"])
+        p["tiers"]["heavy"]["effort"] = "low"
+        self.assertEqual(fleet.model_problems(p)[0], [])
+
+    def test_tier_models_are_checked_against_the_listing(self):
+        p = {"models": "printf 'a - A\\nb - B\\n'", "tiers": {"heavy": {"model": "a"}, "review": {"model": "z"}}}
+        self.assertEqual(fleet.model_problems(p), (["tiers.review=z"], "models NOT OFFERED: tiers.review=z"))
+        p["tiers"]["review"]["model"] = "b"
+        self.assertEqual(fleet.model_problems(p), ([], "models verified"))
+        self.assertIn("model list failed", fleet.model_problems({"models": "exit 3"})[1])
+
+    def test_unlisted_cli_shows_its_configured_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "config.toml").write_text('model = "gpt-x"\n[tui]\nmodel = "other"\n')
+            p = {"account_env": "CODEX_HOME", "env": {"CODEX_HOME": d}, "model_config": "config.toml"}
+            self.assertEqual(fleet.model_problems(p), ([], "models unverified; CLI default is gpt-x"))
+        self.assertEqual(fleet.model_problems({"model_note": "aliases"}), ([], "aliases"))
+
+    def test_doctor_fails_on_a_tier_model_the_account_lacks(self):
+        login = {"bin": "sh", "login": "true", "login_ok": "", "models": "printf 'a - A\\n'"}
+        cfg = {"providers": {"x": dict(login, login_ok="", tiers={"heavy": {"model": "a"}})}}
+        orig = fleet.cmux
+        fleet.cmux = lambda *a, **k: ""
+        try:
+            args = type("A", (), {"providers": ["x"]})()
+            cfg["providers"]["x"]["login"] = "echo ok"
+            cfg["providers"]["x"]["login_ok"] = "ok"
+            self.assertEqual(fleet.cmd_doctor(args, cfg), 0)
+            cfg["providers"]["x"]["tiers"]["heavy"]["model"] = "gone"
+            self.assertEqual(fleet.cmd_doctor(args, cfg), 1)
+        finally:
+            fleet.cmux = orig
+
+
+class AllowList(unittest.TestCase):
+    def config(self, text):
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
+            fh.write(text)
+        return fleet.load_config(Path(fh.name))
+
+    def test_user_list_replaces_shipped_one_and_extends_inherits_it(self):
+        cfg = self.config('[providers.cursor.models_allow]\n"a" = "xai"\n'
+                          '[providers.claude]\nmodels_allow = ["opus"]\n')
+        self.assertEqual(fleet.allowed_models(cfg["providers"]["cursor"]),
+                         {"a": "xai", "grok-4.7-high": "xai", "kimi-k3-high": "moonshot",
+                          "grok-4.7-high-fast": "xai", "muse-spark-1.3-max": "meta"})
+        self.assertEqual(fleet.allowed_models(cfg["providers"]["claude-co"]), {"opus": None, "sonnet": None})
+        with self.assertRaises(fleet.FleetError):
+            self.config('[providers.claude]\nmodels_allow = "opus"\n')
+
+    def test_allow_narrows_a_live_list_and_reports_stale_entries(self):
+        p = {"models": "printf 'a - A\\nb - B\\nc - C\\n'", "models_allow": {"b": "x", "gone": "y"},
+             "tiers": {"heavy": {"model": "a"}, "light": {"model": "retired"}}}
+        offered, stale = fleet.usable_models(p)
+        self.assertEqual((sorted(offered), sorted(stale)), (["a", "b"], ["gone", "retired"]))
+        missing, note = fleet.model_problems(p)
+        self.assertEqual(missing, ["tiers.light=retired"])
+        self.assertIn("no longer offered: gone", note)
+
+    def test_allow_is_the_list_when_the_cli_cannot_list(self):
+        p = {"models_allow": ["opus", "sonnet"], "tiers": {"heavy": {"model": "opus"}}}
+        self.assertEqual(fleet.model_problems(p), ([], "models checked against models_allow"))
+        fleet.check_allowed(p, "claude", "sonnet")
+        with self.assertRaises(fleet.FleetError):
+            fleet.check_allowed(p, "claude", "claude-opus-5-5")
+
+    def test_a_tier_override_is_allowed_without_editing_the_list(self):
+        cfg = self.config('[providers.cursor.tiers.heavy]\nmodel = "composer-9"\nfamily = "cursor"\n'
+                          '[providers.claude.tiers.heavy]\nmodel = "claude-opus-5-5"\n')
+        cursor, claude = cfg["providers"]["cursor"], cfg["providers"]["claude"]
+        fleet.check_allowed(cursor, "cursor", "composer-9")
+        fleet.check_allowed(claude, "claude", "claude-opus-5-5")
+        self.assertEqual(fleet.model_family(cursor, "standard", "composer-9"), "cursor")
+        p = dict(cursor, models="printf 'composer-9 - C\\n'")
+        self.assertIn("tiers.standard=kimi-k3-high", fleet.model_problems(p)[0])
+        self.assertNotIn("tiers.heavy=composer-9", fleet.model_problems(p)[0])
+
+    def test_plans_outside_the_list_are_refused_and_families_come_from_it(self):
+        p = {"models_allow": {"kimi": "moonshot"}, "family": "mixed"}
+        fleet.check_allowed(p, "cursor", "kimi")
+        with self.assertRaises(fleet.FleetError):
+            fleet.check_allowed(p, "cursor", "other")
+        fleet.check_allowed({}, "codex", "anything")
+        self.assertEqual(fleet.model_family(p, "heavy", "kimi"), "moonshot")
+
+
+class Efforts(unittest.TestCase):
+    def test_claude_effort_levels_are_checked(self):
+        cfg = fleet.load_config(Path("/nonexistent/config.toml"))
+        claude = cfg["providers"]["claude"]
+        self.assertEqual(fleet.model_problems(claude)[0], [])
+        fleet.check_effort(claude, "claude", "xhigh")
+        with self.assertRaises(fleet.FleetError):
+            fleet.check_effort(claude, "claude", "hgh")
+        fleet.check_effort(cfg["providers"]["codex"], "codex", "anything")
+        bad = dict(claude, tiers={"heavy": {"model": "opus", "effort": "ultra"}})
+        self.assertEqual(fleet.model_problems(bad)[0], ["tiers.heavy=opus@ultra"])
+        self.assertEqual(fleet.model_problems(dict(cfg["providers"]["claude-co"], tiers=bad["tiers"]))[0],
+                         ["tiers.heavy=opus@ultra"])
+
+
 class Binary(unittest.TestCase):
     def test_env_prefix_is_skipped(self):
         self.assertEqual(fleet.first_binary("CLAUDE_CONFIG_DIR=$HOME/.claude-co claude"), "claude")

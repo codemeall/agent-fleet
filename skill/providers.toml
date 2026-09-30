@@ -5,6 +5,15 @@
 # Shipped model IDs are account-dependent examples; verify them before routing.
 # quit: sequence sent to the pane; "enter" and "ctrl+c" are keys, anything else is text.
 # login: a cheap command that needs no model call; ready when its output contains login_ok.
+# models: lists the account's model IDs (a JSON catalog, or `id<TAB>name` / `id - name` lines);
+#   doctor checks every tier model, and effort where the catalog lists efforts, against it. model_config + default_home: where a CLI that cannot list
+#   models keeps its default model, shown as a hint. model_note: shown instead when neither applies.
+# models_allow: the models the lead may choose, as a list or a table of model ID = family.
+#   With a live `models` list it narrows that list; without one it is the list. Plans and
+#   review launches outside it are refused. Tier models always count as allowed.
+#   A user's models_allow replaces the shipped one.
+# efforts: effort levels the CLI accepts, for a CLI that cannot report them per model.
+#   Tier efforts, plans and review launches outside it are refused.
 # tiers: model + effort per ticket weight (see references/routing.md).
 # family: model family, used to pick a reviewer from a different family.
 # account_env: the CLI's account-directory variable. Fleet clears it unless `env` sets it,
@@ -21,6 +30,9 @@ quit = ["/exit", "enter"]
 login = "claude auth status"
 login_ok = '"loggedIn": true'
 account_env = "CLAUDE_CONFIG_DIR"
+model_note = "aliases follow the current model"
+models_allow = ["opus", "sonnet"]
+efforts = ["low", "medium", "high", "xhigh", "max"]    # from `claude --help`; per-model support is checked only at launch
 family = "anthropic"
 plugins = true
 max = 2
@@ -45,6 +57,9 @@ quit = ["/quit", "enter"]
 login = "codex login status"
 login_ok = "Logged in"
 account_env = "CODEX_HOME"
+models = "codex debug models"
+model_config = "config.toml"
+default_home = "~/.codex"
 family = "openai"
 plugins = false
 max = 2
@@ -63,6 +78,8 @@ login = "cursor-agent status"
 login_ok = "Logged in"
 models = "cursor-agent --list-models"
 family = "mixed"
+# Starter set; `fleet models cursor --all` lists the rest. Families feed cross-family review.
+models_allow = { "grok-4.7-high" = "xai", "grok-4.7-high-fast" = "xai", "kimi-k3-high" = "moonshot", "muse-spark-1.3-max" = "meta", "composer-2.5" = "cursor", "gpt-5.3-codex-high" = "openai", "claude-opus-5-thinking-high" = "anthropic", "gemini-3.7-flash-high" = "google" }
 plugins = false
 max = 2
 tiers.heavy = { model = "grok-4.7-high", family = "xai" }

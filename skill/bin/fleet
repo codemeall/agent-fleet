@@ -41,6 +41,8 @@ DEFAULTS = {
 STATUS_RE = re.compile(r"^\s*[*_`]*\s*status\s*[*_`]*\s*:\s*[*_`]*\s*(.+?)\s*[*_`]*\s*$", re.I)
 SURFACE_RE = re.compile(r"surface:\d+")
 ACCOUNT_RE = re.compile(r'"email"\s*:\s*"([^"]+)"')
+EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+MODEL_LINE_RE = re.compile(r"^\s*([A-Za-z0-9][^\s]*)(?:\t| +- )")
 
 
 class FleetError(Exception):
@@ -49,10 +51,13 @@ class FleetError(Exception):
 
 # ---------- config ----------
 
+REPLACE_KEYS = {"models_allow"}  # a user's list replaces the shipped one instead of merging into it
+
+
 def deep_merge(base: dict, over: dict) -> dict:
     out = dict(base)
     for key, value in over.items():
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
+        if key not in REPLACE_KEYS and isinstance(value, dict) and isinstance(out.get(key), dict):
             out[key] = deep_merge(out[key], value)
         else:
             out[key] = value
@@ -77,6 +82,12 @@ def load_config(user_path: Path | None = None) -> dict:
             raise FleetError(f"{name}.max must be a positive integer")
         if not isinstance(adapter.get("env", {}), dict):
             raise FleetError(f"{name}.env must be a table")
+        allow = adapter.get("models_allow", [])
+        if not (isinstance(allow, dict) and all(isinstance(v, str) for v in allow.values())
+                or isinstance(allow, list) and all(isinstance(v, str) for v in allow)):
+            raise FleetError(f"{name}.models_allow must be a list of model IDs or a table of model ID = family")
+        if not (isinstance(adapter.get("efforts", []), list) and all(isinstance(e, str) for e in adapter.get("efforts", []))):
+            raise FleetError(f"{name}.efforts must be a list of effort levels")
     return cfg
 
 
@@ -320,10 +331,36 @@ def routing_pool(routing: str, cfg: dict) -> dict | None:
     raise FleetError("routing must be auto, single:<provider> or agents=<provider>[:<model>],...")
 
 
+def allowed_models(pcfg: dict) -> dict[str, str | None] | None:
+    """The owner's curated models (ID -> family, or None when unknown), or None when not curated.
+    Tier models count as allowed: writing a tier already chooses its model."""
+    allow = pcfg.get("models_allow")
+    if allow is None:
+        return None
+    out = dict(allow) if isinstance(allow, dict) else {m: None for m in allow}
+    for t in pcfg.get("tiers", {}).values():
+        if t.get("model") and out.get(t["model"]) is None:
+            out[t["model"]] = t.get("family")
+    return out
+
+
+def check_allowed(pcfg: dict, name: str, model: str) -> None:
+    allow = allowed_models(pcfg)
+    if allow is not None and model not in allow:
+        raise FleetError(f"{name} model '{model}' is not in {name}.models_allow; "
+                         "add it to your config or choose from `fleet models " + name + "`")
+
+
+def check_effort(pcfg: dict, name: str, effort: str | None) -> None:
+    levels = pcfg.get("efforts")
+    if effort and levels and effort not in levels:
+        raise FleetError(f"{name} effort '{effort}' is not one of {', '.join(levels)} ({name}.efforts)")
+
+
 def model_family(pcfg: dict, tier: str, model: str, explicit: str | None = None) -> str | None:
     if explicit:
         return explicit
-    mapped = pcfg.get("model_families", {}).get(model)
+    mapped = pcfg.get("model_families", {}).get(model) or (allowed_models(pcfg) or {}).get(model)
     if mapped:
         return mapped
     t = pcfg.get("tiers", {}).get(tier, {})
@@ -495,6 +532,8 @@ def cmd_plan(a, cfg):
                     raise FleetError(f"{i}: model conflicts with pinned routing")
                 t["model"] = pool[t["provider"]]
         t["model"], t["effort"] = resolve_model(pcfg, t["tier"], t.get("model"), t.get("effort"))
+        check_allowed(pcfg, t["provider"], t["model"])
+        check_effort(pcfg, t["provider"], t["effort"])
         t["family"] = model_family(pcfg, t["tier"], t["model"], t.get("family"))
         ticket = Path(t["ticket"])
         if not ticket.is_absolute():
@@ -637,6 +676,8 @@ def cmd_launch(a, cfg):
         if worker(state, meta["review_of"])["state"] in ACTIVE_STATES:
             raise FleetError("stop writer before review")
         model, effort = resolve_model(pcfg, "review", a.model, a.effort)
+        check_allowed(pcfg, a.provider, model)
+        check_effort(pcfg, a.provider, effort)
         family = model_family(pcfg, "review", model, a.family)
         if not family or not t["family"] or family == t["family"]:
             raise FleetError("review requires known different model families; configure family or pass --family")
@@ -942,7 +983,12 @@ def cmd_doctor(a, cfg):
         if ready and m:
             accounts.setdefault((binary, m.group(1)), []).append(name)
         tiers = ", ".join(f"{t}={v.get('model')}" for t, v in p.get("tiers", {}).items())
-        print(f"{name:<13} {'authenticated (models unverified)' if ready else 'LOGIN CHECK FAILED'}  max={p.get('max', 2)}  {tiers}")
+        if not ready:
+            print(f"{name:<13} LOGIN CHECK FAILED  max={p.get('max', 2)}  {tiers}")
+            continue
+        missing, note = model_problems(p)
+        ok &= not missing
+        print(f"{name:<13} authenticated ({note})  max={p.get('max', 2)}  {tiers}")
     for (binary, account), same in accounts.items():
         if len(same) > 1:
             ok = False
@@ -951,6 +997,125 @@ def cmd_doctor(a, cfg):
         target = Path(d).expanduser() / "fleet"
         print(f"skill@{harness:<7} {'installed' if (target / 'SKILL.md').exists() else 'not installed'}")
     return 0 if ok else 1
+
+
+def parse_models(text: str) -> dict[str, set[str] | None]:
+    """Model IDs, with their efforts when known, from a CLI listing: a JSON catalog
+    ({"models": [{"slug", "visibility", "supported_reasoning_levels"}]}), or the first
+    column of `id<TAB>name` / `id - name` lines."""
+    try:
+        catalog = json.loads(text)
+    except ValueError:
+        return {m.group(1): None for m in map(MODEL_LINE_RE.match, text.splitlines()) if m}
+    out = {}
+    for m in catalog.get("models", []) if isinstance(catalog, dict) else []:
+        slug = m.get("slug") or m.get("id")
+        if slug and m.get("visibility", "list") != "hide":
+            levels = m.get("supported_reasoning_levels")
+            out[slug] = {lv["effort"] for lv in levels if "effort" in lv} if levels else None
+    return out
+
+
+def available_models(p: dict) -> dict[str, set[str] | None] | None:
+    """The account's models and their efforts, or None when the adapter has no way to list them."""
+    if not p.get("models"):
+        return None
+    res = subprocess.run(p["models"], shell=True, capture_output=True, text=True, timeout=60, env=child_env(p))
+    ids = parse_models(res.stdout) or parse_models(res.stdout + res.stderr)
+    if res.returncode != 0 or not ids:
+        raise FleetError(f"`{p['models']}` listed no models ({res.returncode})")
+    return ids
+
+
+def configured_model(p: dict) -> str | None:
+    """The CLI's own default model from its config file, a hint when it cannot list models."""
+    if not p.get("model_config"):
+        return None
+    home = account_env(p)[0].get(p.get("account_env", "")) or p.get("default_home", "~")
+    try:
+        with open(Path(home).expanduser() / p["model_config"], "rb") as fh:
+            model = tomllib.load(fh).get("model")
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    return model if isinstance(model, str) else None
+
+
+def usable_models(p: dict) -> tuple[dict[str, set[str] | None] | None, list[str]]:
+    """Models the lead may choose: the account's live list narrowed to models_allow, or models_allow
+    alone when the CLI cannot list. Also returns allowed models the account no longer offers."""
+    live, allow = available_models(p), allowed_models(p)
+    if allow is None:
+        return live, []
+    if live is None:
+        return {m: None for m in allow}, []
+    return {m: live[m] for m in allow if m in live}, [m for m in allow if m not in live]
+
+
+def model_problems(p: dict) -> tuple[list[str], str]:
+    """Tier models outside the usable list, plus a one-line note on how far models were checked."""
+    levels = p.get("efforts")
+    bad_effort = [f"tiers.{t}={v['model']}@{v['effort']}" for t, v in p.get("tiers", {}).items()
+                  if levels and v.get("effort") and v["effort"] not in levels]
+    if bad_effort:
+        return bad_effort, f"efforts NOT SUPPORTED: {', '.join(bad_effort)} (allowed: {', '.join(levels)})"
+    try:
+        offered, stale = usable_models(p)
+    except (FleetError, subprocess.TimeoutExpired) as e:
+        return [], f"model list failed: {e}"
+    if offered is None:
+        hint = configured_model(p)
+        note = p.get("model_note") or "models unverified"
+        return [], note + (f"; CLI default is {hint}" if hint else "")
+    live = p.get("models") is not None
+    missing = []
+    for t, v in p.get("tiers", {}).items():
+        model, effort = v.get("model"), v.get("effort")
+        if model and model not in offered:
+            missing.append(f"tiers.{t}={model}")
+        elif model and effort and offered[model] is not None and effort not in offered[model]:
+            missing.append(f"tiers.{t}={model}@{effort}")
+    if missing:
+        note = ("models NOT OFFERED: " if live else "models NOT ALLOWED: ") + ", ".join(missing)
+    else:
+        note = "models verified" if live else "models checked against models_allow"
+    if stale:
+        note += "; allowed but no longer offered: " + ", ".join(stale)
+    return missing, note
+
+
+def cmd_models(a, cfg):
+    p = provider(cfg, a.provider)
+    offered, stale = (available_models(p), []) if a.all else usable_models(p)
+    if offered is None:
+        hint = configured_model(p)
+        used = sorted({f"{v.get('model')}@{v.get('effort')}" if v.get("effort") else v.get("model")
+                       for v in p.get("tiers", {}).values() if v.get("model")})
+        raise FleetError(f"{a.provider} cannot list models: "
+                         + (p.get("model_note") or "check the CLI's documentation")
+                         + (f"; its CLI default is {hint}" if hint else "")
+                         + (f"; tiers use {', '.join(used)}" if used else ""))
+    tiers: dict[str, list[str]] = {}
+    for t, v in p.get("tiers", {}).items():
+        tiers.setdefault(v.get("model"), []).append(t)
+    default = configured_model(p)
+    families = allowed_models(p) or {}
+    for model, efforts in offered.items():
+        if a.filter and a.filter.lower() not in model.lower():
+            continue
+        rank = lambda e: (EFFORT_ORDER.index(e) if e in EFFORT_ORDER else len(EFFORT_ORDER), e)
+        family = p.get("model_families", {}).get(model) or families.get(model)
+        notes = [f"family: {family}"] if family else []
+        notes += [f"efforts: {', '.join(sorted(efforts, key=rank))}"] if efforts else []
+        notes += [f"tiers.{t}" for t in tiers.get(model, [])] + (["CLI default"] if model == default else [])
+        print(model + (f"  ({'; '.join(notes)})" if notes else ""))
+    if p.get("efforts"):
+        print(f"efforts (any model): {', '.join(p['efforts'])}")
+    for model in stale:
+        print(f"note: {model} is in models_allow but this account no longer offers it")
+    if default and default not in offered:
+        print(f"note: the CLI default {default} is not in this list")
+    if allowed_models(p) is not None and not a.all and p.get("models"):
+        print(f"(narrowed by {a.provider}.models_allow; --all shows everything the account offers)")
 
 
 def skill_dirs(cfg: dict) -> dict[str, str]:
@@ -1017,6 +1182,12 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("providers", help="print the merged provider config")
     s.set_defaults(fn=cmd_providers)
+
+    s = sub.add_parser("models", help="list the model IDs a provider's account offers")
+    s.add_argument("provider")
+    s.add_argument("filter", nargs="?", help="only IDs containing this text")
+    s.add_argument("--all", action="store_true", help="ignore models_allow and show the account's full list")
+    s.set_defaults(fn=cmd_models)
 
     s = sub.add_parser("account", help="manage extra subscriptions of an existing provider")
     acct = s.add_subparsers(dest="action", required=True)

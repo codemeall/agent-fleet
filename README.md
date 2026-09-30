@@ -137,7 +137,32 @@ fleet doctor
 fleet doctor
 ```
 
-`doctor` checks cmux connectivity, worker executables and login signals. It cannot guarantee model access or a successful worker session. Launch one small ticket first (the [documentation-only example](examples/README.md) is a safe choice).
+`doctor` checks cmux connectivity, worker executables and login signals, and checks each tier model against the account's model list where the CLI offers one (Codex, Cursor, Antigravity). It cannot guarantee model access or a successful worker session.
+
+When a newer model ships, you don't need a Fleet update. List what your account offers and point a tier at it in your config:
+
+```sh
+fleet models cursor grok        # IDs containing "grok"
+```
+
+```toml
+[providers.cursor.tiers.heavy]
+model = "grok-4.8-high"
+family = "xai"
+```
+
+To limit which models the lead may choose, set `models_allow`. Plans outside it are refused; tier models always count as allowed, so the override above needs no list edit:
+
+```toml
+[providers.cursor.models_allow]     # replaces the shipped starter set
+"grok-4.7-high" = "xai"
+"kimi-k3-high" = "moonshot"
+
+[providers.claude]
+models_allow = ["opus", "sonnet", "fable"]
+```
+
+Codex's list comes from its `codex debug models` catalog and includes each model's effort levels. Claude's `opus` and `sonnet` aliases already follow the current model. Launch one small ticket first (the [documentation-only example](examples/README.md) is a safe choice).
 
 ### Configure
 
