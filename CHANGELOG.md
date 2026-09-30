@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.4
 
 Cuts the lead's token use during long runs without loosening any verification gate.
 
