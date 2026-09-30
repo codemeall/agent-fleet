@@ -736,7 +736,7 @@ def cmd_launch(a, cfg):
         family=family, tier=a.tier, surface="unknown", state="launching", command=command,
         token=token, exit_file=str(exit_file), launched=time.strftime("%Y-%m-%dT%H:%M:%S"))
     save_run(repo, a.run, state)
-    if kind == "replace":  # a new surface in the pane, then its finished workers' surfaces close below
+    if kind in ("replace", "tab"):  # a new surface in the pane; a replaced pane's old surfaces close below
         args = ["new-surface", "--workspace", state["workspace"], "--pane", target,
                 "--working-directory", str(repo), "--command", wrapped, "--focus", "false"]
     else:  # new-split has no --working-directory
@@ -765,11 +765,12 @@ def cmd_launch(a, cfg):
     print(f"{a.id}: {label} on {w['surface']}")
 
 
-def pick_pane(panes: list[dict], retired: set[str], lead_pane: str | None,
+def pick_pane(panes: list[dict], retired: set[str], busy: set[str], lead_pane: str | None,
               want: str | None = None) -> tuple[str, str, str | None]:
-    """Where a new worker goes; workers never stack as tabs. Below MAX_PANES: ("split", surface, direction)
-    splits the wanted (else the largest) pane along its long side. At MAX_PANES: ("replace", pane, None) for
-    the wanted (else the first) pane, other than the lead's, whose every surface is a finished worker."""
+    """Where a new worker goes. Below MAX_PANES: ("split", surface, direction) splits the wanted (else the
+    largest) pane along its long side. At MAX_PANES, among the wanted (else every) pane other than the lead's:
+    ("replace", pane, None) for one whose every surface is a finished worker, else ("tab", pane, None) for an
+    idle one, with no live worker."""
     chosen = [p for p in panes if p["ref"] == want] if want else panes
     if not chosen:
         raise FleetError(f"no pane {want} in this workspace")
@@ -780,11 +781,15 @@ def pick_pane(panes: list[dict], retired: set[str], lead_pane: str | None,
         big = max(chosen, key=lambda p: size(p)[0] * size(p)[1])
         width, height = size(big)
         return "split", big.get("selected_surface_ref") or big["surface_refs"][0], "right" if width >= height else "down"
+    chosen = [p for p in chosen if p["ref"] != lead_pane]
     for p in chosen:
         surfaces = set(p.get("surface_refs", []))
-        if p["ref"] != lead_pane and surfaces and surfaces <= retired:
+        if surfaces and surfaces <= retired:
             return "replace", p["ref"], None
-    where = f"pane {want} holds a live or non-worker surface" if want else "no pane holds only finished workers"
+    for p in chosen:
+        if not busy & set(p.get("surface_refs", [])):
+            return "tab", p["ref"], None
+    where = f"pane {want} is the lead's or has a live worker" if want else "every pane has a live worker"
     raise FleetError(f"workspace has {len(panes)} panes (max {MAX_PANES}) and {where}; "
                      "stop a worker or close a pane first")
 
@@ -795,10 +800,11 @@ def worker_placement(state: dict, want: str | None) -> tuple[str, str, str | Non
     if not panes:
         raise FleetError(f"workspace {state['workspace']} has no panes")
     retired = {w["surface"] for w in state["workers"].values() if w.get("state") in RETIRED_STATES}
+    busy = {w["surface"] for w in state["workers"].values() if w.get("state") in ACTIVE_STATES}
     lead_pane = None
     if os.environ.get("CMUX_SURFACE_ID"):
         lead_pane = json.loads(cmux("--json", "identify")).get("caller", {}).get("pane_ref")
-    kind, target, direction = pick_pane(panes, retired, lead_pane, want)
+    kind, target, direction = pick_pane(panes, retired, busy, lead_pane, want)
     old = next(p.get("surface_refs", []) for p in panes if p["ref"] == target) if kind == "replace" else []
     return kind, target, direction, list(old)
 
@@ -1474,7 +1480,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_prompt)
 
-    s = sub.add_parser("launch", help=f"launch a worker in a new cmux pane; at {MAX_PANES} panes, replace a finished worker's pane")
+    s = sub.add_parser("launch", help=f"launch a worker in a new cmux pane; at {MAX_PANES} panes, replace a finished worker's pane "
+                       "or add a tab to an idle one")
     s.add_argument("run")
     s.add_argument("id")
     s.add_argument("provider")
@@ -1482,7 +1489,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--model")
     s.add_argument("--effort")
     s.add_argument("--family", help="known family for an account-specific model override")
-    s.add_argument("--pane", help="split this pane (or, at the pane limit, replace it) instead of choosing one")
+    s.add_argument("--pane", help="split this pane (at the pane limit, replace it or add a tab) instead of choosing one")
     s.set_defaults(fn=cmd_launch)
 
     s = sub.add_parser("send", help="type a message into a worker's pane and press enter")

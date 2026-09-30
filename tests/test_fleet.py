@@ -268,30 +268,33 @@ class PanePlacement(unittest.TestCase):
 
     def test_splits_the_largest_pane_along_its_long_side_below_the_limit(self):
         panes = [self.pane("pane:1", ["s:lead"], 1200, 900), self.pane("pane:2", ["s:w1"], 600, 900)]
-        self.assertEqual(fleet.pick_pane(panes[:1], set(), "pane:1"), ("split", "s:lead", "right"))
+        self.assertEqual(fleet.pick_pane(panes[:1], set(), set(), "pane:1"), ("split", "s:lead", "right"))
         # A pane with only a finished worker or an idle shell is still split, never given another tab.
-        self.assertEqual(fleet.pick_pane(panes, {"s:w1"}, "pane:1"), ("split", "s:lead", "right"))
+        self.assertEqual(fleet.pick_pane(panes, {"s:w1"}, set(), "pane:1"), ("split", "s:lead", "right"))
         tall = [self.pane("pane:1", ["s:lead"], 600, 900), self.pane("pane:2", ["s:w1", "s:w2"], 500, 900)]
         tall[1]["selected_surface_ref"] = "s:w2"
-        self.assertEqual(fleet.pick_pane(tall, set(), "pane:1"), ("split", "s:lead", "down"))
-        self.assertEqual(fleet.pick_pane(tall, set(), "pane:1", "pane:2"), ("split", "s:w2", "down"))
+        self.assertEqual(fleet.pick_pane(tall, set(), set(), "pane:1"), ("split", "s:lead", "down"))
+        self.assertEqual(fleet.pick_pane(tall, set(), set(), "pane:1", "pane:2"), ("split", "s:w2", "down"))
 
     def full(self):
-        return [self.pane("pane:1", ["s:lead"]), self.pane("pane:2", ["s:sh"]), self.pane("pane:3", ["s:live"]),
+        return [self.pane("pane:1", ["s:lead"]), self.pane("pane:2", ["s:live"]), self.pane("pane:3", ["s:sh"]),
                 self.pane("pane:4", ["s:done", "s:sh2"]), self.pane("pane:5", ["s:old", "s:done2"])] + \
-               [self.pane(f"pane:{n}", [f"s:{n}"]) for n in range(6, 9)]
+               [self.pane(f"pane:{n}", [f"s:live{n}"]) for n in range(6, 9)]
 
-    def test_at_the_limit_replaces_a_pane_holding_only_finished_workers(self):
-        retired = {"s:done", "s:old", "s:done2", "s:lead"}
-        self.assertEqual(fleet.pick_pane(self.full(), retired, "pane:1"), ("replace", "pane:5", None))
-        self.assertEqual(fleet.pick_pane(self.full(), retired, "pane:1", "pane:5"), ("replace", "pane:5", None))
-        for want in ("pane:1", "pane:2", "pane:4"):  # the lead's, an idle shell, a shell beside a finished worker
+    def test_at_the_limit_replaces_a_finished_workers_pane_before_adding_a_tab(self):
+        retired, busy = {"s:done", "s:old", "s:done2", "s:lead"}, {"s:live", "s:live6", "s:live7", "s:live8"}
+        self.assertEqual(fleet.pick_pane(self.full(), retired, busy, "pane:1"), ("replace", "pane:5", None))
+        self.assertEqual(fleet.pick_pane(self.full(), retired, busy, "pane:1", "pane:4"), ("tab", "pane:4", None))
+        # Nothing to replace: a tab goes in the first idle pane, never the lead's.
+        self.assertEqual(fleet.pick_pane(self.full(), {"s:done"}, busy, "pane:1"), ("tab", "pane:3", None))
+        for want in ("pane:1", "pane:2"):  # the lead's, a live worker's
             with self.assertRaisesRegex(fleet.FleetError, "max 8"):
-                fleet.pick_pane(self.full(), retired, "pane:1", want)
-        with self.assertRaisesRegex(fleet.FleetError, "no pane holds only finished workers"):
-            fleet.pick_pane(self.full(), {"s:done"}, "pane:1")
+                fleet.pick_pane(self.full(), retired, busy, "pane:1", want)
+        live = busy | {"s:sh", "s:sh2", "s:old"}
+        with self.assertRaisesRegex(fleet.FleetError, "every pane has a live worker"):
+            fleet.pick_pane(self.full(), set(), live, "pane:1")
         with self.assertRaisesRegex(fleet.FleetError, "no pane pane:9"):
-            fleet.pick_pane(self.full(), retired, "pane:1", "pane:9")
+            fleet.pick_pane(self.full(), retired, busy, "pane:1", "pane:9")
 
 
 class AllowList(unittest.TestCase):

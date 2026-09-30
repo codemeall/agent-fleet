@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- `fleet launch` never adds a worker as a tab in an existing pane. It splits the largest pane (along its long side) until the workspace has 8 panes; at 8 it replaces a pane, other than the lead's, that holds only finished workers (exit confirmed), opening the new worker there and closing their surfaces. With 8 panes and none replaceable it refuses before recording the worker. `--pane` now chooses the pane to split or replace instead of adding a tab.
+- `fleet launch` opens each worker in a new pane instead of a tab in an existing one, splitting the largest pane (along its long side) until the workspace has 8 panes. At 8 it replaces a pane, other than the lead's, that holds only finished workers (exit confirmed), opening the new worker there and closing their surfaces; failing that, it adds a tab to an idle pane (no live worker). When every other pane has a live worker it refuses before recording the worker. `--pane` now chooses the pane to split, replace or add a tab to.
 
 ## 0.1.0-preview.5
 

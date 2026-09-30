@@ -396,13 +396,28 @@ class Runtime(unittest.TestCase):
         workers = self.state()["workers"]
         self.assertEqual((workers["01"]["state"], workers["02"]["state"]), ("closed", "running"))
 
-    def test_at_eight_panes_launch_refuses_when_no_pane_can_be_replaced(self):
+    def test_at_eight_panes_launch_adds_a_tab_to_an_idle_pane_when_none_can_be_replaced(self):
         self.setup_run()
         self.fill_workspace("surface:user")
-        out = self.launch(expected=1)
-        self.assertIn("max 8", out)
+        with patch.dict(fleet.os.environ, {"CMUX_SURFACE_ID": "lead"}):
+            self.launch()
+        new = [c for c in self.cmux_calls if c[0] in ("new-surface", "new-split", "close-surface")]
+        self.assertEqual([c[0] for c in new], ["new-surface"])
+        self.assertEqual(new[0][3:5], ("--pane", "pane:2"))
+        self.assertEqual(self.state()["workers"]["01"]["state"], "running")
+
+    def test_at_eight_panes_launch_refuses_when_every_pane_has_a_live_worker(self):
+        self.cfg["defaults"]["max_parallel"] = 2
+        self.cfg["providers"]["writer"]["max"] = 2
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"]}, {"id": "02", "files": ["next.txt"]}])
+        self.launch()
+        self.panes += [{"ref": f"pane:{n}", "surface_refs": ["surface:1"]} for n in range(2, 9)]
+        self.cmux_calls.clear()
+        with patch.dict(fleet.os.environ, {"CMUX_SURFACE_ID": "lead"}):
+            out = self.launch("02", expected=1)
+        self.assertIn("every pane has a live worker", out)
         self.assertFalse([c for c in self.cmux_calls if c[0] in ("new-surface", "new-split")])
-        self.assertNotIn("01", self.state()["workers"])
+        self.assertNotIn("02", self.state()["workers"])
 
     def test_explicit_pane_is_split_rather_than_given_a_tab(self):
         self.setup_run()
