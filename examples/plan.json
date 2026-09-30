@@ -1,8 +1,14 @@
 {
   "tickets": [
-    {"id":"overview","ticket":"examples/tickets/overview.md","files":["docs/fleet-demo/overview.md"],"blockers":[],"provider":"codex","tier":"light"},
-    {"id":"glossary","ticket":"examples/tickets/glossary.md","files":["docs/fleet-demo/glossary.md"],"blockers":[],"provider":"codex","tier":"light"},
-    {"id":"guide","ticket":"examples/tickets/guide.md","files":["docs/fleet-demo/guide.md"],"blockers":["overview","glossary"],"provider":"codex","tier":"light"}
+    {"id":"overview","ticket":"examples/tickets/overview.md","files":["docs/fleet-demo/overview.md"],"blockers":[],"provider":"codex","tier":"light",
+     "context":"Agreed spec in examples/README.md: short Markdown overview of the lead/worker relationship, relative links only. No glossary or ADR exists.",
+     "checks":["From the repository root, run the Overview check in .fleet/rules.md.","Manual prose review against every acceptance criterion; the check alone is not sufficient."]},
+    {"id":"glossary","ticket":"examples/tickets/glossary.md","files":["docs/fleet-demo/glossary.md"],"blockers":[],"provider":"codex","tier":"light",
+     "context":"Agreed spec in examples/README.md: short Markdown glossary of Fleet terms, relative links only. No glossary or ADR exists.",
+     "checks":["From the repository root, run the Glossary check in .fleet/rules.md.","Manual prose review against every acceptance criterion; the check alone is not sufficient."]},
+    {"id":"guide","ticket":"examples/tickets/guide.md","files":["docs/fleet-demo/guide.md"],"blockers":["overview","glossary"],"provider":"codex","tier":"light",
+     "context":"Agreed spec in examples/README.md: a guide linking the verified overview.md and glossary.md with relative links. Do not edit either file.",
+     "checks":["From the repository root, run the Guide check in .fleet/rules.md.","Manual prose review against every acceptance criterion; the check alone is not sufficient."]}
   ],
   "decisions": [
     "Documentation-only example; no package installs, network, builds or servers.",

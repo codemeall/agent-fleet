@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+Cuts the lead's token use during long runs without loosening any verification gate.
+
+- `fleet wait` accepts up to 600 seconds (other commands keep their 60-second limit). Besides reports it now wakes when a worker exits without reporting (`EXITED`), when a working worker's screen stays unchanged for `--stall` seconds (`STALLED`, default 180, catching permission, login and trust prompts) and when its pane can no longer be read (`UNREACHABLE`). Each event wakes the lead once. `wait` still saves no run state.
+- Plans accept per-ticket `context` and `checks` (text or a list). `fleet prompt` fills them in, so the lead no longer rereads and edits every prompt; missing fields stay `LEAD` comments that `launch` refuses, and `prompt` names them. Empty values are rejected.
+- `fleet resume` prints one line per ticket plus decisions, workers and the notes path; `--json` prints the full records.
+- `fleet peek` shows 20 lines by default instead of 40 and drops blank padding.
+- Skill: wait with the host's longest command timeout and do not peek on every timeout; peek early after launch instead; run combined-tree checks before verifying a ticket others depend on and at completion rather than after every ticket; a fresh lead session may continue a long run from `fleet resume`. `routing.md` points to the skill instead of repeating its review and recovery steps.
+- The example plan carries `context` and `checks`, so its prompts need no editing.
+
 ## 0.1.0-preview.2
 
 - Add extra subscriptions as providers: `extends` reuses an adapter, `env` points it at its own account directory, and `fleet account add` writes the block to the user config.

@@ -31,10 +31,10 @@ Family follows the resolved model, not the CLI. Use exact model-family mappings 
 
 If the allowed pool cannot provide a known different-family reviewer, tell the owner before implementation. Expand the pool under their routing instruction or obtain an explicit change to `review=off`; never silently downgrade the review policy. In particular, a second Claude account remains Anthropic, while two Cursor models may belong to different families.
 
-Stop the writer before generating its scoped diff. Give the reviewer a separate ID, the original ticket and rules, that exact immutable diff, and only its report as a writable path. Review-only is a prompt contract in a shared checkout, not a security sandbox. Inspect for unauthorized changes. Stop and verify the reviewer before verifying the writer; dependents remain blocked throughout. If the writer's diff changes, redo review against the new diff.
+The review sequence is in the skill's step 5. Review-only is a prompt contract in a shared checkout, not a security sandbox: inspect for unauthorized changes. Dependents remain blocked until the writer is verified.
 
 ## Failures and plan changes
 
-Before any worker launches, record an unavailable adapter and any owner-authorized substitution in the plan's decisions and update assignments explicitly. After the first launch the plan is immutable: use a new follow-up run for routing or scope changes, stopping all overlapping workers first and carrying forward pending dependencies, partial edits and context. A same-assignment repair may be relaunched only after the old process has exited. A missing tab is insufficient proof. Use `resume` to reconcile receipts, normal `stop` where possible, and evidence-backed `recover` only after independently verifying the process is gone.
+Before any worker launches, record an unavailable adapter and any owner-authorized substitution in the plan's decisions and update assignments explicitly. After the first launch, follow the skill's rules for follow-up runs, repairs and recovery (steps 5 and 6).
 
 Never change providers to circumvent a permission denial. Work requiring installs, secrets, network access or infrastructure changes falls outside the default worker contract; isolate and ask the owner to handle or explicitly authorize it separately.

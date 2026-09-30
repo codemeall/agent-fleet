@@ -2,12 +2,11 @@
 
 Read the local ticket: `{{ticket}}`.
 
-<!-- LEAD: fill all fields before launch; preserve the exact saved scope. -->
 **Files in scope:** {{files}}
 
-**Context and decisions:** <!-- agreed spec and testing decisions; actual glossary/ADR paths; existing edits to preserve -->
+**Context and decisions:**{{context}}
 
-**Checks to run:** <!-- exact bounded commands, working directory and success criteria; say explicitly if manual prose review is sufficient -->
+**Checks to run:**{{checks}}
 
 ## How to work
 

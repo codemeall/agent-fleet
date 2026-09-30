@@ -42,6 +42,11 @@ STATUS_RE = re.compile(r"^\s*[*_`]*\s*status\s*[*_`]*\s*:\s*[*_`]*\s*(.+?)\s*[*_
 SURFACE_RE = re.compile(r"surface:\d+")
 ACCOUNT_RE = re.compile(r'"email"\s*:\s*"([^"]+)"')
 EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+PROMPT_FIELDS = {  # optional per-ticket plan fields that complete a worker prompt
+    "context": "agreed spec and testing decisions; actual glossary/ADR paths; existing edits to preserve",
+    "checks": "exact bounded commands, working directory and success criteria; say explicitly if manual prose review is sufficient",
+}
+WAIT_MAX = 600  # Claude Code's longest foreground command timeout; other hosts may allow less
 MODEL_LINE_RE = re.compile(r"^\s*([A-Za-z0-9][^\s]*)(?:\t| +- )")
 
 
@@ -547,6 +552,15 @@ def cmd_plan(a, cfg):
         t["blockers"] = t.get("blockers", [])
         if not isinstance(t["blockers"], list):
             raise FleetError(f"{i}: blockers must be a list")
+        for key in ("context", "checks"):
+            if key not in t:
+                continue
+            value = t[key]
+            if isinstance(value, list) and all(isinstance(x, str) and x.strip() for x in value):
+                value = "\n".join(f"- {x.strip()}" for x in value)
+            if not isinstance(value, str) or not value.strip():
+                raise FleetError(f"{i}: {key} must be nonempty text or a list of nonempty strings; omit it to fill the prompt by hand")
+            t[key] = value.strip()
         t["status"] = "pending"
         t["review_required"] = state["options"]["review"] == "cross-all" or (state["options"]["review"] == "cross-heavy" and t["tier"] == "heavy")
         tickets[i] = t
@@ -584,6 +598,7 @@ def cmd_prompt(a, cfg):
     if a.id in state["workers"] and state["workers"][a.id]["state"] in ACTIVE_STATES:
         raise FleetError("cannot replace a live worker prompt")
     review_of = a.review_of
+    lead_fields = {}
     if review_of:
         writer = worker(state, review_of)
         if writer.get("role") != "implementation" or writer["state"] in ACTIVE_STATES:
@@ -607,13 +622,17 @@ def cmd_prompt(a, cfg):
         t = state["tickets"][a.id]
         meta = {"role": "implementation"}
         template = "ticket-prompt.md"
+        # Plan-supplied fields make the prompt complete; missing ones stay LEAD comments, which launch refuses.
+        for key, hint in PROMPT_FIELDS.items():
+            value = t.get(key)
+            lead_fields[key] = ("\n\n" if value and "\n" in value else " ") + (value or f"<!-- LEAD: {hint} -->")
     ticket = a.ticket or t["ticket"]
     if str(Path(ticket).resolve()) != t["ticket"]:
         raise FleetError("ticket differs from saved plan")
     fields = {"id": a.id, "ticket": t["ticket"], "report": str(d / "reports" / f"{a.id}.md"),
               "repo": str(repo), "files": ", ".join(t["files"]),
               "diff": str(d / "snapshots" / f"{a.id}.diff") if review_of else "",
-              "review_of": review_of or ""}
+              "review_of": review_of or "", **lead_fields}
     parts = [] if review_of else [(SKILL_DIR / "templates" / "preamble.md").read_text()]
     rules = repo / ".fleet" / "rules.md"
     if rules.exists():
@@ -623,10 +642,13 @@ def cmd_prompt(a, cfg):
     text = "\n\n".join(p.strip() for p in parts) + "\n"
     for k, v in fields.items():
         text = text.replace("{{" + k + "}}", v)
+    todo = [k for k, v in lead_fields.items() if "<!-- LEAD:" in v]
     out.write_text(text)
     state["prompts"][a.id] = meta
     save_run(repo, a.run, state)
     print(out)
+    if todo:
+        print(f"fill before launch: {', '.join(todo)} (or add them to the plan)")
 
 
 def cmd_launch(a, cfg):
@@ -740,7 +762,10 @@ def cmd_peek(a, cfg):
     repo = repo_root()
     state = load_run(repo, a.run)
     w = worker(state, a.id)
-    print(cmux("read-screen", "--workspace", state["workspace"], "--surface", w["surface"], "--lines", str(a.lines)))
+    screen = cmux("read-screen", "--workspace", state["workspace"], "--surface", w["surface"], "--lines", str(a.lines))
+    # Trailing spaces and runs of blank lines are TUI padding: they cost the lead tokens, not information.
+    text = "\n".join(line.rstrip() for line in screen.splitlines())
+    print(re.sub(r"\n{3,}", "\n\n", text).strip("\n"))
 
 
 def report_rows(repo: Path, state: dict) -> list[dict]:
@@ -796,6 +821,57 @@ def scan_reports(reports: Path, seen: Path, statuses: tuple[str, ...] | None) ->
     return fresh
 
 
+def mark_once(seen: Path, name: str, key: str) -> bool:
+    """True the first time `key` is recorded under `name`, so each event wakes the lead once."""
+    marker = seen / name
+    if marker.exists() and marker.read_text() == key:
+        return False
+    marker.write_text(key)
+    return True
+
+
+def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
+    """Read-only checks for live workers that cannot report: exited, tab gone, or a screen that stopped changing.
+
+    wait holds no lock, so this never saves run state; stop, status or resume reconcile it.
+    """
+    events = []
+    reports = run_dir(repo, state["run"]) / "reports"
+    for w in active(state):
+        i, token = w["id"], w.get("token", "")
+        receipt = contained(run_dir(repo, state["run"]), Path(w["exit_file"])) if w.get("exit_file") else None
+        if receipt and receipt.exists():
+            data = json.loads(receipt.read_text())
+            if data.get("token") == token and mark_once(seen, f"{i}.exit", token):
+                events.append(f"EXITED {i} returncode={data.get('returncode')}; inspect its report, then fleet status {state['run']}")
+            continue
+        if not stall or w.get("surface", "unknown") == "unknown":
+            continue
+        f = reports / f"{i}.md"
+        if f.exists() and (parse_status(f.read_text()) or "").lower() in WAKE_STATUSES + ("verified",):
+            continue  # waiting on the lead is not a stall
+        try:
+            screen = cmux("read-screen", "--workspace", state["workspace"], "--surface", w["surface"], "--lines", "40")
+        except (FleetError, OSError, subprocess.TimeoutExpired) as e:
+            if mark_once(seen, f"{i}.gone", token):
+                events.append(f"UNREACHABLE {i} {w['surface']}: {str(e).strip()[:200]}; the tab may be closed")
+            continue
+        marker = seen / f"{i}.screen"
+        now, h = time.time(), digest(screen.encode())
+        try:
+            old_hash, since, flagged = marker.read_text().split("|")
+            since = float(since)
+        except (FileNotFoundError, ValueError):
+            old_hash, since, flagged = "", now, "0"
+        if old_hash != f"{token}:{h}":
+            marker.write_text(f"{token}:{h}|{now}|0")
+        elif flagged == "0" and now - since >= stall:
+            marker.write_text(f"{token}:{h}|{since}|1")
+            events.append(f"STALLED {i} screen unchanged for {int(now - since)}s; fleet peek {state['run']} {i} "
+                          "(permission, login or trust prompt?)")
+    return events
+
+
 def cmd_wait(a, cfg):
     repo = repo_root()
     load_run(repo, a.run)
@@ -806,12 +882,16 @@ def cmd_wait(a, cfg):
     deadline = time.time() + a.timeout
     while True:
         fresh = scan_reports(d / "reports", seen, statuses)
-        if fresh:
+        # Reload each pass: the lead may launch or stop workers while a background wait runs.
+        events = scan_workers(repo, load_run(repo, a.run), seen, a.stall)
+        if fresh or events:
             for i, status, f in fresh:
                 print(f"REPORT {i} [{status}] {f}")
+            for line in events:
+                print(line)
             return 0
         if time.time() >= deadline:
-            print(f"TIMEOUT no new report in {a.timeout}s; check panes: fleet status {a.run}")
+            print(f"TIMEOUT nothing new in {a.timeout}s; wait again")
             return 2
         time.sleep(min(a.interval, max(0, deadline - time.time())))
 
@@ -854,9 +934,33 @@ def cmd_resume(a, cfg):
     state = load_run(repo, a.run)
     reconcile(repo, state)
     save_run(repo, a.run, state)
-    print(json.dumps({"run": state["run"], "workspace": state["workspace"], "options": state["options"],
-                      "tickets": state["tickets"], "decisions": state["decisions"],
-                      "workers": report_rows(repo, state)}, indent=2))
+    rows = report_rows(repo, state)
+    notes = run_dir(repo, a.run) / "notes.md"
+    if a.json:
+        print(json.dumps({"run": state["run"], "workspace": state["workspace"], "options": state["options"],
+                          "tickets": state["tickets"], "decisions": state["decisions"], "workers": rows,
+                          "notes": str(notes) if notes.exists() else None}, indent=2))
+    else:
+        o = state["options"]
+        print(f"run {state['run']}  workspace {state['workspace']}  routing {o['routing']}  review {o['review']}  "
+              f"max_parallel {o['max_parallel']}")
+        print("tickets:")
+        for i, t in state["tickets"].items():
+            model = f"{t['provider']}:{t['model']}" + (f"@{t['effort']}" if t.get("effort") else "")
+            ticket = Path(t["ticket"])
+            ticket = ticket.relative_to(repo) if ticket.is_relative_to(repo) else ticket
+            print(f"  {i}  {t['status']}  {t['tier']}  {model}  family={t.get('family') or '?'}"
+                  f"{'  review' if t.get('review_required') else ''}  blockers=[{', '.join(t['blockers'])}]"
+                  f"  ticket={ticket}  files={', '.join(t['files'])}")
+        print("decisions:")
+        for decision in state["decisions"] or ["(none)"]:
+            print(f"  - {decision}")
+        print("workers:")
+        for r in rows:
+            print(f"  {r['id']}  {r['worker']}  {r['surface']}  {r['state']}  report={r['report']}")
+        if not rows:
+            print("  (none)")
+        print(f"notes: {notes if notes.exists() else '(none)'}  (--json prints the full records)")
     print("Unconfirmed workers retain their slots. Inspect panes/processes before stop or recover.")
 
 
@@ -1213,6 +1317,7 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("resume", help="reconcile exits and show saved plan and decisions")
     s.add_argument("run")
+    s.add_argument("--json", action="store_true", help="print the full saved records")
     s.set_defaults(fn=cmd_resume)
 
     for name, fn in (("verify", cmd_verify), ("recover", cmd_recover)):
@@ -1257,7 +1362,7 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("peek", help="read the bottom of a worker's screen")
     s.add_argument("run")
     s.add_argument("id")
-    s.add_argument("--lines", type=int, default=40)
+    s.add_argument("--lines", type=int, default=20, help="raise it when a dialog or error is cut off")
     s.set_defaults(fn=cmd_peek)
 
     s = sub.add_parser("status", help="workers and their report status")
@@ -1265,11 +1370,14 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_status)
 
-    s = sub.add_parser("wait", help="block until a report reaches needs-verification or blocked (exit 0), "
-                                    "or timeout (exit 2)")
+    s = sub.add_parser("wait", help="block until a report reaches needs-verification or blocked, or a worker "
+                                    "exits, stalls or becomes unreachable (exit 0), or timeout (exit 2)")
     s.add_argument("run")
-    s.add_argument("--timeout", type=int, default=45)
+    s.add_argument("--timeout", type=int, default=45,
+                   help=f"seconds, at most {WAIT_MAX}; use the longest your host's command tool allows")
     s.add_argument("--interval", type=int, default=10)
+    s.add_argument("--stall", type=int, default=180,
+                   help="wake when a working worker's screen is unchanged this long (0 disables)")
     s.add_argument("--any-change", action="store_true", help="wake on any report change, whatever its status")
     s.set_defaults(fn=cmd_wait)
 
@@ -1291,8 +1399,11 @@ def main(argv: list[str] | None = None) -> int:
             valid_id(a.id)
         if hasattr(a, "run"):
             valid_id(a.run)
-        if hasattr(a, "timeout") and not 0 <= a.timeout <= 60:
-            raise FleetError("timeout must be between 0 and 60 seconds")
+        limit = WAIT_MAX if a.cmd == "wait" else 60
+        if hasattr(a, "timeout") and not 0 <= a.timeout <= limit:
+            raise FleetError(f"timeout must be between 0 and {limit} seconds")
+        if hasattr(a, "stall") and a.stall < 0:
+            raise FleetError("stall must be 0 (off) or a number of seconds")
         if hasattr(a, "interval") and not 0 < a.interval <= 60:
             raise FleetError("interval must be between 0 and 60 seconds")
         with mutation_lock(a):
