@@ -46,6 +46,8 @@ PROMPT_FIELDS = {  # optional per-ticket plan fields that complete a worker prom
     "context": "agreed spec and testing decisions; actual glossary/ADR paths; existing edits to preserve",
     "checks": "exact bounded commands, working directory and success criteria; say explicitly if manual prose review is sufficient",
 }
+PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
+TEMPLATE_KEYS = {"id", "ticket", "report", "repo", "files", "diff", "review_of", *PROMPT_FIELDS}
 WAIT_MAX = 600  # Claude Code's longest foreground command timeout; other hosts may allow less
 MODEL_LINE_RE = re.compile(r"^\s*([A-Za-z0-9][^\s]*)(?:\t| +- )")
 
@@ -160,6 +162,11 @@ def build_launch(pcfg: dict, model: str, effort: str | None, prompt: str) -> str
 def worker_prompt_line(prompt_path: Path, ticket_id: str) -> str:
     return (f"Read {prompt_path} and follow it exactly. You are fleet worker {ticket_id}. "
             f"Your report path and hard rules are in that file.")
+
+
+def unfilled_fields(text: str) -> list[str]:
+    found = ["LEAD comments"] if "<!-- LEAD:" in text else []
+    return found + sorted({f"{{{{{k}}}}}" for k in PLACEHOLDER_RE.findall(text) if k in TEMPLATE_KEYS})
 
 
 def parse_status(text: str) -> str | None:
@@ -640,8 +647,8 @@ def cmd_prompt(a, cfg):
     parts.append((SKILL_DIR / "templates" / template).read_text())
     parts.append("## Report format\n\n" + (SKILL_DIR / "templates" / "report.md").read_text())
     text = "\n\n".join(p.strip() for p in parts) + "\n"
-    for k, v in fields.items():
-        text = text.replace("{{" + k + "}}", v)
+    # One pass over known keys: `{{...}}` inside rules, context or checks is content, not a placeholder.
+    text = PLACEHOLDER_RE.sub(lambda m: fields.get(m.group(1), m.group(0)), text)
     todo = [k for k, v in lead_fields.items() if "<!-- LEAD:" in v]
     out.write_text(text)
     state["prompts"][a.id] = meta
@@ -664,8 +671,9 @@ def cmd_launch(a, cfg):
     prompt_path = contained(run_dir(repo, a.run), run_dir(repo, a.run) / "prompts" / f"{a.id}.md")
     if not prompt_path.exists() or a.id not in state["prompts"]:
         raise FleetError("write the prompt first with fleet prompt")
-    if "<!-- LEAD:" in prompt_path.read_text() or "{{" in prompt_path.read_text():
-        raise FleetError("fill all LEAD fields/placeholders in the prompt before launch")
+    unfilled = unfilled_fields(prompt_path.read_text())
+    if unfilled:
+        raise FleetError(f"fill {', '.join(unfilled)} in the prompt before launch")
     w = state["workers"].get(a.id)
     if w and w.get("state") in ACTIVE_STATES:
         raise FleetError(f"worker {a.id} may still be running on {w['surface']}; stop or recover it first")
@@ -755,6 +763,8 @@ def cmd_send(a, cfg):
     state = load_run(repo, a.run)
     w = worker(state, a.id)
     send_keys(state["workspace"], w["surface"], [" ".join(a.text), "enter"])
+    w["last_send"] = time.time()  # the worker owes a response now; wait may report it stalled
+    save_run(repo, a.run, state)
     print(f"sent to {a.id} ({w['surface']})")
 
 
@@ -762,10 +772,12 @@ def cmd_peek(a, cfg):
     repo = repo_root()
     state = load_run(repo, a.run)
     w = worker(state, a.id)
-    screen = cmux("read-screen", "--workspace", state["workspace"], "--surface", w["surface"], "--lines", str(a.lines))
+    # Read a taller window so bottom padding cannot hide the content, then keep the last --lines lines.
+    screen = cmux("read-screen", "--workspace", state["workspace"], "--surface", w["surface"],
+                  "--lines", str(max(a.lines * 3, 60)))
     # Trailing spaces and runs of blank lines are TUI padding: they cost the lead tokens, not information.
-    text = "\n".join(line.rstrip() for line in screen.splitlines())
-    print(re.sub(r"\n{3,}", "\n\n", text).strip("\n"))
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(line.rstrip() for line in screen.splitlines())).strip("\n")
+    print("\n".join(text.splitlines()[-a.lines:]))
 
 
 def report_rows(repo: Path, state: dict) -> list[dict]:
@@ -821,6 +833,11 @@ def scan_reports(reports: Path, seen: Path, statuses: tuple[str, ...] | None) ->
     return fresh
 
 
+def pending_reports(reports: Path) -> list[tuple[str, str]]:
+    return [(f.stem, st) for f in sorted(reports.glob("*.md"))
+            if (st := (parse_status(f.read_text()) or "").lower()) in WAKE_STATUSES]
+
+
 def mark_once(seen: Path, name: str, key: str) -> bool:
     """True the first time `key` is recorded under `name`, so each event wakes the lead once."""
     marker = seen / name
@@ -839,23 +856,27 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
     reports = run_dir(repo, state["run"]) / "reports"
     for w in active(state):
         i, token = w["id"], w.get("token", "")
+        f = reports / f"{i}.md"
+        status = (parse_status(f.read_text()) or "").lower() if f.exists() else ""
         receipt = contained(run_dir(repo, state["run"]), Path(w["exit_file"])) if w.get("exit_file") else None
         if receipt and receipt.exists():
             data = json.loads(receipt.read_text())
-            if data.get("token") == token and mark_once(seen, f"{i}.exit", token):
+            # After a handed-back report, exit is the lead's own stop racing this lockless read.
+            if (data.get("token") == token and status not in ("needs-verification", "verified")
+                    and mark_once(seen, f"{i}.exit", token)):
                 events.append(f"EXITED {i} returncode={data.get('returncode')}; inspect its report, then fleet status {state['run']}")
             continue
-        if not stall or w.get("surface", "unknown") == "unknown":
-            continue
-        f = reports / f"{i}.md"
-        if f.exists() and (parse_status(f.read_text()) or "").lower() in WAKE_STATUSES + ("verified",):
-            continue  # waiting on the lead is not a stall
+        if not stall or w["state"] == "stop-failed" or w.get("surface", "unknown") == "unknown":
+            continue  # a failed stop is already the lead's to handle
+        if status in WAKE_STATUSES + ("verified",) and f.stat().st_mtime >= w.get("last_send", 0):
+            continue  # waiting on the lead is not a stall; an answered report no longer counts
         try:
             screen = cmux("read-screen", "--workspace", state["workspace"], "--surface", w["surface"], "--lines", "40")
         except (FleetError, OSError, subprocess.TimeoutExpired) as e:
             if mark_once(seen, f"{i}.gone", token):
                 events.append(f"UNREACHABLE {i} {w['surface']}: {str(e).strip()[:200]}; the tab may be closed")
             continue
+        (seen / f"{i}.gone").unlink(missing_ok=True)  # readable again: a later failure is a new episode
         marker = seen / f"{i}.screen"
         now, h = time.time(), digest(screen.encode())
         try:
@@ -892,6 +913,9 @@ def cmd_wait(a, cfg):
             return 0
         if time.time() >= deadline:
             print(f"TIMEOUT nothing new in {a.timeout}s; wait again")
+            # Another wait may have consumed a wake; never let a handed-back report sit unseen.
+            for i, status in pending_reports(d / "reports"):
+                print(f"PENDING {i} [{status}]")
             return 2
         time.sleep(min(a.interval, max(0, deadline - time.time())))
 
@@ -957,7 +981,11 @@ def cmd_resume(a, cfg):
             print(f"  - {decision}")
         print("workers:")
         for r in rows:
-            print(f"  {r['id']}  {r['worker']}  {r['surface']}  {r['state']}  report={r['report']}")
+            proc = r.get("process") or {}
+            w = state["workers"].get(r["id"], {})
+            extra = (f"  pid={proc['child_pid']}" if proc.get("child_pid") else "") + \
+                    (f"  returncode={w['returncode']}" if "returncode" in w else "")
+            print(f"  {r['id']}  {r['worker']}  {r['surface']}  {r['state']}  report={r['report']}{extra}")
         if not rows:
             print("  (none)")
         print(f"notes: {notes if notes.exists() else '(none)'}  (--json prints the full records)")

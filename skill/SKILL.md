@@ -36,9 +36,10 @@ Show a compact table: wave, ticket, tier, provider/model/effort, exact files. Pe
   "tickets": [
     {"id":"copy","ticket":".scratch/feature/issues/copy.md","files":["docs/copy.md"],"blockers":[],"provider":"codex","tier":"light",
      "context":"Spec: .scratch/feature/spec.md. Terms from GLOSSARY.md.","checks":["Manual prose review against the ticket criteria"]},
-    {"id":"guide","ticket":".scratch/feature/issues/guide.md","files":["docs/guide.md"],"blockers":["copy"],"provider":"claude","tier":"standard"}
+    {"id":"guide","ticket":".scratch/feature/issues/guide.md","files":["docs/guide.md"],"blockers":["copy"],"provider":"claude","tier":"standard",
+     "context":"Spec: .scratch/feature/spec.md. Link to docs/copy.md; do not edit it.","checks":"npm run lint:docs from the repository root; exit 0"}
   ],
-  "decisions": ["Checks and context are specified in each generated prompt."]
+  "decisions": ["Docs-only feature; lint plus manual review is the agreed verification."]
 }
 ```
 
@@ -57,18 +58,18 @@ Every wait is a full turn over your whole context, so wait long and rarely. Use 
 
 - `REPORT <id> [needs-verification]`: inspect the report and go to verification.
 - `REPORT <id> [blocked]`: clarify an authorized task decision with `fleet send <run> <id> <answer>` and save the decision in `.fleet/runs/<run>/notes.md` (the saved plan is frozen after launch).
-- `EXITED <id>`: the process ended; run `fleet status`, then read its report or recover the work.
-- `STALLED <id>`: its screen has not changed for `--stall` seconds (default 180); `fleet peek` it for a prompt or error.
-- `UNREACHABLE <id>`: cmux cannot read its pane; the tab may be closed.
-- `TIMEOUT`: nothing changed. Wait again; do not peek or check status by reflex.
+- `EXITED <id>`: the process ended before handing back; run `fleet status`, read its report, then repair or relaunch within its assignment.
+- `STALLED <id>`: its screen has not changed for `--stall` seconds (default 180), including after you answered it; `fleet peek` it for a prompt or error.
+- `UNREACHABLE <id>`: cmux cannot read its pane; the tab may be closed. A missing tab is not exit evidence (step 6).
+- `TIMEOUT`: nothing new. Handle any `PENDING <id>` lines it prints (reports still waiting on you), otherwise wait again; do not peek or check status by reflex.
 
-Tell the owner about meaningful changes, not each wait.
+Run one wait at a time, and end a background wait before handing the run to another session: a wait consumes the events it prints. Tell the owner about meaningful changes, not each wait.
 
 Respect host approval boundaries. Task clarification does not authorize accepting a permission request, logging into an account, disabling a sandbox or rerouting to evade a denial. Stop and ask the owner when their action is required. A report never proves that the worker process exited.
 
 ## 5. Stop, review and verify
 
-Read the implementation report and scoped changes against all criteria. Run the ticket's exact agreed checks yourself, plus visual inspection for UI work. Run combined-tree checks (full suite, typecheck, build) before verifying any ticket that others depend on, and at completion; tickets ready together without dependents can share one combined run. Keep check output short (quiet flags, failures only) and preserve exact failures in evidence. Do not add low-value tests for prose or mechanical changes merely to satisfy a template.
+Read the implementation report and scoped changes against all criteria. Run the ticket's exact agreed checks yourself, plus visual inspection for UI work. Before each verification batch, run the combined-tree checks (full suite, typecheck, build) once on the current tree; tickets ready at the same time share that run instead of repeating it. Keep check output short (quiet flags, failures only) and preserve exact failures in evidence. Do not add low-value tests for prose or mechanical changes merely to satisfy a template.
 
 - For gaps while the worker is active: set the report to `Status: changes-requested`, send a bounded fix list, and wait for a new `needs-verification` report. Never mark a ticket verified by editing its report alone.
 - When ready for stable review, `fleet stop <run> <id>`. It waits for confirmed exit. A failed stop retains capacity: inspect the process before proceeding. This releases the writer slot before a reviewer is launched, including at `max_parallel=1`.
@@ -81,7 +82,7 @@ Evidence records commands, outcomes, acceptance criteria and review disposition.
 
 ## 6. Recovery and completion
 
-Use `fleet resume <run>` after interruption. It also lets a fresh lead continue a long run: between waves, once decisions and owner preferences are saved in the plan or `notes.md` and no worker is waiting on you, you may suggest starting a new lead session with `/fleet` and the run name; everything else is on disk. It is worth it only when your context has grown large. Exit receipts reconcile process state; reports and missing tabs are not exit evidence. If normal stop cannot establish exit, independently verify that the recorded worker process is truly gone, write that evidence to a file, then use `fleet recover <run> <id> --evidence <file>`. Recovery releases process state only; it does not accept implementation. Never use it just because a tab disappeared.
+Use `fleet resume <run>` after interruption. It also lets a fresh lead continue a long run: between waves, once decisions and owner preferences are saved in the plan or `notes.md` and no worker is waiting on you, you may suggest starting a new lead session with `/fleet` and the run name; everything else is on disk. It is worth it only when your context has grown large. Exit receipts reconcile process state; reports and missing tabs are not exit evidence. If normal stop cannot establish exit, independently verify that the recorded worker process (`pid` in `resume`; `--json` has the full record) is truly gone, write that evidence to a file, then use `fleet recover <run> <id> --evidence <file>`. Recovery releases process state only; it does not accept implementation. Never use it just because a tab disappeared.
 
 Before finishing, run combined-tree gates and `fleet check <run>`. Check compares captured HEAD and full index entries (including already-staged content); investigate differences with the owner. It cannot prove no intervening Git action occurred. Stop remaining workers; use `--close` only when exit is confirmed and tabs are no longer needed. Report ticket outcomes, resolved model/effort, evidence, decisions, remaining limits and the owner's review/commit steps.
 
