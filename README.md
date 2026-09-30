@@ -1,6 +1,6 @@
 # Agent Fleet
 
-Run a fleet of coding-agent CLIs (Claude Code, Codex, Cursor) in visible [cmux](https://github.com/manaflow-ai/cmux) tabs, led by the agent you are already talking to.
+Run a fleet of coding-agent CLIs (Claude Code, Codex, Cursor) in visible [cmux](https://github.com/manaflow-ai/cmux) panes, led by the agent you are already talking to.
 
 The lead turns approved tickets into a saved execution plan, picks a worker model and effort for each ticket, watches progress, and verifies every result before dependents start. Workers share one Git checkout with explicit file ownership. **You keep control of commits and publishing.**
 

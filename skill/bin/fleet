@@ -260,6 +260,8 @@ def active(state: dict) -> list[dict]:
 # ---------- durable orchestration helpers ----------
 
 ACTIVE_STATES = {"launching", "running", "stop-failed", "unknown"}
+RETIRED_STATES = {"exited", "recovered"}  # exit confirmed, surface still open
+MAX_PANES = 8  # per workspace; past it, a finished worker's pane is replaced rather than split again
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 
 
@@ -728,13 +730,13 @@ def cmd_launch(a, cfg):
     command = build_launch(pcfg, model, effort, worker_prompt_line(prompt_path, a.id))
     exit_file = d / "exits" / f"{a.id}.{token}.json"
     wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_run", str(exit_file), token, command])
-    kind, target, direction = ("pane", a.pane, None) if a.pane else worker_placement(state, a.id)
+    kind, target, direction, old_surfaces = worker_placement(state, a.pane)
     # Persist before launch: an uncertain cmux result must not silently free capacity.
     state["workers"][a.id] = dict(meta, id=a.id, provider=a.provider, model=model, effort=effort,
         family=family, tier=a.tier, surface="unknown", state="launching", command=command,
         token=token, exit_file=str(exit_file), launched=time.strftime("%Y-%m-%dT%H:%M:%S"))
     save_run(repo, a.run, state)
-    if kind == "pane":
+    if kind == "replace":  # a new surface in the pane, then its finished workers' surfaces close below
         args = ["new-surface", "--workspace", state["workspace"], "--pane", target,
                 "--working-directory", str(repo), "--command", wrapped, "--focus", "false"]
     else:  # new-split has no --working-directory
@@ -747,34 +749,58 @@ def cmd_launch(a, cfg):
     w = state["workers"][a.id]
     w["surface"], w["state"] = m.group(0), "running"
     save_run(repo, a.run, state)
+    for surface in old_surfaces:  # every one is a worker whose exit is confirmed
+        try:
+            cmux("close-surface", "--workspace", state["workspace"], "--surface", surface)
+        except (FleetError, OSError, subprocess.TimeoutExpired) as e:
+            print(f"could not close finished worker surface {surface}: {str(e).strip()[:200]}", file=sys.stderr)
+            continue
+        for other in state["workers"].values():
+            if other.get("surface") == surface and other.get("state") in RETIRED_STATES:
+                other["state"] = "closed"
+    if old_surfaces:
+        save_run(repo, a.run, state)
     label = f"{a.id} · {a.provider}:{model}" + (f"@{effort}" if effort else "")
     sh(["cmux", "rename-tab", "--workspace", state["workspace"], "--surface", w["surface"], label], check=False)
     print(f"{a.id}: {label} on {w['surface']}")
 
 
-def pick_pane(panes: list[dict], busy: set[str], lead_pane: str | None) -> tuple[str, str, str | None]:
-    """Where a new worker goes: ("pane", ref, None) for the first pane, other than the lead's, with no
-    live worker; otherwise ("split", surface, direction) to split the largest pane along its long side."""
-    for p in panes:
-        if p["ref"] != lead_pane and not busy & set(p.get("surface_refs", [])):
-            return "pane", p["ref"], None
-    def size(p):
-        f = p.get("pixel_frame") or {}
-        return f.get("width", 0), f.get("height", 0)
-    big = max(panes, key=lambda p: size(p)[0] * size(p)[1])
-    width, height = size(big)
-    return "split", big.get("selected_surface_ref") or big["surface_refs"][0], "right" if width >= height else "down"
+def pick_pane(panes: list[dict], retired: set[str], lead_pane: str | None,
+              want: str | None = None) -> tuple[str, str, str | None]:
+    """Where a new worker goes; workers never stack as tabs. Below MAX_PANES: ("split", surface, direction)
+    splits the wanted (else the largest) pane along its long side. At MAX_PANES: ("replace", pane, None) for
+    the wanted (else the first) pane, other than the lead's, whose every surface is a finished worker."""
+    chosen = [p for p in panes if p["ref"] == want] if want else panes
+    if not chosen:
+        raise FleetError(f"no pane {want} in this workspace")
+    if len(panes) < MAX_PANES:
+        def size(p):
+            f = p.get("pixel_frame") or {}
+            return f.get("width", 0), f.get("height", 0)
+        big = max(chosen, key=lambda p: size(p)[0] * size(p)[1])
+        width, height = size(big)
+        return "split", big.get("selected_surface_ref") or big["surface_refs"][0], "right" if width >= height else "down"
+    for p in chosen:
+        surfaces = set(p.get("surface_refs", []))
+        if p["ref"] != lead_pane and surfaces and surfaces <= retired:
+            return "replace", p["ref"], None
+    where = f"pane {want} holds a live or non-worker surface" if want else "no pane holds only finished workers"
+    raise FleetError(f"workspace has {len(panes)} panes (max {MAX_PANES}) and {where}; "
+                     "stop a worker or close a pane first")
 
 
-def worker_placement(state: dict, worker_id: str) -> tuple[str, str, str | None]:
+def worker_placement(state: dict, want: str | None) -> tuple[str, str, str | None, list[str]]:
+    """pick_pane's choice plus, for a replacement, the finished workers' surfaces to close afterwards."""
     panes = json.loads(cmux("--json", "list-panes", "--workspace", state["workspace"]))["panes"]
     if not panes:
         raise FleetError(f"workspace {state['workspace']} has no panes")
-    busy = {w["surface"] for i, w in state["workers"].items() if i != worker_id and w.get("state") in ACTIVE_STATES}
+    retired = {w["surface"] for w in state["workers"].values() if w.get("state") in RETIRED_STATES}
     lead_pane = None
     if os.environ.get("CMUX_SURFACE_ID"):
         lead_pane = json.loads(cmux("--json", "identify")).get("caller", {}).get("pane_ref")
-    return pick_pane(panes, busy, lead_pane)
+    kind, target, direction = pick_pane(panes, retired, lead_pane, want)
+    old = next(p.get("surface_refs", []) for p in panes if p["ref"] == target) if kind == "replace" else []
+    return kind, target, direction, list(old)
 
 
 def send_keys(workspace: str, surface: str, items: list[str]) -> None:
@@ -1448,7 +1474,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_prompt)
 
-    s = sub.add_parser("launch", help="launch a worker in a free cmux pane, splitting one when none is free")
+    s = sub.add_parser("launch", help=f"launch a worker in a new cmux pane; at {MAX_PANES} panes, replace a finished worker's pane")
     s.add_argument("run")
     s.add_argument("id")
     s.add_argument("provider")
@@ -1456,7 +1482,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--model")
     s.add_argument("--effort")
     s.add_argument("--family", help="known family for an account-specific model override")
-    s.add_argument("--pane", help="put the worker in this pane as a new tab instead of choosing one")
+    s.add_argument("--pane", help="split this pane (or, at the pane limit, replace it) instead of choosing one")
     s.set_defaults(fn=cmd_launch)
 
     s = sub.add_parser("send", help="type a message into a worker's pane and press enter")

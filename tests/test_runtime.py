@@ -363,38 +363,54 @@ class Runtime(unittest.TestCase):
         self.assertEqual(self.scan(), [])
         self.assertEqual(self.scan(), [])
 
-    def test_launch_fills_free_panes_before_splitting_and_never_the_leads(self):
+    def test_launch_splits_a_new_pane_instead_of_adding_a_tab(self):
         self.setup_run()
         self.panes.append({"ref": "pane:2", "surface_refs": ["surface:shell"], "pixel_frame": {"width": 600, "height": 900}})
         with patch.dict(fleet.os.environ, {"CMUX_SURFACE_ID": "lead"}):
             self.launch()
-            new = [c for c in self.cmux_calls if c[0] in ("new-surface", "new-split")]
-            self.assertEqual(new[-1][:5], ("new-surface", "--workspace", "workspace:1", "--pane", "pane:2"))
-            self.report()
-            self.stop_with_receipt()
-            self.verify()
-            self.panes[1]["surface_refs"].append("surface:1")
-            self.cmux_calls.clear()
-            # The stopped worker no longer holds pane:2, so the next worker joins it as another tab.
-            self.launch("02")
-            new = [c for c in self.cmux_calls if c[0] in ("new-surface", "new-split")]
-            self.assertEqual(new[-1][3:5], ("--pane", "pane:2"))
-
-    def test_launch_splits_the_largest_pane_when_every_pane_is_taken(self):
-        self.setup_run()
-        with patch.dict(fleet.os.environ, {"CMUX_SURFACE_ID": "lead"}):
-            self.launch()
+        self.assertFalse([c for c in self.cmux_calls if c[0] == "new-surface"])
         split = [c for c in self.cmux_calls if c[0] == "new-split"][-1]
         self.assertEqual(split[:6], ("new-split", "right", "--workspace", "workspace:1", "--surface", "surface:lead"))
         command = split[split.index("--command") + 1]
         self.assertTrue(command.startswith("cd " + shlex.quote(str(self.repo)) + " && exec "), command)
         self.assertEqual(self.state()["workers"]["01"]["surface"], "surface:1")
 
-    def test_explicit_pane_skips_placement(self):
+    def fill_workspace(self, finished):
+        self.panes += [{"ref": f"pane:{n}", "surface_refs": [f"surface:shell{n}"]} for n in range(2, 8)]
+        self.panes.append({"ref": "pane:8", "surface_refs": [finished]})
+
+    def test_at_eight_panes_launch_replaces_a_finished_workers_pane(self):
         self.setup_run()
+        self.launch()
+        self.report()
+        self.stop_with_receipt()
+        self.verify()
+        self.fill_workspace("surface:1")
+        self.cmux_calls.clear()
+        with patch.dict(fleet.os.environ, {"CMUX_SURFACE_ID": "lead"}):
+            self.launch("02")
+        new = [c for c in self.cmux_calls if c[0] in ("new-surface", "new-split", "close-surface")]
+        self.assertEqual([c[0] for c in new], ["new-surface", "close-surface"])
+        self.assertEqual(new[0][3:5], ("--pane", "pane:8"))
+        self.assertEqual(new[1][-1], "surface:1")
+        workers = self.state()["workers"]
+        self.assertEqual((workers["01"]["state"], workers["02"]["state"]), ("closed", "running"))
+
+    def test_at_eight_panes_launch_refuses_when_no_pane_can_be_replaced(self):
+        self.setup_run()
+        self.fill_workspace("surface:user")
+        out = self.launch(expected=1)
+        self.assertIn("max 8", out)
+        self.assertFalse([c for c in self.cmux_calls if c[0] in ("new-surface", "new-split")])
+        self.assertNotIn("01", self.state()["workers"])
+
+    def test_explicit_pane_is_split_rather_than_given_a_tab(self):
+        self.setup_run()
+        self.panes.append({"ref": "pane:9", "surface_refs": ["surface:9"], "pixel_frame": {"width": 400, "height": 900}})
         self.call("launch", "demo", "01", "writer", "--tier", "standard", "--pane", "pane:9")
-        self.assertFalse([c for c in self.cmux_calls if c[:2] == ("--json", "list-panes")])
-        self.assertIn(("--pane", "pane:9"), [c[3:5] for c in self.cmux_calls if c[0] == "new-surface"])
+        self.assertFalse([c for c in self.cmux_calls if c[0] == "new-surface"])
+        self.assertEqual([c[:6] for c in self.cmux_calls if c[0] == "new-split"],
+                         [("new-split", "down", "--workspace", "workspace:1", "--surface", "surface:9")])
 
     def test_wait_reports_a_pane_it_cannot_read(self):
         self.setup_run()
