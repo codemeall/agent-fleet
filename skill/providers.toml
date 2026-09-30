@@ -63,10 +63,10 @@ default_home = "~/.codex"
 family = "openai"
 plugins = false
 max = 2
-tiers.heavy = { model = "gpt-6-sol", effort = "high" }
-tiers.standard = { model = "gpt-6-sol", effort = "medium" }
+tiers.heavy = { model = "gpt-6.1-sol", effort = "high" }
+tiers.standard = { model = "gpt-6.1-sol", effort = "medium" }
 tiers.light = { model = "gpt-6-luna", effort = "high" }
-tiers.review = { model = "gpt-6-sol", effort = "high" }
+tiers.review = { model = "gpt-6.1-sol", effort = "high" }
 
 [providers.cursor]
 enabled = true
