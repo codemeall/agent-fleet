@@ -1,6 +1,6 @@
 {
   "name": "@codemeall/agent-fleet",
-  "version": "0.1.0-preview.1",
+  "version": "0.1.0-preview.2",
   "description": "Coordinate coding-agent CLIs in cmux with a portable Fleet skill.",
   "license": "MIT",
   "author": "codemeall",

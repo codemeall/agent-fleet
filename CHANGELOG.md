@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.2
 
 - Add extra subscriptions as providers: `extends` reuses an adapter, `env` points it at its own account directory, and `fleet account add` writes the block to the user config.
 - The bundled `claude-co` example now uses `extends = "claude"` with `env`, and `max = 1`.
