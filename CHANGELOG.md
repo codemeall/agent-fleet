@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `fleet launch` gives each worker its own pane instead of stacking tabs in the lead's pane. It reuses the first pane (other than the lead's) with no live worker, including idle shells and panes whose workers have exited, and splits the largest pane along its long side once every pane is taken. `--pane` still places a worker explicitly.
+
 ## 0.1.0-preview.4
 
 Cuts the lead's token use during long runs without loosening any verification gate.

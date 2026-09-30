@@ -49,7 +49,7 @@ Give each ticket `context` (agreed spec and testing decisions, actual glossary/A
 
 - `fleet prompt <run> <id>` writes the prompt from the planned local ticket, fixed worker rules, `.fleet/rules.md` and the ticket's `context`/`checks`. With both planned, the prompt is complete; the fixed rules need no rereading. Otherwise it names the missing fields: replace each `<!-- LEAD: … -->` comment before launch (launch refuses unfilled ones). Preserve the worker rules and the saved file list.
 - Resolve the actual glossary/ADR paths from project configuration. Prefer `GLOSSARY.md` and optional `GLOSSARY-MAP.md`, with `CONTEXT.md` for older repositories. Carry upstream `to-spec` testing and design decisions forward. Do not blindly invoke upstream `/implement`: it includes commits that Fleet forbids.
-- `fleet launch <run> <id> <provider> --tier <tier> [--model <model>] [--effort <effort>] [--family <family>]` must match the saved assignment. The CLI enforces blockers, active file ownership and capacity.
+- `fleet launch <run> <id> <provider> --tier <tier> [--model <model>] [--effort <effort>] [--family <family>]` must match the saved assignment. The CLI enforces blockers, active file ownership and capacity. Each worker gets its own pane: the first pane in the workspace, other than yours, with no live worker, else a new split of the largest pane. `--pane <ref>` overrides this.
 - `fleet peek <run> <id>` shortly after launch, and again within a minute or two, confirms progress or reveals a login, trust, model or permission prompt; they usually appear early. Never assume creating a tab means work started. Peek shows 20 lines; pass `--lines` when a dialog or error is cut off.
 
 ## 4. Watch and resolve blockers

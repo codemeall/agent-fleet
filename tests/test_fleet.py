@@ -262,6 +262,26 @@ class Models(unittest.TestCase):
             fleet.cmux = orig
 
 
+class PanePlacement(unittest.TestCase):
+    def pane(self, ref, surfaces, width=800, height=600):
+        return {"ref": ref, "surface_refs": surfaces, "pixel_frame": {"width": width, "height": height}}
+
+    def test_first_pane_without_a_live_worker_that_is_not_the_leads(self):
+        panes = [self.pane("pane:1", ["s:lead", "s:old"]), self.pane("pane:2", ["s:w1"]), self.pane("pane:3", ["s:sh"])]
+        self.assertEqual(fleet.pick_pane(panes, {"s:w1"}, "pane:1"), ("pane", "pane:3", None))
+        self.assertEqual(fleet.pick_pane(panes, set(), "pane:1"), ("pane", "pane:2", None))
+        self.assertEqual(fleet.pick_pane(panes, set(), None), ("pane", "pane:1", None))
+
+    def test_splits_the_largest_pane_along_its_long_side(self):
+        panes = [self.pane("pane:1", ["s:lead"], 1200, 900), self.pane("pane:2", ["s:w1"], 600, 900)]
+        self.assertEqual(fleet.pick_pane(panes[:1], set(), "pane:1"), ("split", "s:lead", "right"))
+        self.assertEqual(fleet.pick_pane(panes, {"s:w1"}, "pane:1"), ("split", "s:lead", "right"))
+        tall = [self.pane("pane:1", ["s:lead"], 600, 900), self.pane("pane:2", ["s:w1", "s:w2"], 500, 900)]
+        tall[1]["selected_surface_ref"] = "s:w2"
+        self.assertEqual(fleet.pick_pane(tall, {"s:w1", "s:w2"}, "pane:1"), ("split", "s:lead", "down"))
+        self.assertEqual(fleet.pick_pane(tall[1:], {"s:w1"}, "pane:1"), ("split", "s:w2", "down"))
+
+
 class AllowList(unittest.TestCase):
     def config(self, text):
         with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:

@@ -43,6 +43,8 @@ class Runtime(unittest.TestCase):
             }
         self.cmux_calls = []
         self.surface = 0
+        self.panes = [{"ref": "pane:1", "surface_refs": ["surface:lead"], "selected_surface_ref": "surface:lead",
+                       "pixel_frame": {"width": 1200, "height": 900}}]
         real_sh = fleet.sh
 
         def shell(args, **kwargs):
@@ -64,9 +66,13 @@ class Runtime(unittest.TestCase):
 
     def fake_cmux(self, *args, **kwargs):
         self.cmux_calls.append(args)
-        if args[0] == "new-surface":
+        if args[0] in ("new-surface", "new-split"):
             self.surface += 1
             return "OK surface:" + str(self.surface)
+        if args[:2] == ("--json", "list-panes"):
+            return json.dumps({"panes": self.panes})
+        if args[:2] == ("--json", "identify"):
+            return json.dumps({"caller": {"pane_ref": "pane:1"}})
         return "OK"
 
     def call(self, *args, expected=0):
@@ -356,6 +362,39 @@ class Runtime(unittest.TestCase):
         self.report()                                           # report handed back: idle is expected
         self.assertEqual(self.scan(), [])
         self.assertEqual(self.scan(), [])
+
+    def test_launch_fills_free_panes_before_splitting_and_never_the_leads(self):
+        self.setup_run()
+        self.panes.append({"ref": "pane:2", "surface_refs": ["surface:shell"], "pixel_frame": {"width": 600, "height": 900}})
+        with patch.dict(fleet.os.environ, {"CMUX_SURFACE_ID": "lead"}):
+            self.launch()
+            new = [c for c in self.cmux_calls if c[0] in ("new-surface", "new-split")]
+            self.assertEqual(new[-1][:5], ("new-surface", "--workspace", "workspace:1", "--pane", "pane:2"))
+            self.report()
+            self.stop_with_receipt()
+            self.verify()
+            self.panes[1]["surface_refs"].append("surface:1")
+            self.cmux_calls.clear()
+            # The stopped worker no longer holds pane:2, so the next worker joins it as another tab.
+            self.launch("02")
+            new = [c for c in self.cmux_calls if c[0] in ("new-surface", "new-split")]
+            self.assertEqual(new[-1][3:5], ("--pane", "pane:2"))
+
+    def test_launch_splits_the_largest_pane_when_every_pane_is_taken(self):
+        self.setup_run()
+        with patch.dict(fleet.os.environ, {"CMUX_SURFACE_ID": "lead"}):
+            self.launch()
+        split = [c for c in self.cmux_calls if c[0] == "new-split"][-1]
+        self.assertEqual(split[:6], ("new-split", "right", "--workspace", "workspace:1", "--surface", "surface:lead"))
+        command = split[split.index("--command") + 1]
+        self.assertTrue(command.startswith("cd " + shlex.quote(str(self.repo)) + " && exec "), command)
+        self.assertEqual(self.state()["workers"]["01"]["surface"], "surface:1")
+
+    def test_explicit_pane_skips_placement(self):
+        self.setup_run()
+        self.call("launch", "demo", "01", "writer", "--tier", "standard", "--pane", "pane:9")
+        self.assertFalse([c for c in self.cmux_calls if c[:2] == ("--json", "list-panes")])
+        self.assertIn(("--pane", "pane:9"), [c[3:5] for c in self.cmux_calls if c[0] == "new-surface"])
 
     def test_wait_reports_a_pane_it_cannot_read(self):
         self.setup_run()

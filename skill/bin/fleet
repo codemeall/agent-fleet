@@ -728,15 +728,18 @@ def cmd_launch(a, cfg):
     command = build_launch(pcfg, model, effort, worker_prompt_line(prompt_path, a.id))
     exit_file = d / "exits" / f"{a.id}.{token}.json"
     wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_run", str(exit_file), token, command])
+    kind, target, direction = ("pane", a.pane, None) if a.pane else worker_placement(state, a.id)
     # Persist before launch: an uncertain cmux result must not silently free capacity.
     state["workers"][a.id] = dict(meta, id=a.id, provider=a.provider, model=model, effort=effort,
         family=family, tier=a.tier, surface="unknown", state="launching", command=command,
         token=token, exit_file=str(exit_file), launched=time.strftime("%Y-%m-%dT%H:%M:%S"))
     save_run(repo, a.run, state)
-    args = ["new-surface", "--workspace", state["workspace"], "--working-directory", str(repo),
-            "--command", wrapped, "--focus", "false"]
-    if a.pane:
-        args += ["--pane", a.pane]
+    if kind == "pane":
+        args = ["new-surface", "--workspace", state["workspace"], "--pane", target,
+                "--working-directory", str(repo), "--command", wrapped, "--focus", "false"]
+    else:  # new-split has no --working-directory
+        args = ["new-split", direction, "--workspace", state["workspace"], "--surface", target,
+                "--command", f"cd {shlex.quote(str(repo))} && exec {wrapped}", "--focus", "false"]
     out = cmux(*args)
     m = SURFACE_RE.search(out)
     if not m:
@@ -747,6 +750,31 @@ def cmd_launch(a, cfg):
     label = f"{a.id} · {a.provider}:{model}" + (f"@{effort}" if effort else "")
     sh(["cmux", "rename-tab", "--workspace", state["workspace"], "--surface", w["surface"], label], check=False)
     print(f"{a.id}: {label} on {w['surface']}")
+
+
+def pick_pane(panes: list[dict], busy: set[str], lead_pane: str | None) -> tuple[str, str, str | None]:
+    """Where a new worker goes: ("pane", ref, None) for the first pane, other than the lead's, with no
+    live worker; otherwise ("split", surface, direction) to split the largest pane along its long side."""
+    for p in panes:
+        if p["ref"] != lead_pane and not busy & set(p.get("surface_refs", [])):
+            return "pane", p["ref"], None
+    def size(p):
+        f = p.get("pixel_frame") or {}
+        return f.get("width", 0), f.get("height", 0)
+    big = max(panes, key=lambda p: size(p)[0] * size(p)[1])
+    width, height = size(big)
+    return "split", big.get("selected_surface_ref") or big["surface_refs"][0], "right" if width >= height else "down"
+
+
+def worker_placement(state: dict, worker_id: str) -> tuple[str, str, str | None]:
+    panes = json.loads(cmux("--json", "list-panes", "--workspace", state["workspace"]))["panes"]
+    if not panes:
+        raise FleetError(f"workspace {state['workspace']} has no panes")
+    busy = {w["surface"] for i, w in state["workers"].items() if i != worker_id and w.get("state") in ACTIVE_STATES}
+    lead_pane = None
+    if os.environ.get("CMUX_SURFACE_ID"):
+        lead_pane = json.loads(cmux("--json", "identify")).get("caller", {}).get("pane_ref")
+    return pick_pane(panes, busy, lead_pane)
 
 
 def send_keys(workspace: str, surface: str, items: list[str]) -> None:
@@ -1420,7 +1448,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_prompt)
 
-    s = sub.add_parser("launch", help="launch a worker in a new cmux tab")
+    s = sub.add_parser("launch", help="launch a worker in a free cmux pane, splitting one when none is free")
     s.add_argument("run")
     s.add_argument("id")
     s.add_argument("provider")
@@ -1428,7 +1456,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--model")
     s.add_argument("--effort")
     s.add_argument("--family", help="known family for an account-specific model override")
-    s.add_argument("--pane")
+    s.add_argument("--pane", help="put the worker in this pane as a new tab instead of choosing one")
     s.set_defaults(fn=cmd_launch)
 
     s = sub.add_parser("send", help="type a message into a worker's pane and press enter")
