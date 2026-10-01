@@ -21,4 +21,4 @@ Install with `npx skills add codemeall/agent-fleet`, `npx @codemeall/agent-fleet
 
 Claude permission classifiers, Codex sandbox profiles, Cursor allowances and remote-session topology vary by version. There is no universal setup flag that safely fixes all of them. Fleet's bundled launch configuration does not override host restrictions. A cloud-only chat can help plan the work but requires an explicit local execution connection to operate this fleet.
 
-`fleet wait` defaults to 45 seconds and accepts up to 600. Pass the longest timeout the host's command tool allows: Claude Code allows up to 10 minutes per command (use about 540) and can run the wait in the background; other hosts may allow less. A worker may use the same CLI as the lead; each tab is a distinct process and session.
+`fleet wait` defaults to 45 seconds and accepts up to 600. Pass the longest timeout the host's command tool allows: Claude Code allows up to 10 minutes per command (use about 540) and can run the wait in the background; other hosts may allow less. A worker may use the same CLI as the lead; each pane is a distinct process and session.

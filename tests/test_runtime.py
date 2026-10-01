@@ -68,12 +68,30 @@ class Runtime(unittest.TestCase):
         self.cmux_calls.append(args)
         if args[0] in ("new-surface", "new-split"):
             self.surface += 1
-            return "OK surface:" + str(self.surface)
-        if args[:2] == ("--json", "list-panes"):
-            return json.dumps({"panes": self.panes})
+            ref = "surface:" + str(self.surface)
+            if args[0] == "new-split":
+                self.panes.append({"ref": f"pane:s{self.surface}", "surface_refs": [ref],
+                                   "pixel_frame": {"width": 100, "height": 100}})
+            for p in self.panes:
+                if args[0] == "new-surface" and p["ref"] == args[args.index("--pane") + 1]:
+                    p["surface_refs"].append(ref)
+            return "OK " + ref
+        if args[0] == "close-surface":
+            for p in self.panes:
+                p["surface_refs"] = [r for r in p["surface_refs"] if self.uuid(r) != args[-1]]
+        if "list-panes" in args:
+            panes = copy.deepcopy(self.panes)
+            for p in panes:  # like --id-format both; a pane may pin its own UUIDs
+                p.setdefault("id", "uuid-" + p["ref"])
+                p.setdefault("surface_ids", [self.uuid(r) for r in p["surface_refs"]])
+            return json.dumps({"panes": panes})
         if args[:2] == ("--json", "identify"):
             return json.dumps({"caller": {"pane_ref": "pane:1"}})
         return "OK"
+
+    @staticmethod
+    def uuid(ref):
+        return "uuid-" + ref
 
     def call(self, *args, expected=0):
         out, err = io.StringIO(), io.StringIO()
@@ -375,30 +393,61 @@ class Runtime(unittest.TestCase):
         self.assertTrue(command.startswith("cd " + shlex.quote(str(self.repo)) + " && exec "), command)
         self.assertEqual(self.state()["workers"]["01"]["surface"], "surface:1")
 
-    def fill_workspace(self, finished):
-        self.panes += [{"ref": f"pane:{n}", "surface_refs": [f"surface:shell{n}"]} for n in range(2, 8)]
-        self.panes.append({"ref": "pane:8", "surface_refs": [finished]})
+    def fill_workspace(self):
+        self.panes += [{"ref": f"pane:{n}", "surface_refs": [f"surface:shell{n}"]} for n in range(2, 10 - len(self.panes))]
+        self.assertEqual(len(self.panes), fleet.MAX_PANES)
 
-    def test_at_eight_panes_launch_replaces_a_finished_workers_pane(self):
+    def pane_of(self, surface):
+        return next(p["ref"] for p in self.panes if surface in p["surface_refs"])
+
+    def test_at_eight_panes_launch_replaces_a_verified_workers_pane(self):
         self.setup_run()
         self.launch()
+        self.assertEqual(self.state()["workers"]["01"]["surface_id"], "uuid-surface:1")
         self.report()
         self.stop_with_receipt()
         self.verify()
-        self.fill_workspace("surface:1")
+        self.fill_workspace()
+        finished = self.pane_of("surface:1")
         self.cmux_calls.clear()
         with patch.dict(fleet.os.environ, {"CMUX_SURFACE_ID": "lead"}):
             self.launch("02")
         new = [c for c in self.cmux_calls if c[0] in ("new-surface", "new-split", "close-surface")]
         self.assertEqual([c[0] for c in new], ["new-surface", "close-surface"])
-        self.assertEqual(new[0][3:5], ("--pane", "pane:8"))
-        self.assertEqual(new[1][-1], "surface:1")
+        self.assertEqual(new[0][3:5], ("--pane", finished))
+        self.assertEqual(new[1][-1], "uuid-surface:1")  # closed by UUID, never by a reusable ref
         workers = self.state()["workers"]
         self.assertEqual((workers["01"]["state"], workers["02"]["state"]), ("closed", "running"))
 
+    def test_at_eight_panes_launch_keeps_an_unverified_workers_pane_and_adds_a_tab(self):
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"]}, {"id": "02", "files": ["next.txt"]}])
+        self.launch()
+        self.report()
+        self.stop_with_receipt()  # exited, not yet verified: the lead may still need its scrollback
+        self.fill_workspace()
+        with patch.dict(fleet.os.environ, {"CMUX_SURFACE_ID": "lead"}):
+            self.launch("02")
+        self.assertFalse([c for c in self.cmux_calls if c[0] == "close-surface"])
+        self.assertEqual(self.state()["workers"]["01"]["state"], "exited")
+        self.assertEqual(self.pane_of("surface:2"), self.pane_of("surface:1"))  # a tab beside it
+
+    def test_at_eight_panes_launch_never_closes_a_reused_surface_ref(self):
+        self.setup_run()
+        self.launch()
+        self.report()
+        self.stop_with_receipt()
+        self.verify()
+        self.fill_workspace()
+        # cmux restarted: surface:1 now names someone else's terminal, with a different UUID.
+        next(p for p in self.panes if "surface:1" in p["surface_refs"])["surface_ids"] = ["uuid-new-terminal"]
+        with patch.dict(fleet.os.environ, {"CMUX_SURFACE_ID": "lead"}):
+            self.launch("02")
+        self.assertFalse([c for c in self.cmux_calls if c[0] == "close-surface"])
+        self.assertEqual(self.state()["workers"]["01"]["state"], "exited")
+
     def test_at_eight_panes_launch_adds_a_tab_to_an_idle_pane_when_none_can_be_replaced(self):
         self.setup_run()
-        self.fill_workspace("surface:user")
+        self.fill_workspace()
         with patch.dict(fleet.os.environ, {"CMUX_SURFACE_ID": "lead"}):
             self.launch()
         new = [c for c in self.cmux_calls if c[0] in ("new-surface", "new-split", "close-surface")]
@@ -406,23 +455,28 @@ class Runtime(unittest.TestCase):
         self.assertEqual(new[0][3:5], ("--pane", "pane:2"))
         self.assertEqual(self.state()["workers"]["01"]["state"], "running")
 
-    def test_at_eight_panes_launch_refuses_when_every_pane_has_a_live_worker(self):
+    def test_at_eight_panes_launch_refuses_before_any_side_effect(self):
         self.cfg["defaults"]["max_parallel"] = 2
         self.cfg["providers"]["writer"]["max"] = 2
         self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"]}, {"id": "02", "files": ["next.txt"]}])
         self.launch()
-        self.panes += [{"ref": f"pane:{n}", "surface_refs": ["surface:1"]} for n in range(2, 9)]
+        self.panes += [{"ref": f"pane:{n}", "surface_refs": ["surface:1"]} for n in range(2, 8)]
+        report = self.repo / ".fleet/runs/demo/reports/02.md"
+        report.write_text("# Worker report\nStatus: blocked\n")
         self.cmux_calls.clear()
         with patch.dict(fleet.os.environ, {"CMUX_SURFACE_ID": "lead"}):
             out = self.launch("02", expected=1)
         self.assertIn("every pane has a live worker", out)
         self.assertFalse([c for c in self.cmux_calls if c[0] in ("new-surface", "new-split")])
         self.assertNotIn("02", self.state()["workers"])
+        # A refused launch must not freeze a baseline (it would absorb the owner's later edits) or move the report.
+        self.assertFalse((self.repo / ".fleet/runs/demo/snapshots/02.json").exists())
+        self.assertTrue(report.exists())
 
     def test_explicit_pane_is_split_rather_than_given_a_tab(self):
         self.setup_run()
         self.panes.append({"ref": "pane:9", "surface_refs": ["surface:9"], "pixel_frame": {"width": 400, "height": 900}})
-        self.call("launch", "demo", "01", "writer", "--tier", "standard", "--pane", "pane:9")
+        self.call("launch", "demo", "01", "writer", "--tier", "standard", "--pane", "uuid-pane:9")  # ref, UUID or index
         self.assertFalse([c for c in self.cmux_calls if c[0] == "new-surface"])
         self.assertEqual([c[:6] for c in self.cmux_calls if c[0] == "new-split"],
                          [("new-split", "down", "--workspace", "workspace:1", "--surface", "surface:9")])

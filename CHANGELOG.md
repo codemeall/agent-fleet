@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- `fleet launch` opens each worker in a new pane instead of a tab in an existing one, splitting the largest pane (along its long side) until the workspace has 8 panes. At 8 it replaces a pane, other than the lead's, that holds only finished workers (exit confirmed), opening the new worker there and closing their surfaces; failing that, it adds a tab to an idle pane (no live worker). When every other pane has a live worker it refuses before recording the worker. `--pane` now chooses the pane to split, replace or add a tab to.
+- `fleet launch` opens each worker in a new pane instead of a tab in an existing one, splitting the largest pane (along its long side) until the workspace has 8 panes. At 8 it replaces a pane, other than the lead's, that holds only verified workers whose exit is confirmed, opening the new worker there and closing their surfaces; failing that, it adds a tab to an idle pane (no live worker), so an unverified worker keeps its scrollback. When every other pane has a live worker it refuses before touching the run (no baseline snapshot, no moved report). `--pane` now chooses the pane to split, replace or add a tab to, and accepts a pane ref, UUID or index as listed by `cmux list-panes`.
+- Workers record their cmux surface UUID at launch. Replacing a pane and `fleet stop --close` close surfaces by UUID, so a short ref that cmux reuses after a restart can never close someone else's terminal. Workers launched before this change have no UUID, so their panes are never replaced and `--close` falls back to the ref.
 
 ## 0.1.0-preview.5
 

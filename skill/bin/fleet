@@ -260,7 +260,7 @@ def active(state: dict) -> list[dict]:
 # ---------- durable orchestration helpers ----------
 
 ACTIVE_STATES = {"launching", "running", "stop-failed", "unknown"}
-RETIRED_STATES = {"exited", "recovered"}  # exit confirmed, surface still open
+RETIRED_STATES = {"exited", "recovered"}  # exit confirmed, surface still open; replaceable once verified
 MAX_PANES = 8  # per workspace; past it, a finished worker's pane is replaced rather than split again
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 
@@ -719,6 +719,8 @@ def cmd_launch(a, cfg):
         assert_scope_idle(state, t["files"])
         if digest(scoped_diff(repo, state, meta["review_of"]).encode()) != meta["diff_sha"]:
             raise FleetError("review snapshot is stale; regenerate diff and prompt")
+    # Place before any side effect: a refused placement must not freeze a baseline or move the report.
+    kind, target, direction, old_surfaces = worker_placement(state, a.pane)
     d = run_dir(repo, a.run)
     baseline = d / "snapshots" / f"{a.id}.json"
     if meta["role"] == "implementation" and not baseline.exists():
@@ -730,7 +732,6 @@ def cmd_launch(a, cfg):
     command = build_launch(pcfg, model, effort, worker_prompt_line(prompt_path, a.id))
     exit_file = d / "exits" / f"{a.id}.{token}.json"
     wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_run", str(exit_file), token, command])
-    kind, target, direction, old_surfaces = worker_placement(state, a.pane)
     # Persist before launch: an uncertain cmux result must not silently free capacity.
     state["workers"][a.id] = dict(meta, id=a.id, provider=a.provider, model=model, effort=effort,
         family=family, tier=a.tier, surface="unknown", state="launching", command=command,
@@ -748,15 +749,21 @@ def cmd_launch(a, cfg):
         raise FleetError(f"uncertain launch; inspect cmux before recovery: {out.strip()}")
     w = state["workers"][a.id]
     w["surface"], w["state"] = m.group(0), "running"
+    # Refs like surface:4 restart from 1 with cmux, so only the UUID safely names this surface later.
+    try:
+        w["surface_id"] = surface_uuid(list_panes(state["workspace"]), w["surface"])
+    except (FleetError, OSError, subprocess.TimeoutExpired, ValueError, KeyError) as e:
+        print(f"could not record {w['surface']}'s UUID; its pane will not be replaced: {str(e).strip()[:200]}",
+              file=sys.stderr)
     save_run(repo, a.run, state)
-    for surface in old_surfaces:  # every one is a worker whose exit is confirmed
+    for surface in old_surfaces:  # UUIDs of verified workers whose exit is confirmed
         try:
             cmux("close-surface", "--workspace", state["workspace"], "--surface", surface)
         except (FleetError, OSError, subprocess.TimeoutExpired) as e:
             print(f"could not close finished worker surface {surface}: {str(e).strip()[:200]}", file=sys.stderr)
             continue
         for other in state["workers"].values():
-            if other.get("surface") == surface and other.get("state") in RETIRED_STATES:
+            if other.get("surface_id") == surface and other.get("state") in RETIRED_STATES:
                 other["state"] = "closed"
     if old_surfaces:
         save_run(repo, a.run, state)
@@ -769,9 +776,10 @@ def pick_pane(panes: list[dict], retired: set[str], busy: set[str], lead_pane: s
               want: str | None = None) -> tuple[str, str, str | None]:
     """Where a new worker goes. Below MAX_PANES: ("split", surface, direction) splits the wanted (else the
     largest) pane along its long side. At MAX_PANES, among the wanted (else every) pane other than the lead's:
-    ("replace", pane, None) for one whose every surface is a finished worker, else ("tab", pane, None) for an
-    idle one, with no live worker."""
-    chosen = [p for p in panes if p["ref"] == want] if want else panes
+    ("replace", pane, None) for one whose every surface is a retired worker (by UUID, in `retired`), else
+    ("tab", pane, None) for an idle one, with no live worker (by ref, in `busy`). `want` is a pane ref, UUID
+    or index."""
+    chosen = [p for p in panes if want in (p["ref"], p.get("id"), str(p.get("index")))] if want else panes
     if not chosen:
         raise FleetError(f"no pane {want} in this workspace")
     if len(panes) < MAX_PANES:
@@ -783,7 +791,7 @@ def pick_pane(panes: list[dict], retired: set[str], busy: set[str], lead_pane: s
         return "split", big.get("selected_surface_ref") or big["surface_refs"][0], "right" if width >= height else "down"
     chosen = [p for p in chosen if p["ref"] != lead_pane]
     for p in chosen:
-        surfaces = set(p.get("surface_refs", []))
+        surfaces = set(p.get("surface_ids", []))
         if surfaces and surfaces <= retired:
             return "replace", p["ref"], None
     for p in chosen:
@@ -794,18 +802,32 @@ def pick_pane(panes: list[dict], retired: set[str], busy: set[str], lead_pane: s
                      "stop a worker or close a pane first")
 
 
+def list_panes(workspace: str) -> list[dict]:
+    return json.loads(cmux("--json", "--id-format", "both", "list-panes", "--workspace", workspace))["panes"]
+
+
+def surface_uuid(panes: list[dict], ref: str) -> str | None:
+    for p in panes:
+        for r, sid in zip(p.get("surface_refs", []), p.get("surface_ids", [])):
+            if r == ref:
+                return sid
+    return None
+
+
 def worker_placement(state: dict, want: str | None) -> tuple[str, str, str | None, list[str]]:
-    """pick_pane's choice plus, for a replacement, the finished workers' surfaces to close afterwards."""
-    panes = json.loads(cmux("--json", "list-panes", "--workspace", state["workspace"]))["panes"]
+    """pick_pane's choice plus, for a replacement, the UUIDs of the surfaces to close afterwards. Only a
+    verified worker with a recorded UUID is retired: an unverified one keeps its scrollback for the lead."""
+    panes = list_panes(state["workspace"])
     if not panes:
         raise FleetError(f"workspace {state['workspace']} has no panes")
-    retired = {w["surface"] for w in state["workers"].values() if w.get("state") in RETIRED_STATES}
+    retired = {w["surface_id"] for w in state["workers"].values()
+               if w.get("state") in RETIRED_STATES and w.get("verified") and w.get("surface_id")}
     busy = {w["surface"] for w in state["workers"].values() if w.get("state") in ACTIVE_STATES}
     lead_pane = None
     if os.environ.get("CMUX_SURFACE_ID"):
         lead_pane = json.loads(cmux("--json", "identify")).get("caller", {}).get("pane_ref")
     kind, target, direction = pick_pane(panes, retired, busy, lead_pane, want)
-    old = next(p.get("surface_refs", []) for p in panes if p["ref"] == target) if kind == "replace" else []
+    old = next(p.get("surface_ids", []) for p in panes if p["ref"] == target) if kind == "replace" else []
     return kind, target, direction, list(old)
 
 
@@ -1001,7 +1023,8 @@ def cmd_stop(a, cfg):
                 if w["state"] in ACTIVE_STATES:
                     raise FleetError("quit sent but process exit unconfirmed; slot retained")
             if a.close and w["state"] != "closed":
-                cmux("close-surface", "--workspace", state["workspace"], "--surface", w["surface"])
+                cmux("close-surface", "--workspace", state["workspace"],
+                     "--surface", w.get("surface_id") or w["surface"])
                 w["state"] = "closed"
         except (FleetError, OSError, subprocess.TimeoutExpired) as e:
             failed = True
@@ -1489,7 +1512,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--model")
     s.add_argument("--effort")
     s.add_argument("--family", help="known family for an account-specific model override")
-    s.add_argument("--pane", help="split this pane (at the pane limit, replace it or add a tab) instead of choosing one")
+    s.add_argument("--pane", help="split this pane (ref, UUID or index; at the pane limit, replace it or add a tab) "
+                   "instead of choosing one")
     s.set_defaults(fn=cmd_launch)
 
     s = sub.add_parser("send", help="type a message into a worker's pane and press enter")

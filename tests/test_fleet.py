@@ -264,7 +264,9 @@ class Models(unittest.TestCase):
 
 class PanePlacement(unittest.TestCase):
     def pane(self, ref, surfaces, width=800, height=600):
-        return {"ref": ref, "surface_refs": surfaces, "pixel_frame": {"width": width, "height": height}}
+        # Surface UUIDs equal their refs here, so `retired` (UUIDs) and `busy` (refs) read alike.
+        return {"ref": ref, "id": "uuid-" + ref, "index": int(ref.split(":")[1]) - 1, "surface_refs": surfaces,
+                "surface_ids": list(surfaces), "pixel_frame": {"width": width, "height": height}}
 
     def test_splits_the_largest_pane_along_its_long_side_below_the_limit(self):
         panes = [self.pane("pane:1", ["s:lead"], 1200, 900), self.pane("pane:2", ["s:w1"], 600, 900)]
@@ -285,6 +287,8 @@ class PanePlacement(unittest.TestCase):
         retired, busy = {"s:done", "s:old", "s:done2", "s:lead"}, {"s:live", "s:live6", "s:live7", "s:live8"}
         self.assertEqual(fleet.pick_pane(self.full(), retired, busy, "pane:1"), ("replace", "pane:5", None))
         self.assertEqual(fleet.pick_pane(self.full(), retired, busy, "pane:1", "pane:4"), ("tab", "pane:4", None))
+        for want in ("uuid-pane:4", "3"):  # --pane also takes a UUID or an index
+            self.assertEqual(fleet.pick_pane(self.full(), retired, busy, "pane:1", want), ("tab", "pane:4", None))
         # Nothing to replace: a tab goes in the first idle pane, never the lead's.
         self.assertEqual(fleet.pick_pane(self.full(), {"s:done"}, busy, "pane:1"), ("tab", "pane:3", None))
         for want in ("pane:1", "pane:2"):  # the lead's, a live worker's
