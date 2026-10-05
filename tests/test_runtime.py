@@ -642,6 +642,22 @@ class Runtime(unittest.TestCase):
         self.assertIn("no hold", self.call("release"))
         self.launch("02")
 
+    def test_wait_on_a_held_run_stops_once_a_worker_exits_by_itself(self):
+        self.setup_run()
+        self.launch()
+        self.call("hold")
+        self.receipt()  # the worker exits without fleet stop, so run.json still says running
+        self.assertIn("EXITED 01", self.call("wait", "demo", "--timeout", "1"))
+        self.assertIn("HOLD", self.call("wait", "demo", "--timeout", "1", "--stall", "0"))
+
+    def test_damaged_hold_file_still_blocks_and_release_removes_it(self):
+        self.setup_run()
+        (self.repo / ".fleet/runs/hold.json").write_text("{not json")
+        self.assertIn("unreadable", self.launch(expected=1))
+        self.assertIn("unreadable", self.call("resume", "demo"))
+        self.assertIn("released", self.call("release"))
+        self.launch()
+
     def test_wait_on_a_held_idle_run_returns_at_once(self):
         self.setup_run()
         self.launch()

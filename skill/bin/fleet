@@ -252,7 +252,12 @@ def hold_file(repo: Path) -> Path:
 def load_hold(repo: Path) -> dict | None:
     """The checkout's launch hold (`fleet hold`), or None. It blocks new workers only, never running ones."""
     f = hold_file(repo)
-    return json.loads(f.read_text()) if f.exists() else None
+    if not f.exists():
+        return None
+    try:
+        return dict(json.loads(f.read_text()))
+    except (ValueError, TypeError):  # still a hold: a damaged file must not let launches through
+        return {"since": "an unknown time", "reason": f"unreadable {f.name}; fleet release removes it"}
 
 
 def hold_text(hold: dict) -> str:
@@ -1015,6 +1020,8 @@ def cmd_wait(a, cfg):
                 print(line)
             return 0
         hold = load_hold(repo)
+        if hold:  # in memory only, after the EXITED scan: wait holds no lock and never saves
+            reconcile(repo, state)
         if hold and not active(state):  # a held, idle run has nothing to wait for; waiting would only burn turns
             print(f"HOLD {hold_text(hold)} and no worker is running; tell the owner and stop, do not wait again")
             for i, status in pending_reports(d / "reports"):
@@ -1194,18 +1201,19 @@ def first_binary(bin_field: str) -> str:
 
 def cmd_hold(a, cfg):
     repo = repo_root()
-    hold = {"since": time.strftime("%Y-%m-%dT%H:%M:%S"), "reason": a.reason}
+    since = (load_hold(repo) or {}).get("since") or time.strftime("%Y-%m-%dT%H:%M:%S")  # re-holding keeps it
+    hold = {"since": since, "reason": a.reason}
     hold_file(repo).parent.mkdir(parents=True, exist_ok=True)
     atomic_json(hold_file(repo), hold)
     print(f"{hold_text(hold)} for every run in this checkout; running workers continue. `fleet release` lifts it")
 
 
 def cmd_release(a, cfg):
-    repo = repo_root()
-    if not load_hold(repo):
+    f = hold_file(repo_root())
+    if not f.exists():
         print("no hold; launches were not blocked")
         return 0
-    hold_file(repo).unlink()
+    f.unlink()  # never parsed: a damaged hold file must still be removable
     print("released; launches may continue")
 
 
