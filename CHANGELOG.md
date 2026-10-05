@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.0-preview.7
+
+- Add `fleet steer` to override routing for future launches without modifying the frozen plan:
+  - `fleet steer provider <run> <name>` — lock future launches to one provider; leaves model unset so the lead falls back to normal routing within that provider
+  - `fleet steer model <run> <name>` — set a model override for future launches
+  - `fleet steer reset <run>` — drop back to the plan's original routing
+- Steering affects only new launches; every pane already open ignores it completely. The override writes to the run's live state file (`live.json`), not the frozen plan. `fleet resume` and new launches read this live state.
+
 ## 0.1.0-preview.6
 
 - `fleet launch` opens each worker in a new pane instead of a tab in an existing one, splitting the largest pane (along its long side) until the workspace has 8 panes. At 8 it replaces a pane, other than the lead's, that holds only verified workers whose exit is confirmed, opening the new worker there and closing their surfaces; failing that, it adds a tab to an idle pane (no live worker), so an unverified worker keeps its scrollback. When every other pane has a live worker it refuses before touching the run (no baseline snapshot, no moved report). `--pane` now chooses the pane to split, replace or add a tab to, and accepts a pane ref, UUID or index as listed by `cmux list-panes`.

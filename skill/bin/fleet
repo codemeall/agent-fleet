@@ -245,6 +245,19 @@ def save_run(repo: Path, run: str, state: dict) -> None:
     atomic_json(run_dir(repo, run) / "run.json", state)
 
 
+def load_live_state(repo: Path, run: str) -> dict:
+    """Load the live state file that overrides routing. Returns empty dict if absent."""
+    f = run_dir(repo, run) / "live.json"
+    if not f.exists():
+        return {}
+    return json.loads(f.read_text())
+
+
+def save_live_state(repo: Path, run: str, state: dict) -> None:
+    """Save the live state file for routing overrides."""
+    atomic_json(run_dir(repo, run) / "live.json", state)
+
+
 def worker(state: dict, ticket_id: str) -> dict:
     valid_id(ticket_id)
     w = state["workers"].get(ticket_id)
@@ -667,6 +680,14 @@ def cmd_launch(a, cfg):
     valid_id(a.id)
     reconcile(repo, state)
     save_run(repo, a.run, state)
+    
+    # Apply live state overrides for new launches
+    live = load_live_state(repo, a.run)
+    if live.get("provider"):
+        a.provider = live["provider"]
+    if live.get("model"):
+        a.model = live["model"]
+    
     pcfg = provider(cfg, a.provider)
     if not pcfg.get("enabled", True):
         raise FleetError(f"provider '{a.provider}' is turned off in config")
@@ -1156,6 +1177,33 @@ def cmd_check(a, cfg):
     return 0
 
 
+def cmd_steer(a, cfg):
+    repo = repo_root()
+    state = load_run(repo, a.run)
+    live = load_live_state(repo, a.run)
+    
+    if a.steer_cmd == "provider":
+        pcfg = provider(cfg, a.name)
+        if not pcfg.get("enabled", True):
+            raise FleetError(f"provider '{a.name}' is turned off in config")
+        live["provider"] = a.name
+        # Setting provider alone leaves model unset
+        if "model" in live:
+            del live["model"]
+        save_live_state(repo, a.run, live)
+        print(f"Locked future launches to provider: {a.name}")
+    elif a.steer_cmd == "model":
+        live["model"] = a.name
+        save_live_state(repo, a.run, live)
+        print(f"Set model override: {a.name}")
+    elif a.steer_cmd == "reset":
+        live_path = run_dir(repo, a.run) / "live.json"
+        if live_path.exists():
+            live_path.unlink()
+        print("Dropped steering overrides; routing will follow the plan")
+    return 0
+
+
 def first_binary(bin_field: str) -> str:
     tokens = [t for t in shlex.split(bin_field) if "=" not in t or t.startswith("-")]
     return tokens[0] if tokens else bin_field
@@ -1555,6 +1603,20 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("check", help="compare HEAD and index with the captured baseline")
     s.add_argument("run")
     s.set_defaults(fn=cmd_check)
+
+    s = sub.add_parser("steer", help="steer future launches to a specific provider or model")
+    steer = s.add_subparsers(dest="steer_cmd", required=True)
+    s_provider = steer.add_parser("provider", help="lock future launches to one provider")
+    s_provider.add_argument("run")
+    s_provider.add_argument("name", help="provider name")
+    s_provider.set_defaults(fn=cmd_steer)
+    s_model = steer.add_parser("model", help="set a model override")
+    s_model.add_argument("run")
+    s_model.add_argument("name", help="model name")
+    s_model.set_defaults(fn=cmd_steer)
+    s_reset = steer.add_parser("reset", help="drop steering overrides")
+    s_reset.add_argument("run")
+    s_reset.set_defaults(fn=cmd_steer)
 
     a = ap.parse_args(argv)
     try:
