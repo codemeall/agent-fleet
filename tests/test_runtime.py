@@ -650,6 +650,19 @@ class Runtime(unittest.TestCase):
         self.launch("review-01", "writer", "review")
         self.assertEqual(self.state()["workers"]["review-01"]["provider"], "writer")
 
+    def test_steered_model_takes_its_own_family_and_needs_one_for_review(self):
+        self.setup_run(review="cross-all")
+        # A mixed-family account only knows the families its tiers and model_families name.
+        self.cfg["providers"]["writer"].update(family="mixed", model_families={"borrowed-model": "anthropic"})
+        self.call("steer", "provider", "demo", "writer")
+        self.call("steer", "model", "demo", "mystery-model")
+        self.assertIn("no known family", self.call("launch", "demo", "01", "writer", "--tier", "standard",
+                                                   "--family", "openai", expected=1))
+        self.call("steer", "model", "demo", "borrowed-model")
+        self.call("launch", "demo", "01", "writer", "--tier", "standard", "--family", "openai")
+        w = self.state()["workers"]["01"]
+        self.assertEqual((w["model"], w["family"]), ("borrowed-model", "anthropic"))
+
     def test_steer_stays_inside_routing_and_allowed_models(self):
         self.call("init", "demo", "--workspace", "workspace:1", "--routing", "single:writer")
         self.assertIn("routing", self.call("steer", "provider", "demo", "reviewer", expected=1))

@@ -368,7 +368,7 @@ def apply_steer(a, live: dict) -> None:
     if live.get("provider") and live["provider"] != a.provider:
         a.provider, a.model, a.effort, a.family = live["provider"], None, None, None  # they fit the old provider
     if live.get("model"):
-        a.model = live["model"]
+        a.model, a.family = live["model"], None  # a --family describes the plan's model, not this one
 
 
 def allowed_models(pcfg: dict) -> dict[str, str | None] | None:
@@ -729,6 +729,9 @@ def cmd_launch(a, cfg):
             check_allowed(pcfg, a.provider, model)
             check_effort(pcfg, a.provider, effort)
             check_pool(routing_pool(state["options"]["routing"], cfg), a.provider, model, "steered launch")
+            if t["review_required"] and not family:
+                raise FleetError(f"{a.provider}:{model} has no known family, so this ticket's cross-family review "
+                                 f"could never launch; set it in {a.provider}.model_families")
             print(f"steered: {t['provider']}:{t['model']} -> {a.provider}:{model} (fleet steer reset to undo)",
                   file=sys.stderr)
         elif (a.provider, a.tier, model, effort) != (t["provider"], t["tier"], t["model"], t["effort"]):

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add `fleet steer` so the lead can reroute future implementation launches without editing the frozen plan: `fleet steer provider <run> <name>` (tier model and effort, or the `agents=` pinned model), `fleet steer model <run> <name>` (needs a steered provider; checked against `models_allow`), `fleet steer reset <run>`. The steer lives in the run's `live.json`, stays inside the run's routing, and is shown by `fleet resume`. Launch prints `steered: ...` and records the worker's actual route with `steered: true`. Open panes and review launches are never steered, and a review now checks its family against the writer's recorded family rather than the plan's.
+- Add `fleet steer` so the lead can reroute future implementation launches without editing the frozen plan: `fleet steer provider <run> <name>` (tier model and effort, or the `agents=` pinned model), `fleet steer model <run> <name>` (needs a steered provider; checked against `models_allow`), `fleet steer reset <run>`. The steer lives in the run's `live.json`, stays inside the run's routing, and is shown by `fleet resume`. Launch prints `steered: ...` and records the worker's actual route with `steered: true`. Open panes and review launches are never steered, and a review now checks its family against the writer's recorded family rather than the plan's. A steered launch of a ticket that needs cross-family review refuses a model with no known family.
 
 ## 0.1.0-preview.6
 
