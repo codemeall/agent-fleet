@@ -663,6 +663,21 @@ class Runtime(unittest.TestCase):
         w = self.state()["workers"]["01"]
         self.assertEqual((w["model"], w["family"]), ("borrowed-model", "anthropic"))
 
+    def test_steer_onto_the_plans_route_is_not_reported_as_steered(self):
+        self.setup_run()
+        self.call("steer", "provider", "demo", "writer")
+        self.call("steer", "model", "demo", "writer-model")
+        self.assertNotIn("steered:", self.call("launch", "demo", "01", "writer", "--tier", "standard",
+                                               "--family", "openai"))
+        w = self.state()["workers"]["01"]
+        self.assertEqual((w["model"], w["family"], w["steered"]), ("writer-model", "openai", False))
+
+    def test_steer_to_a_provider_without_a_tier_model_names_steer_model(self):
+        self.setup_run()
+        del self.cfg["providers"]["reviewer"]["tiers"]["standard"]["model"]
+        self.call("steer", "provider", "demo", "reviewer")
+        self.assertIn("fleet steer model demo <name>", self.launch(expected=1))
+
     def test_steer_stays_inside_routing_and_allowed_models(self):
         self.call("init", "demo", "--workspace", "workspace:1", "--routing", "single:writer")
         self.assertIn("routing", self.call("steer", "provider", "demo", "reviewer", expected=1))

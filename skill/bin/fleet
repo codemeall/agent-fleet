@@ -721,8 +721,16 @@ def cmd_launch(a, cfg):
             raise FleetError("ticket already verified; create a follow-up ticket")
         if any(state["tickets"][b]["status"] != "verified" for b in t["blockers"]):
             raise FleetError("ticket has unverified blockers")
-        model, effort = resolve_model(pcfg, a.tier, a.model, a.effort)
+        try:
+            model, effort = resolve_model(pcfg, a.tier, a.model, a.effort)
+        except FleetError:
+            if not steered:
+                raise
+            raise FleetError(f"{a.provider} has no tiers.{a.tier} model to steer to; pick one with "
+                             f"fleet steer model {a.run} <name>") from None
         family = model_family(pcfg, a.tier, model, a.family)
+        if steered and (a.provider, a.tier, model, effort) == (t["provider"], t["tier"], t["model"], t["effort"]):
+            steered, family = False, t["family"]  # the steer landed on the plan's own route
         if steered:  # the plan's route no longer applies, so check what plan time would have
             if a.tier != t["tier"]:
                 raise FleetError("launch tier must match saved plan")
