@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import tempfile
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -617,6 +618,43 @@ class Runtime(unittest.TestCase):
         with patch.object(fleet, "cmux", return_value="\n\nAllow edit?   \n\n\n\n  1. Yes  \n\n\n"):
             self.assertEqual(self.call("peek", "demo", "01"), "Allow edit?\n\n  1. Yes\n")
 
+
+    def test_hold_blocks_new_launches_but_not_running_workers(self):
+        self.setup_run()
+        self.launch()
+        self.call("hold", "--reason", "quota break")
+        run_json = (self.repo / ".fleet/runs/demo/run.json").read_bytes()
+        calls = len(self.cmux_calls)
+        out = self.launch("02", expected=1)
+        self.assertIn("on hold", out)
+        self.assertIn("quota break", out)
+        self.assertEqual((self.repo / ".fleet/runs/demo/run.json").read_bytes(), run_json)
+        self.assertEqual(len(self.cmux_calls), calls)
+        self.assertIn("hold: launches are on hold", self.call("status", "demo"))
+        self.assertIn("hold: launches are on hold", self.call("resume", "demo"))
+        self.assertEqual(json.loads(self.call("resume", "demo", "--json").split("Unconfirmed")[0])["hold"]["reason"],
+                         "quota break")
+        # The running worker still finishes and is verified as usual.
+        self.report()
+        self.stop_with_receipt()
+        self.verify()
+        self.assertIn("released", self.call("release"))
+        self.assertIn("no hold", self.call("release"))
+        self.launch("02")
+
+    def test_wait_on_a_held_idle_run_returns_at_once(self):
+        self.setup_run()
+        self.launch()
+        self.call("hold")
+        self.assertNotIn("HOLD", self.call("wait", "demo", "--timeout", "1", "--interval", "1", expected=2))
+        self.report()
+        self.stop_with_receipt()
+        self.assertIn("REPORT 01", self.call("wait", "demo", "--timeout", "1"))  # events still come first
+        started = time.monotonic()
+        out = self.call("wait", "demo", "--timeout", "60", "--stall", "0")
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertIn("HOLD", out)
+        self.assertIn("PENDING 01 [needs-verification]", out)
 
 class ProcessRunner(unittest.TestCase):
     def test_exit_receipt_follows_real_child_exit_and_records_status(self):

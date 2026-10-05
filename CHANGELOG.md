@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add `fleet hold [--reason <text>]` and `fleet release` to pause new launches for the whole checkout without touching running workers. While held, `fleet launch` refuses before any side effect; `wait`, `peek`, `send`, `stop`, `verify` and `recover` work as usual, so running workers finish and can be verified. `fleet wait` on a held run with no running worker returns at once with `HOLD` instead of polling, and `status`/`resume` show the hold. The hold lives in `.fleet/runs/hold.json` and has no expiry: only `fleet release` lifts it.
+
 ## 0.1.0-preview.6
 
 - `fleet launch` opens each worker in a new pane instead of a tab in an existing one, splitting the largest pane (along its long side) until the workspace has 8 panes. At 8 it replaces a pane, other than the lead's, that holds only verified workers whose exit is confirmed, opening the new worker there and closing their surfaces; failing that, it adds a tab to an idle pane (no live worker), so an unverified worker keeps its scrollback. When every other pane has a live worker it refuses before touching the run (no baseline snapshot, no moved report). `--pane` now chooses the pane to split, replace or add a tab to, and accepts a pane ref, UUID or index as listed by `cmux list-panes`.
