@@ -25,6 +25,16 @@ These are conversational options for you to translate into CLI flags, not an aut
 - If the named run exists, use `fleet resume <run>` (one line per ticket; `--json` for full records), then inspect the reports, decisions, any `notes.md` and reconciled process states. Do not initialize a replacement or relaunch a worker whose exit is unconfirmed.
 - Otherwise use `fleet init <run> [--workspace <ref>] [--routing <mode>] [--review <mode>]`. Map conversational `workspace=`, routing and `review=` directly to these flags. Init validates the selected cmux workspace; never fall back to an unrelated workspace.
 
+### Steering routing
+
+When a provider is failing, rate-limited or a poor fit mid-run, steer future implementation launches instead of rewriting the plan:
+
+- `fleet steer provider <run> <name>` moves future implementation launches to that provider, at the tier's model and effort (or the model pinned by `agents=`). It must be inside the run's routing.
+- `fleet steer model <run> <name>` then picks that provider's model; it must pass `models_allow`.
+- `fleet steer reset <run>` returns to the plan's routing.
+
+Keep passing the plan's provider and tier to `fleet launch`; it prints `steered: ...` and records the worker's actual provider, model and family. Open panes and review launches are never steered, so cross-family review is checked against the family the writer actually ran on. `fleet resume` shows an active steer.
+
 ## 2. Save a complete plan
 
 Discover the exact repository-relative files each ticket needs. Preserve blockers, acceptance criteria, spec decisions and testing requirements. A wave contains tickets with satisfied blockers and disjoint file scopes. Existing owner edits require careful review and must be preserved.
