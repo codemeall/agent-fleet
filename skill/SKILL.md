@@ -27,13 +27,13 @@ These are conversational options for you to translate into CLI flags, not an aut
 
 ### Steering routing
 
-Use `fleet steer` to override routing for future launches without modifying the frozen plan:
+When a provider is failing, rate-limited or a poor fit mid-run, steer future implementation launches instead of rewriting the plan:
 
-- `fleet steer provider <run> <name>` — lock future launches to one provider; leaves model unset so the lead falls back to normal routing within that provider
-- `fleet steer model <run> <name>` — set a model override for future launches
-- `fleet steer reset <run>` — drop back to the plan's original routing
+- `fleet steer provider <run> <name>` moves future implementation launches to that provider, at the tier's model and effort (or the model pinned by `agents=`). It must be inside the run's routing.
+- `fleet steer model <run> <name>` then picks that provider's model; it must pass `models_allow`.
+- `fleet steer reset <run>` returns to the plan's routing.
 
-Steering affects only new launches; every pane already open ignores it completely. The override writes to the run's live state file, not the frozen plan. `fleet resume` reads this live state.
+Keep passing the plan's provider and tier to `fleet launch`; it prints `steered: ...` and records the worker's actual provider, model and family. Open panes and review launches are never steered, so cross-family review is checked against the family the writer actually ran on. `fleet resume` shows an active steer.
 
 ## 2. Save a complete plan
 

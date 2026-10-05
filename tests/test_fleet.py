@@ -1,7 +1,6 @@
 """Unit tests for the pure parts of skill/bin/fleet. Run: python3 -m unittest discover tests"""
 import importlib.machinery
 import importlib.util
-import json
 import os
 import tempfile
 import tomllib
@@ -390,59 +389,6 @@ class Binary(unittest.TestCase):
     def test_env_prefix_is_skipped(self):
         self.assertEqual(fleet.first_binary("CLAUDE_CONFIG_DIR=$HOME/.claude-co claude"), "claude")
         self.assertEqual(fleet.first_binary("cursor-agent"), "cursor-agent")
-
-
-class Steer(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.repo = Path(self.tmp.name)
-        self.run_name = "test-run"
-        self.run_path = self.repo / ".fleet" / "runs" / self.run_name
-        self.run_path.mkdir(parents=True, exist_ok=True)
-        # Create minimal run state
-        state = {"schema": 2, "run": self.run_name, "repo": str(self.repo)}
-        (self.run_path / "run.json").write_text(json.dumps(state))
-    
-    def tearDown(self):
-        self.tmp.cleanup()
-    
-    def test_steer_provider_sets_provider_only(self):
-        live = fleet.load_live_state(self.repo, self.run_name)
-        self.assertEqual(live, {})
-        
-        fleet.save_live_state(self.repo, self.run_name, {"provider": "claude"})
-        live = fleet.load_live_state(self.repo, self.run_name)
-        self.assertEqual(live, {"provider": "claude"})
-    
-    def test_steer_model_sets_model_override(self):
-        fleet.save_live_state(self.repo, self.run_name, {"model": "opus"})
-        live = fleet.load_live_state(self.repo, self.run_name)
-        self.assertEqual(live, {"model": "opus"})
-    
-    def test_steer_provider_removes_model(self):
-        fleet.save_live_state(self.repo, self.run_name, {"provider": "claude", "model": "opus"})
-        live = fleet.load_live_state(self.repo, self.run_name)
-        self.assertEqual(live, {"provider": "claude", "model": "opus"})
-        
-        # Setting provider should remove model
-        live["provider"] = "codex"
-        if "model" in live:
-            del live["model"]
-        fleet.save_live_state(self.repo, self.run_name, live)
-        live = fleet.load_live_state(self.repo, self.run_name)
-        self.assertEqual(live, {"provider": "codex"})
-        self.assertNotIn("model", live)
-    
-    def test_reset_removes_live_state(self):
-        fleet.save_live_state(self.repo, self.run_name, {"provider": "claude", "model": "opus"})
-        live_path = self.run_path / "live.json"
-        self.assertTrue(live_path.exists())
-        
-        live_path.unlink()
-        self.assertFalse(live_path.exists())
-        
-        live = fleet.load_live_state(self.repo, self.run_name)
-        self.assertEqual(live, {})
 
 
 if __name__ == "__main__":

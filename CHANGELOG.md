@@ -1,12 +1,8 @@
 # Changelog
 
-## 0.1.0-preview.7
+## Unreleased
 
-- Add `fleet steer` to override routing for future launches without modifying the frozen plan:
-  - `fleet steer provider <run> <name>` — lock future launches to one provider; leaves model unset so the lead falls back to normal routing within that provider
-  - `fleet steer model <run> <name>` — set a model override for future launches
-  - `fleet steer reset <run>` — drop back to the plan's original routing
-- Steering affects only new launches; every pane already open ignores it completely. The override writes to the run's live state file (`live.json`), not the frozen plan. `fleet resume` and new launches read this live state.
+- Add `fleet steer` so the lead can reroute future implementation launches without editing the frozen plan: `fleet steer provider <run> <name>` (tier model and effort, or the `agents=` pinned model), `fleet steer model <run> <name>` (needs a steered provider; checked against `models_allow`), `fleet steer reset <run>`. The steer lives in the run's `live.json`, stays inside the run's routing, and is shown by `fleet resume`. Launch prints `steered: ...` and records the worker's actual route with `steered: true`. Open panes and review launches are never steered, and a review now checks its family against the writer's recorded family rather than the plan's.
 
 ## 0.1.0-preview.6
 

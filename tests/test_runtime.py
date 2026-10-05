@@ -618,6 +618,50 @@ class Runtime(unittest.TestCase):
             self.assertEqual(self.call("peek", "demo", "01"), "Allow edit?\n\n  1. Yes\n")
 
 
+    def test_steer_moves_implementation_launches_until_reset(self):
+        self.setup_run()
+        self.call("steer", "provider", "demo", "reviewer")
+        self.assertIn("steered: writer:writer-model -> reviewer:reviewer-model", self.launch())
+        w = self.state()["workers"]["01"]
+        self.assertEqual((w["provider"], w["model"], w["family"], w["steered"]),
+                         ("reviewer", "reviewer-model", "anthropic", True))
+        self.assertIn("steer: reviewer:<tier model>", self.call("resume", "demo"))
+        self.assertEqual(json.loads(self.call("resume", "demo", "--json").split("Unconfirmed")[0])["steer"],
+                         {"provider": "reviewer"})
+        self.report()
+        self.stop_with_receipt()
+        self.verify()
+        self.call("steer", "reset", "demo")
+        self.assertNotIn("steer:", self.call("resume", "demo"))
+        self.launch("02")
+        w = self.state()["workers"]["02"]
+        self.assertEqual((w["provider"], w["steered"]), ("writer", False))
+
+    def test_steer_skips_reviews_and_review_checks_the_steered_writers_family(self):
+        self.setup_run(review="cross-all")
+        self.call("steer", "provider", "demo", "reviewer")
+        self.launch()
+        (self.repo / "owned.txt").write_text("implemented change\n")
+        self.report()
+        self.stop_with_receipt()
+        self.review_prompt()
+        # The plan's writer family is openai, but the steered writer ran on anthropic.
+        self.assertIn("famil", self.launch("review-01", "reviewer", "review", expected=1))
+        self.launch("review-01", "writer", "review")
+        self.assertEqual(self.state()["workers"]["review-01"]["provider"], "writer")
+
+    def test_steer_stays_inside_routing_and_allowed_models(self):
+        self.call("init", "demo", "--workspace", "workspace:1", "--routing", "single:writer")
+        self.assertIn("routing", self.call("steer", "provider", "demo", "reviewer", expected=1))
+        self.assertIn("unknown provider", self.call("steer", "provider", "demo", "nobody", expected=1))
+        self.assertIn("provider first", self.call("steer", "model", "demo", "writer-model", expected=1))
+        self.cfg["providers"]["writer"]["models_allow"] = ["writer-model"]
+        self.call("steer", "provider", "demo", "writer")
+        self.assertIn("models_allow", self.call("steer", "model", "demo", "other-model", expected=1))
+        self.call("steer", "model", "demo", "writer-model")
+        self.assertEqual(json.loads((self.repo / ".fleet/runs/demo/live.json").read_text()),
+                         {"provider": "writer", "model": "writer-model"})
+
 class ProcessRunner(unittest.TestCase):
     def test_exit_receipt_follows_real_child_exit_and_records_status(self):
         with tempfile.TemporaryDirectory() as tmp:
