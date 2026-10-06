@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.15
 
 Fleet now records the cmux UUIDs it was meant to address workers and workspaces by.
 
