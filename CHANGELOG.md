@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.0-preview.11
+
+Fleet no longer types into the wrong terminal after a cmux restart, and `feature-docs` joins the optional companion skills.
+
+- `fleet send`, `peek`, `stop` and the stall check in `fleet wait` now address a worker's surface by the UUID recorded at launch. Refs like `surface:4` restart from 1 with cmux, so after a restart a saved ref could name someone else's terminal, and `fleet stop` would have typed the quit keys into it. A worker whose UUID was never recorded is still addressed by its ref.
+- README: a hold does not make a shutdown safe. Workers killed by a shutdown leave no exit receipt and stay listed as running after `fleet release`; the README says how to recover and resume them, and example 7 warns that a pid can be reused after a reboot.
+- `feature-docs` (from codemeall/feature-init) is a new optional companion skill. After a run is verified, the lead can use it to write or sync `docs/<feature>/feature-docs/`, the tracked record of a feature whose spec and tickets stay in the untracked `.scratch/` folder. `fleet doctor` reports where it is installed, and the skill, README, host reference and worked examples say when the lead uses it.
+
 ## 0.1.0-preview.10
 
 A worker that hits its usage limit can continue its own session instead of starting over.
