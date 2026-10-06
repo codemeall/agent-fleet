@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.13
 
 Adds a command reference for owners and the lead.
 
