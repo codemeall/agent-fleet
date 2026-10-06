@@ -49,6 +49,8 @@ class Runtime(unittest.TestCase):
             }
         self.cmux_calls = []
         self.surface = 0
+        self.inline_ids = True    # a current cmux prints the new surface's UUID when asked with --id-format both
+        self.workspace_id = None  # set to have list-panes name the workspace's UUID, as a current cmux does
         self.panes = [{"ref": "pane:1", "surface_refs": ["surface:lead"], "selected_surface_ref": "surface:lead",
                        "pixel_frame": {"width": 1200, "height": 900}}]
         real_sh = fleet.sh
@@ -71,6 +73,8 @@ class Runtime(unittest.TestCase):
         return subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True, text=True).stdout
 
     def fake_cmux(self, *args, **kwargs):
+        with_ids = args[:2] == ("--id-format", "both")
+        args = args[2:] if with_ids else args
         self.cmux_calls.append(args)
         if args[0] in ("new-surface", "new-split"):
             self.surface += 1
@@ -81,7 +85,7 @@ class Runtime(unittest.TestCase):
             for p in self.panes:
                 if args[0] == "new-surface" and p["ref"] == args[args.index("--pane") + 1]:
                     p["surface_refs"].append(ref)
-            return "OK " + ref
+            return f"OK {ref} ({self.uuid(ref)}) workspace:1" if with_ids and self.inline_ids else "OK " + ref
         if args[0] == "close-surface":
             for p in self.panes:
                 p["surface_refs"] = [r for r in p["surface_refs"] if self.uuid(r) != args[-1]]
@@ -90,7 +94,7 @@ class Runtime(unittest.TestCase):
             for p in panes:  # like --id-format both; a pane may pin its own UUIDs
                 p.setdefault("id", "uuid-" + p["ref"])
                 p.setdefault("surface_ids", [self.uuid(r) for r in p["surface_refs"]])
-            return json.dumps({"panes": panes})
+            return json.dumps({"panes": panes, **({"workspace_id": self.workspace_id} if self.workspace_id else {})})
         if args[:2] == ("--json", "identify"):
             return json.dumps({"caller": {"pane_ref": "pane:1"}})
         return "OK"
@@ -658,6 +662,52 @@ class Runtime(unittest.TestCase):
         state["workers"]["01"]["state"] = "running"
         fleet.save_run(self.repo, "demo", state)
         self.assertEqual(targets(), {"surface:1"})
+
+    def test_launch_records_the_uuid_cmux_prints_before_the_surface_is_listed(self):
+        self.setup_run()
+        with patch.object(fleet, "surface_uuid", return_value=None):  # cmux lists a new surface a moment later
+            self.launch()
+        self.assertEqual(self.state()["workers"]["01"]["surface_id"], "uuid-surface:1")
+
+    def test_launch_waits_for_the_listing_when_cmux_prints_no_uuid(self):
+        self.setup_run()
+        self.inline_ids = False  # an older cmux
+        with patch.object(fleet.time, "sleep"), patch.object(fleet, "surface_uuid", side_effect=[None, "uuid-late"]):
+            self.launch()
+        self.assertEqual(self.state()["workers"]["01"]["surface_id"], "uuid-late")
+        self.receipt()
+        with patch.object(fleet.time, "sleep"), patch.object(fleet, "surface_uuid", return_value=None):
+            out = self.launch()
+        self.assertIn("addressed by its ref", out)
+        self.assertIsNone(self.state()["workers"]["01"]["surface_id"])
+
+    def test_init_stores_the_workspace_uuid_because_refs_are_renumbered(self):
+        self.workspace_id = "WS-UUID"
+        self.assertIn("workspace: WS-UUID (workspace:1)", self.call("init", "demo", "--workspace", "workspace:1"))
+        self.assertEqual(self.state()["workspace"], "WS-UUID")
+        self.assertNotIn("cmux ref", self.call("resume", "demo"))
+
+    def test_resume_warns_when_an_older_run_stored_a_workspace_ref(self):
+        self.setup_run()
+        self.assertIn("workspace:1 is a cmux ref", self.call("resume", "demo"))
+
+    def test_stop_close_accepts_a_surface_that_closed_itself_when_the_worker_exited(self):
+        self.setup_run()
+        self.launch()
+        real = self.fake_cmux
+
+        def refused(*args, **kwargs):
+            if args[0] == "close-surface":
+                raise fleet.FleetError("Surface not found")
+            return real(*args, **kwargs)
+
+        with patch.object(fleet, "cmux", side_effect=refused), patch.object(fleet.time, "sleep"), \
+                patch.object(fleet, "send_keys", side_effect=lambda *_: self.receipt()):
+            self.assertIn("Surface not found", self.call("stop", "demo", "01", "--close", "--timeout", "1", expected=1))
+            self.assertEqual(self.state()["workers"]["01"]["state"], "exited")  # still listed: the failure stands
+            self.panes = [p for p in self.panes if "surface:1" not in p["surface_refs"]]
+            self.call("stop", "demo", "01", "--close")
+        self.assertEqual(self.state()["workers"]["01"]["state"], "closed")
 
     def test_each_unreachable_episode_wakes_once(self):
         self.setup_run()

@@ -95,7 +95,7 @@ Adds a provider that reuses an adapter (`claude`, `codex`) with its own account 
 fleet init <run> [--workspace <ref>] [--routing <mode>] [--review off|cross-heavy|cross-all]
 ```
 
-Creates `.fleet/runs/<run>/`, adds it to `.fleet/.gitignore`, and records the HEAD and index baseline. It validates the cmux workspace (`--workspace`, the config default, or the current one). It refuses if the run already exists, or if another run in this checkout still has live workers.
+Creates `.fleet/runs/<run>/`, adds it to `.fleet/.gitignore`, and records the HEAD and index baseline. It validates the cmux workspace (`--workspace`, the config default, or the current one) and stores its UUID, because cmux renumbers refs like `workspace:2` when it restarts. It refuses if the run already exists, or if another run in this checkout still has live workers.
 
 **Use:** once per run. Map the owner's `workspace=`, routing (`auto`, `single:<provider>`, `agents=…`) and `review=` options to these flags. For an existing run, use `resume` instead.
 
@@ -200,7 +200,7 @@ Reconciles exit receipts, then lists each worker's provider and model, pane, sta
 fleet stop <run> <id ...> | --all [--close] [--timeout <seconds>]
 ```
 
-Sends each worker its quit keys and waits up to `--timeout` seconds (default 10, at most 60) for a confirmed exit. A failed stop marks the worker `stop-failed` and keeps its slot. `--close` closes the tab, only after a confirmed exit.
+Sends each worker its quit keys and waits up to `--timeout` seconds (default 10, at most 60) for a confirmed exit. A failed stop marks the worker `stop-failed` and keeps its slot. `--close` closes the tab, only after a confirmed exit; a tab cmux already closed when the worker exited counts as closed.
 
 **Use:** before capturing a review diff, before verifying, after a reviewer finishes, and with `--all` before the machine or cmux shuts down.
 
@@ -252,7 +252,7 @@ Compares the current HEAD and index with the baseline from `init`. Exits 1 and l
 fleet resume <run> [--json]
 ```
 
-Reconciles exit receipts and prints the run's options, any active steer or hold, one line per ticket, the decisions, each worker's state, report and `pid`, and the path to `notes.md`. `--json` prints the full records.
+Reconciles exit receipts and prints the run's options, any active steer or hold, one line per ticket, the decisions, each worker's state, report and `pid`, and the path to `notes.md`. `--json` prints the full records. A run created before init stored the workspace's UUID gets a `workspace: … is a cmux ref` line: after a cmux restart, confirm the ref still names the run's workspace before launching.
 
 **Use:** when the named run already exists, after a compaction (`LEAD compacted …`), and when starting as a fresh lead. Then read `notes.md` and handle what the latest `## Handoff` entry lists as awaiting you. Never `init` a replacement run.
 

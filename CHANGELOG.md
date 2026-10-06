@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+Fleet now records the cmux UUIDs it was meant to address workers and workspaces by.
+
+- `fleet launch` reads the new surface's UUID from cmux's reply. It used to look the surface up in the pane listing straight after creating it, but cmux lists a new surface about 0.2s later, so the UUID was almost never recorded and `send`, `peek`, `stop` and `wait` fell back to the ref that preview.11 meant to avoid. A cmux that does not print the UUID gets a short retry of the listing, and launch now says so when it still has only the ref.
+- `fleet init` stores the workspace's UUID instead of the ref it was given. cmux renumbers refs like `workspace:2` in sidebar order when it restarts, so a saved ref could name another project's workspace; UUIDs survive the restart. `fleet resume` flags an older run that still holds a ref.
+- `fleet stop --close` no longer fails when cmux already closed the worker's tab on exit: a surface that is gone counts as closed.
+
 ## 0.1.0-preview.14
 
 Clearer wording around `wait`, `hold` and `stop`.

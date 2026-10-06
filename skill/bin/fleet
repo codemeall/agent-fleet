@@ -53,7 +53,8 @@ DEFAULTS = {
     "review": "cross-heavy",
 }
 STATUS_RE = re.compile(r"^\s*[*_`]*\s*status\s*[*_`]*\s*:\s*[*_`]*\s*(.+?)\s*[*_`]*\s*$", re.I)
-SURFACE_RE = re.compile(r"surface:\d+")
+SURFACE_RE = re.compile(r"(surface:\d+)(?: \(([^)\s]+)\))?")  # the UUID follows when cmux is asked for both
+WORKSPACE_REF_RE = re.compile(r"workspace:\d+\Z")
 ACCOUNT_RE = re.compile(r'"email"\s*:\s*"([^"]+)"')
 EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
 PROMPT_FIELDS = {  # optional per-ticket plan fields that complete a worker prompt
@@ -742,7 +743,10 @@ def cmd_init(a, cfg):
     workspace = a.workspace or cfg["defaults"]["workspace"] or os.environ.get("CMUX_WORKSPACE_ID")
     if not workspace:
         raise FleetError("no cmux workspace: pass --workspace or run inside cmux")
-    cmux("list-panes", "--workspace", workspace)  # Fail before creating state for an invalid workspace.
+    # Fail before creating state for an invalid workspace. Keep its UUID: cmux renumbers refs like workspace:2
+    # when it restarts, and the ref could then name another project's workspace.
+    listing = json.loads(cmux("--json", "--id-format", "both", "list-panes", "--workspace", workspace))
+    given, workspace = workspace, listing.get("workspace_id") or workspace
     options = dict(cfg["defaults"], routing=a.routing or cfg["defaults"]["routing"],
                    review=a.review or cfg["defaults"]["review"])
     routing_pool(options["routing"], cfg)
@@ -756,7 +760,8 @@ def cmd_init(a, cfg):
              "created": time.strftime("%Y-%m-%dT%H:%M:%S"), "baseline": git_snapshot(repo),
              "options": options, "tickets": {}, "workers": {}, "prompts": {}, "decisions": []}
     save_run(repo, a.run, state)
-    print(f"run dir: {d}\nworkspace: {workspace}\nNext: fleet plan {a.run} --file <plan.json>")
+    print(f"run dir: {d}\nworkspace: {workspace}{'' if given == workspace else f' ({given})'}\n"
+          f"Next: fleet plan {a.run} --file <plan.json>")
 
 
 def cmd_plan(a, cfg):
@@ -1022,18 +1027,22 @@ def cmd_launch(a, cfg):
     else:  # new-split has no --working-directory
         args = ["new-split", direction, "--workspace", state["workspace"], "--surface", target,
                 "--command", f"cd {shlex.quote(str(repo))} && exec {wrapped}", "--focus", "false"]
-    out = cmux(*args)
+    out = cmux("--id-format", "both", *args)
     m = SURFACE_RE.search(out)
     if not m:
         raise FleetError(f"uncertain launch; inspect cmux before recovery: {out.strip()}")
     w = state["workers"][a.id]
-    w["surface"], w["state"] = m.group(0), "running"
+    w["surface"], w["state"] = m.group(1), "running"
     # Refs like surface:4 restart from 1 with cmux, so only the UUID safely names this surface later.
-    try:
-        w["surface_id"] = surface_uuid(list_panes(state["workspace"]), w["surface"])
-    except (FleetError, OSError, subprocess.TimeoutExpired, ValueError, KeyError) as e:
-        print(f"could not record {w['surface']}'s UUID; its pane will not be replaced: {str(e).strip()[:200]}",
-              file=sys.stderr)
+    w["surface_id"], why = m.group(2), "cmux did not list it"
+    if not w["surface_id"]:
+        try:
+            w["surface_id"] = listed_surface_uuid(state["workspace"], w["surface"])
+        except (FleetError, OSError, subprocess.TimeoutExpired, ValueError, KeyError) as e:
+            why = str(e).strip()[:200]
+    if not w["surface_id"]:
+        print(f"could not record {w['surface']}'s UUID ({why}); it is addressed by its ref and its pane will not "
+              "be replaced", file=sys.stderr)
     save_run(repo, a.run, state)
     for surface in old_surfaces:  # UUIDs of verified workers whose exit is confirmed
         try:
@@ -1091,6 +1100,24 @@ def surface_uuid(panes: list[dict], ref: str) -> str | None:
             if r == ref:
                 return sid
     return None
+
+
+def listed_surface_uuid(workspace: str, ref: str) -> str | None:
+    """For a cmux that does not print a new surface's UUID: its listing shows the surface a moment after creating it."""
+    for pause in (0, 0.2, 0.2, 0.2, 0.4):
+        time.sleep(pause)
+        if sid := surface_uuid(list_panes(workspace), ref):
+            return sid
+    return None
+
+
+def surface_gone(workspace: str, target: str) -> bool:
+    """True once cmux stops listing the surface (by UUID or ref); the listing trails a close by a moment."""
+    for pause in (0, 0.2, 0.2, 0.4):
+        time.sleep(pause)
+        if not any(target in p.get("surface_ids", []) + p.get("surface_refs", []) for p in list_panes(workspace)):
+            return True
+    return False
 
 
 def surface_target(w: dict) -> str:
@@ -1331,7 +1358,11 @@ def cmd_stop(a, cfg):
                 if w["state"] in ACTIVE_STATES:
                     raise FleetError("quit sent but process exit unconfirmed; slot retained")
             if a.close and w["state"] != "closed":
-                cmux("close-surface", "--workspace", state["workspace"], "--surface", surface_target(w))
+                try:
+                    cmux("close-surface", "--workspace", state["workspace"], "--surface", surface_target(w))
+                except FleetError:  # cmux may already have closed the surface when the worker exited
+                    if not surface_gone(state["workspace"], surface_target(w)):
+                        raise
                 w["state"] = "closed"
         except (FleetError, OSError, subprocess.TimeoutExpired) as e:
             failed = True
@@ -1367,6 +1398,9 @@ def cmd_resume(a, cfg):
                   "  (fleet steer reset to undo)")
         if hold:
             print(f"hold: {hold_text(hold)}; running workers continue, `fleet release` lifts it")
+        if WORKSPACE_REF_RE.match(state["workspace"]):  # a run from before init stored the UUID
+            print(f"workspace: {state['workspace']} is a cmux ref, which cmux renumbers when it restarts; confirm it "
+                  "still names this run's workspace before launching")
         print("tickets:")
         for i, t in state["tickets"].items():
             model = f"{t['provider']}:{t['model']}" + (f"@{t['effort']}" if t.get("effort") else "")
