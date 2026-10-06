@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.8
+
+Shows which Fleet version is running, and which optional companion skills the lead has.
 
 - Add `fleet version` and `fleet --version`. They print the runtime's version (and, for `version`, its skill directory) without reading the user config. The version lives in `skill/bin/fleet`, so skills CLI and plugin installs carry it too. A test keeps it equal to `package.json`.
 - `fleet doctor` prints the runtime's version first and shows each host's installed `fleet` skill with its version, flagging copies that differ from the runtime.
