@@ -18,6 +18,9 @@
 # family: model family, used to pick a reviewer from a different family.
 # account_env: the CLI's account-directory variable. Fleet clears it unless `env` sets it,
 #   so an adapter never borrows the account the lead happens to run under.
+# session/resume: argument fragments for the launch line's {session} slot; {id} is a UUID Fleet picks.
+#   `session` names the session at launch, `resume` continues it (`fleet launch --resume`). Both are
+#   needed; without them the slot is dropped and the worker cannot be resumed.
 # extends: copy another adapter (all fields except `enabled`) and override some, e.g. a second
 #   subscription: extends = "claude" + env = { CLAUDE_CONFIG_DIR = "~/.claude-co" }.
 #   `fleet account add <name> --from <adapter> --dir <path>` writes one for you.
@@ -25,7 +28,9 @@
 [providers.claude]
 enabled = true
 bin = "claude"
-launch = "{bin} --model {model} --effort {effort} {prompt}"
+launch = "{bin} {session} --model {model} --effort {effort} {prompt}"
+session = "--session-id {id}"
+resume = "--resume {id}"
 quit = ["/exit", "enter"]
 login = "claude auth status"
 login_ok = '"loggedIn": true'

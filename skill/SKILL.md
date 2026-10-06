@@ -37,6 +37,8 @@ When a provider is failing, rate-limited or a poor fit mid-run, steer future imp
 
 Keep passing the plan's provider and tier to `fleet launch`; it prints `steered: ...` and records the worker's actual provider, model and family. Open panes and review launches are never steered, so cross-family review is checked against the family the writer actually ran on. `fleet resume` shows an active steer.
 
+A worker on a usage limit usually shows as `STALLED`; `fleet peek` confirms it. Stop it, then either relaunch after the reset with `--resume`, which continues the worker's own session with its reasoning (adapters with `resume`, such as Claude; same provider only, so not across a steer), or steer within the run's routing and relaunch fresh with a Repair note (examples 6). A usage limit is not a permission denial: steering inside the run's routing needs no further approval. When neither is possible, tell the owner.
+
 ## 2. Save a complete plan
 
 Discover the exact repository-relative files each ticket needs. Preserve blockers, acceptance criteria, spec decisions and testing requirements. A wave contains tickets with satisfied blockers and disjoint file scopes. Existing owner edits require careful review and must be preserved.
@@ -72,7 +74,7 @@ Every wait is a full turn over your whole context, so wait long and rarely. Use 
 - `REPORT <id> [needs-verification]`: inspect the report and go to verification.
 - `REPORT <id> [blocked]`: clarify an authorized task decision with `fleet send <run> <id> <answer>` and save the decision in `.fleet/runs/<run>/notes.md` (the saved plan is frozen after launch).
 - `EXITED <id>`: the process ended before handing back; run `fleet status`, read its report, then repair or relaunch within its assignment.
-- `STALLED <id>`: its screen has not changed for `--stall` seconds (default 180), including after you answered it; `fleet peek` it for a prompt or error.
+- `STALLED <id>`: its screen has not changed for `--stall` seconds (default 180), including after you answered it; `fleet peek` it for a prompt, error or usage limit.
 - `UNREACHABLE <id>`: cmux cannot read its pane; the pane may be closed. A missing pane is not exit evidence (step 6).
 - `HOLD`: launches are on hold and no worker is running. Handle any `PENDING <id>` lines, tell the owner, and stop; do not wait again until they release.
 - `TIMEOUT`: nothing new. Handle any `PENDING <id>` lines it prints (reports still waiting on you), otherwise wait again; do not peek or check status by reflex.

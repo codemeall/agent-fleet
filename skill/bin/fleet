@@ -185,16 +185,32 @@ def resolve_model(pcfg: dict, tier: str | None, model: str | None, effort: str |
     return model, effort or tier_cfg.get("effort")
 
 
-def build_launch(pcfg: dict, model: str, effort: str | None, prompt: str) -> str:
+def resumable(pcfg: dict) -> bool:
+    """True when the launch line names its session, so `fleet launch --resume` can continue it later."""
+    return "{session}" in pcfg["launch"] and bool(pcfg.get("session")) and bool(pcfg.get("resume"))
+
+
+def build_launch(pcfg: dict, model: str, effort: str | None, prompt: str,
+                 session: str | None = None, resume: bool = False) -> str:
     template = pcfg["launch"]
     if "{effort}" in template and not effort:
         raise FleetError("this provider's launch needs an effort: pass --effort or set it on the tier")
-    return env_prefix(pcfg) + template.format(bin=pcfg["bin"], model=shlex.quote(model), effort=shlex.quote(effort or ""), prompt=shlex.quote(prompt))
+    flag = pcfg["resume" if resume else "session"].format(id=shlex.quote(session)) if session and resumable(pcfg) else ""
+    if not flag:
+        template = template.replace(" {session}", "").replace("{session}", "")
+    return env_prefix(pcfg) + template.format(bin=pcfg["bin"], session=flag, model=shlex.quote(model),
+                                              effort=shlex.quote(effort or ""), prompt=shlex.quote(prompt))
 
 
 def worker_prompt_line(prompt_path: Path, ticket_id: str) -> str:
     return (f"Read {prompt_path} and follow it exactly. You are fleet worker {ticket_id}. "
             f"Your report path and hard rules are in that file.")
+
+
+def resume_prompt_line(prompt_path: Path, ticket_id: str, report: Path) -> str:
+    return (f"Continue as fleet worker {ticket_id} from where you stopped; your assignment is unchanged. "
+            f"Check the end of {prompt_path} for a Repair note from the lead. "
+            f"Your earlier report was archived: write {report} again when you hand back.")
 
 
 def unfilled_fields(text: str) -> list[str]:
@@ -910,6 +926,16 @@ def cmd_launch(a, cfg):
     w = state["workers"].get(a.id)
     if w and w.get("state") in ACTIVE_STATES:
         raise FleetError(f"worker {a.id} may still be running on {w['surface']}; stop or recover it first")
+    if a.resume:  # the session lives in one account's CLI history, so it cannot follow a steer
+        if not (w or {}).get("session"):
+            raise FleetError(f"{a.id} has no saved session to resume; relaunch without --resume")
+        if a.provider != w["provider"]:
+            raise FleetError(f"{a.id}'s session belongs to {w['provider']}, not {a.provider}; relaunch without "
+                             f"--resume, or fleet steer provider {a.run} {w['provider']} first")
+        if not resumable(pcfg):
+            raise FleetError(f"{a.provider}'s adapter cannot resume: its launch needs a {{session}} slot and "
+                             "session/resume fields; relaunch without --resume")
+    session = w["session"] if a.resume else str(uuid.uuid4()) if resumable(pcfg) else None
     running = active(state)
     if len(running) >= state["options"]["max_parallel"]:
         raise FleetError("max_parallel reached; stop and confirm an existing worker's exit first")
@@ -979,13 +1005,15 @@ def cmd_launch(a, cfg):
     if report.exists():
         report.replace(d / "reports" / f"{a.id}.{uuid.uuid4().hex}.previous")
     token = uuid.uuid4().hex
-    command = build_launch(pcfg, model, effort, worker_prompt_line(prompt_path, a.id))
+    line = resume_prompt_line(prompt_path, a.id, report) if a.resume else worker_prompt_line(prompt_path, a.id)
+    command = build_launch(pcfg, model, effort, line, session, a.resume)
     exit_file = d / "exits" / f"{a.id}.{token}.json"
     wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_run", str(exit_file), token, command])
     # Persist before launch: an uncertain cmux result must not silently free capacity.
     state["workers"][a.id] = dict(meta, id=a.id, provider=a.provider, model=model, effort=effort,
         family=family, tier=a.tier, steered=steered, surface="unknown", state="launching", command=command,
-        token=token, exit_file=str(exit_file), launched=time.strftime("%Y-%m-%dT%H:%M:%S"))
+        token=token, exit_file=str(exit_file), launched=time.strftime("%Y-%m-%dT%H:%M:%S"),
+        **({"session": session} if session else {}))
     save_run(repo, a.run, state)
     if kind in ("replace", "tab"):  # a new surface in the pane; a replaced pane's old surfaces close below
         args = ["new-surface", "--workspace", state["workspace"], "--pane", target,
@@ -1223,7 +1251,7 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
         elif flagged == "0" and now - since >= stall:
             marker.write_text(f"{token}:{h}|{since}|1")
             events.append(f"STALLED {i} screen unchanged for {int(now - since)}s; fleet peek {state['run']} {i} "
-                          "(permission, login or trust prompt?)")
+                          "(permission, login or trust prompt, or usage limit?)")
     return events
 
 
@@ -1975,6 +2003,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--family", help="known family for an account-specific model override")
     s.add_argument("--pane", help="split this pane (ref, UUID or index; at the pane limit, replace it or add a tab) "
                    "instead of choosing one")
+    s.add_argument("--resume", action="store_true",
+                   help="continue the stopped worker's own CLI session (same account), e.g. after a usage limit resets")
     s.set_defaults(fn=cmd_launch)
 
     s = sub.add_parser("send", help="type a message into a worker's pane and press enter")

@@ -108,6 +108,8 @@ Use this after `EXITED api-client`, or when a stopped worker needs fixes within 
    ```
 3. `fleet launch settings api-client codex --tier heavy`. The previous report is kept as `reports/api-client.<hex>.previous`, and the diff baseline stays at the first launch.
 
+If the worker stopped on a usage limit and its adapter can resume (Claude), wait for the reset and add `--resume`: the worker continues its own session, so step 2 is only needed for new instructions.
+
 A change of scope is not a repair; use a follow-up run (example 8). To move future launches to another provider or model, use `fleet steer` (skill step 1, Steering routing).
 
 ## 7. Recover a worker whose exit cannot be confirmed

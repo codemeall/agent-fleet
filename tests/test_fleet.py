@@ -50,6 +50,16 @@ class ProviderConfig(unittest.TestCase):
                         .startswith("env -u CLAUDE_CONFIG_DIR claude --model opus"))
         self.assertIn("-i go", fleet.build_launch(p["agy"], "gemini-3.1-pro-high", "high", "go"))
 
+    def test_claude_names_its_session_and_can_resume_it(self):
+        p, sid = self.cfg["providers"], "0b6c4a52-7c1e-4f0e-9d2a-3f1e2d4c5b6a"
+        self.assertTrue(fleet.build_launch(p["claude"], "opus", "high", "go", session=sid)
+                        .endswith(f"claude --session-id {sid} --model opus --effort high go"))
+        self.assertTrue(fleet.build_launch(p["claude-co"], "opus", "high", "go", session=sid, resume=True)
+                        .endswith(f"claude --resume {sid} --model opus --effort high go"))
+        self.assertTrue(fleet.resumable(p["claude-co"]))
+        self.assertFalse(fleet.resumable(p["codex"]))
+        self.assertNotIn(sid, fleet.build_launch(p["codex"], "m", "high", "go", session=sid))
+
     def test_prompt_is_shell_quoted(self):
         cmd = fleet.build_launch(self.cfg["providers"]["codex"], "m", "high", "Read it; rm -rf / 'x'")
         self.assertTrue(cmd.endswith("'Read it; rm -rf / '\"'\"'x'\"'\"''"))

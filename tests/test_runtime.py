@@ -13,6 +13,7 @@ import tempfile
 import sys
 import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -458,6 +459,7 @@ class Runtime(unittest.TestCase):
         events = self.scan()
         self.assertEqual(len(events), 1)
         self.assertIn("STALLED 01 screen unchanged for 6", events[0])
+        self.assertIn("usage limit", events[0])
         self.assertEqual(self.scan(), [])                       # same screen does not wake again
         self.assertEqual(self.scan(stall=0), [])
         marker.unlink()
@@ -660,6 +662,59 @@ class Runtime(unittest.TestCase):
         self.assertEqual(self.scan(), [])
         self.receipt(returncode=2)
         self.assertIn("returncode=2", self.scan()[0])
+
+    def resumable_writer(self):
+        self.cfg["providers"]["writer"].update(launch="{bin} {session} --model {model} --effort {effort} {prompt}",
+                                               session="--session-id {id}", resume="--resume {id}")
+
+    def worker_argv(self, ticket="01"):
+        return shlex.split(self.state()["workers"][ticket]["command"])
+
+    def test_resume_continues_the_exited_workers_own_session(self):
+        self.resumable_writer()
+        self.setup_run()
+        self.launch()
+        first = self.state()["workers"]["01"]
+        sid = str(uuid.UUID(first["session"]))                  # a real, dashed UUID
+        argv = self.worker_argv()
+        self.assertEqual(argv[argv.index("--session-id") + 1], sid)
+        self.receipt(returncode=1)
+        self.call("status", "demo")
+        self.call("launch", "demo", "01", "writer", "--resume")
+        w = self.state()["workers"]["01"]
+        self.assertEqual(w["session"], sid)
+        self.assertNotEqual(w["token"], first["token"])
+        argv = self.worker_argv()
+        self.assertNotIn("--session-id", argv)
+        self.assertEqual(argv[argv.index("--resume") + 1], sid)
+        self.assertIn(str(self.repo / ".fleet/runs/demo/reports/01.md"), argv[-1])  # the old report was archived
+        self.receipt(returncode=1)
+        self.call("status", "demo")
+        self.call("launch", "demo", "01", "writer", "--resume")     # a second limit resumes the same session
+        self.assertEqual(self.state()["workers"]["01"]["session"], sid)
+
+    def test_resume_needs_a_saved_session(self):
+        self.setup_run()                                        # this writer cannot name a session
+        self.launch()
+        self.assertNotIn("session", self.state()["workers"]["01"])
+        self.receipt()
+        self.call("status", "demo")
+        self.assertIn("no saved session", self.call("launch", "demo", "01", "writer", "--resume", expected=1))
+        self.assertIn("no saved session", self.call("launch", "demo", "02", "writer", "--resume", expected=1))
+
+    def test_resume_stays_on_the_sessions_account(self):
+        self.resumable_writer()
+        self.setup_run()
+        self.launch()
+        self.receipt()
+        self.call("status", "demo")
+        self.call("steer", "provider", "demo", "reviewer")
+        out = self.call("launch", "demo", "01", "writer", "--resume", expected=1)
+        self.assertIn("belongs to writer", out)
+        self.assertEqual(self.state()["workers"]["01"]["state"], "exited")  # refused before any side effect
+        self.call("steer", "reset", "demo")
+        del self.cfg["providers"]["writer"]["resume"]           # the adapter lost resume since launch
+        self.assertIn("cannot resume", self.call("launch", "demo", "01", "writer", "--resume", expected=1))
 
     def test_timeout_lists_reports_another_wait_already_consumed(self):
         self.setup_run()
