@@ -4,7 +4,7 @@ Run a fleet of coding-agent CLIs (Claude Code, Codex, Cursor) in visible [cmux](
 
 The lead turns approved tickets into a saved execution plan, picks a worker model and effort for each ticket, watches progress, and verifies every result before dependents start. Workers share one Git checkout with explicit file ownership. **You keep control of commits and publishing.**
 
-> **Preview `0.1.0-preview.11`.** Bundled adapters exist for Claude Code, Codex and Cursor. Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
+> **Preview `0.1.0-preview.12`.** Bundled adapters exist for Claude Code, Codex and Cursor. Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
 
 - [Quick start](#quick-start)
 - [Installation](#installation)
