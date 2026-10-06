@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+Clearer wording around `wait`, `hold` and `stop`.
+
+- Where the lead was told to "stop" (after a hold, a `HOLD` from `fleet wait`, or a handoff), the CLI and docs now say "end your turn", and the hold messages add "do not run `fleet stop`", so a lead can't read it as quitting workers. The handoff line now reads `Lead: end your turn here.`
+- The command reference gains a "Wait, hold or stop" note: `wait` is the lead listening, `hold` blocks workers that haven't started, `stop` quits running ones.
+- README: `fleet wait` moved out of the owner command table (it's a lead command); a line above the table explains the difference.
+
 ## 0.1.0-preview.13
 
 Adds a command reference for owners and the lead.

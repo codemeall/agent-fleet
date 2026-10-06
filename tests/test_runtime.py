@@ -198,7 +198,7 @@ class Runtime(unittest.TestCase):
         self.assertIn("- Owner prefers Codex for API tickets.", notes)
         self.assertIn("/clear", out)
         self.assertIn("/fleet resume demo", out)
-        self.assertIn("Lead: stop here", out)
+        self.assertIn("Lead: end your turn here", out)
         with patch.dict(os.environ, {"CODEX_THREAD_ID": "01a10dd0-cc90-7880-884b-11a5b4ba24dc"}):
             out = self.call("handoff", "demo", "--compact", "--no-notes")
         self.assertIn("(compaction)", (self.repo / ".fleet/runs/demo/notes.md").read_text())

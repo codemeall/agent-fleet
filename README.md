@@ -259,14 +259,13 @@ Point the lead at the real spec, glossary (`GLOSSARY.md`, optionally `GLOSSARY-M
 
 ### Commands
 
-The lead drives Fleet through the `fleet` CLI; you rarely need to, but you can run any command yourself once [`fleet` is on your PATH](#put-fleet-on-your-path-optional). The [command reference](skill/references/commands.md) lists every command, what it does and when to use it. The ones you're most likely to type or ask for:
+The lead drives Fleet through the `fleet` CLI; you rarely need to, but you can run any command yourself once [`fleet` is on your PATH](#put-fleet-on-your-path-optional). The [command reference](skill/references/commands.md) lists every command, what it does and when to use it. `hold` blocks new workers while running ones carry on; `stop` quits running workers. (`fleet wait`, which you'll see the lead run, is just the lead listening for worker events; it changes nothing.) The ones you're most likely to type or ask for:
 
 | Command | What it does |
 | --- | --- |
 | `fleet hold [--reason <text>]` | Pause: no new workers start in this checkout; running ones carry on |
 | `fleet release` | Lift the hold so launches continue |
 | `fleet resume <run>` | Show a run's plan, workers and reports; a fresh lead starts here |
-| `fleet wait <run> --timeout <s>` | Block until a worker reports, exits, stalls or needs an answer |
 | `fleet status <run>` | Table of workers and their report status |
 | `fleet stop <run> --all` | Quit every worker and confirm it exited; do this before shutting down |
 | `fleet context` | How full the lead's context is |
@@ -316,7 +315,7 @@ The lead's context grows with every wave: reports, diffs, check output. Answer q
      /clear
      /fleet resume checkout-redesign   (plugin install: /agent-fleet:fleet resume checkout-redesign)
 
-   Lead: stop here. Relay these steps; do not launch or wait until the owner has acted. Workers keep running.
+   Lead: end your turn here. Relay these steps; do not launch or wait until the owner has acted. Workers keep running.
    ```
 4. You run the printed steps. The new or compacted lead runs `fleet resume`, reads `notes.md`, handles the reports listed as awaiting it, then carries on.
 
@@ -361,7 +360,7 @@ Window sizes differ by host and setting: Claude Code runs Opus 5.5 with a 1M win
 - **Capacity.** A report does not free a slot; the worker must actually exit, and a failed stop keeps its slot. Stop an implementation worker before capturing its review diff, then stop and verify the reviewer before accepting the work. This works even with a single slot. Dependents stay blocked until `fleet verify` accepts the ticket.
 - **Steering.** If a provider is failing or rate-limited mid-run, `fleet steer provider <run> <name>` (then optionally `fleet steer model <run> <name>`) moves future implementation launches there without editing the frozen plan; `fleet steer reset <run>` goes back to the plan. It stays inside the run's routing and `models_allow`. Open panes and review launches are never steered, so cross-family review still holds.
 - **Usage limits.** A worker that hits its limit shows as stalled. Claude workers can be relaunched with `fleet launch … --resume` after the reset: Fleet records each one's session ID, so the worker continues its own conversation instead of starting over. Otherwise the lead steers to another provider in the run's routing and relaunches fresh.
-- **Taking a break.** `fleet hold [--reason <text>]` stops new workers from starting in this checkout, for every run. Running workers carry on and can still be verified, and once none is running the lead stops instead of polling. Only `fleet release` lifts the hold; there is no timer. Ask the lead to hold or release, or run the commands yourself. The lead is told to release only when you ask, but it can technically run the command. A hold does not make a shutdown safe: sleep is fine, but when the machine or cmux shuts down, running workers die without an exit receipt, so after `fleet release` Fleet still lists them as running and refuses to relaunch them. Confirm each one is gone, record it with `fleet recover`, then relaunch, with `--resume` where the adapter supports it (see [example 7](skill/references/examples.md#7-recover-a-worker-whose-exit-cannot-be-confirmed)). To avoid that, run `fleet stop <run> --all` before you shut down.
+- **Taking a break.** `fleet hold [--reason <text>]` blocks new workers from starting in this checkout, for every run. Running workers carry on and can still be verified, and once none is running the lead ends its turn instead of polling; it does not `fleet stop` anything. Only `fleet release` lifts the hold; there is no timer. Ask the lead to hold or release, or run the commands yourself. The lead is told to release only when you ask, but it can technically run the command. A hold does not make a shutdown safe: sleep is fine, but when the machine or cmux shuts down, running workers die without an exit receipt, so after `fleet release` Fleet still lists them as running and refuses to relaunch them. Confirm each one is gone, record it with `fleet recover`, then relaunch, with `--resume` where the adapter supports it (see [example 7](skill/references/examples.md#7-recover-a-worker-whose-exit-cannot-be-confirmed)). To avoid that, run `fleet stop <run> --all` before you shut down.
 - **Isolation is by instruction, not by the OS.** All workers share one checkout. Exact file scope and read-only review are prompt rules plus lead checks. Use one active run per checkout, keep sensitive or high-conflict work out of concurrent waves, inspect scoped diffs, and run checks on the combined tree. The Git check compares the captured HEAD and index; it can't prove that no Git operation happened in between.
 
 ## Compatibility and adapters

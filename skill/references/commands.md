@@ -35,6 +35,8 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 
 **Similar names:** `hold` and `release` pause and continue *launches*. `resume` reloads a *run* into the lead's memory. `launch --resume` continues a stopped *worker's* own CLI session. There is no `pause` command: `hold` is the pause.
 
+**Wait, hold or stop:** `wait` is the lead listening; workers are untouched. `hold` blocks workers that haven't started; running ones carry on. `stop` quits workers that are running now. When these docs tell the lead to "end your turn", that means stop acting, not `fleet stop`.
+
 ## Setup and accounts
 
 ### version
@@ -172,7 +174,7 @@ Blocks until something needs the lead, then prints it and exits 0. On timeout it
 | `EXITED <id>` | The process ended before handing back | `status`, read the report, repair or relaunch |
 | `STALLED <id>` | The screen hasn't changed for `--stall` seconds (default 180; 0 turns it off) | `peek` |
 | `UNREACHABLE <id>` | cmux can't read the pane | Investigate; a missing pane isn't proof of exit |
-| `HOLD` | Launches are held and no worker is running | Handle `PENDING` lines, tell the owner, stop |
+| `HOLD` | Launches are held and no worker is running | Handle `PENDING` lines, tell the owner, end your turn |
 | `TIMEOUT` | Nothing new | Handle `PENDING` lines, otherwise wait again |
 | `PENDING <id> [status]` | A report is still waiting on the lead | Handle it |
 
@@ -262,7 +264,7 @@ fleet handoff <run> [--compact] (--note <text> ... | --no-notes)
 
 Appends a `## Handoff` entry to `notes.md` listing running workers, reports awaiting the next lead, and each `--note`. Then it prints the owner's steps to reset the lead. `--compact` prepares for compaction instead of a fresh lead. It refuses before a plan is saved or while a `wait` is running. It never stops or messages workers.
 
-**Use:** only when the owner asks, at a safe point between steps. Relay the printed steps and stop. See [lead context](lead-context.md).
+**Use:** only when the owner asks, at a safe point between steps. Relay the printed steps and end your turn. See [lead context](lead-context.md).
 
 ### context
 
@@ -296,7 +298,7 @@ fleet hold [--reason <text>]
 
 Blocks new launches in this checkout, for every run. Running workers continue and can still be verified. `wait` prints `HOLD` once none is running. There is no timer.
 
-**Use:** only when the owner asks, for example for a break. When `launch` refuses because of a hold, don't retry: finish verifying running workers, tell the owner and stop. A hold doesn't make a shutdown safe; run `stop --all` first.
+**Use:** only when the owner asks, for example for a break. When `launch` refuses because of a hold, don't retry: finish verifying running workers, tell the owner and end your turn. A hold doesn't make a shutdown safe; run `stop --all` first.
 
 ### release
 

@@ -904,8 +904,8 @@ def cmd_launch(a, cfg):
     repo = repo_root()
     hold = load_hold(repo)
     if hold:
-        raise FleetError(f"{hold_text(hold)}. Do not retry: verify running workers, tell the owner, and stop "
-                         "until they ask for `fleet release`")
+        raise FleetError(f"{hold_text(hold)}. Do not retry: verify running workers, tell the owner, and end your turn "
+                         "(do not run `fleet stop`) until they ask for `fleet release`")
     ensure_other_runs_idle(repo, a.run)
     state = load_run(repo, a.run)
     valid_id(a.id)
@@ -1296,7 +1296,7 @@ def wait_loop(a, repo: Path, d: Path, seen: Path, statuses, deadline: float) -> 
         if hold:  # in memory only, after the EXITED scan: wait holds no lock and never saves
             reconcile(repo, state)
         if hold and not active(state):  # a held, idle run has nothing to wait for; waiting would only burn turns
-            print(f"HOLD {hold_text(hold)} and no worker is running; tell the owner and stop, do not wait again")
+            print(f"HOLD {hold_text(hold)} and no worker is running; tell the owner and end your turn (do not run `fleet stop`); do not wait again")
             for i, status in pending_reports(d / "reports"):
                 print(f"PENDING {i} [{status}]")
             return 0
@@ -1476,7 +1476,7 @@ def cmd_handoff(a, cfg):
     print("\n".join(entry))
     print(f"\nOwner, in the lead's session{'' if reading or lead_host() else ' (host not detected)'}:")
     print("\n".join(owner_steps(a.run, a.compact, reading["host"] if reading else lead_host())))
-    print("\nLead: stop here. Relay these steps; do not launch or wait until the owner has acted. Workers keep running.")
+    print("\nLead: end your turn here. Relay these steps; do not launch or wait until the owner has acted. Workers keep running.")
 
 
 def cmd_recover(a, cfg):

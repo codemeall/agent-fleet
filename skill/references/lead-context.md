@@ -2,7 +2,7 @@
 
 A lead's answers get worse as its context fills, long before the window is full. The owner decides when to reset you; your part is to show them your size and, when they ask, reach a safe point and save what you know. Everything a run needs is on disk (`run.json`, reports, evidence, `notes.md`), so a fresh or compacted lead loses nothing that was saved.
 
-Never hand off, ask to be compacted or hold back a wave because of your size alone. That is the owner's call.
+Never hand off, ask to be compacted or delay a wave because of your size alone. That is the owner's call.
 
 ## Your size
 
@@ -22,7 +22,7 @@ Never hand off, ask to be compacted or hold back a wave because of your size alo
 1. Finish the current step (for example a verification you started). Do not launch the next wave.
 2. End any background `fleet wait`. `fleet handoff` refuses while one is running, because it would consume events the next lead needs.
 3. Run `fleet handoff`, passing every decision or owner preference that is not in the saved plan as its own `--note`. Use `--no-notes` only when there is none. Reports still waiting on you, and workers that exited without handing back, are listed for the next lead; they do not block the handoff.
-4. Relay the printed owner steps exactly, then stop: no `launch`, no `wait` until the owner has acted. Workers keep running.
+4. Relay the printed owner steps exactly, then end your turn: no `launch`, no `wait` until the owner has acted. Do not `fleet stop` anyone; workers keep running.
 
 You cannot compact yourself. Only the owner can, or the host when it auto-compacts.
 
