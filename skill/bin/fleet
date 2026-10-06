@@ -24,7 +24,7 @@ import time
 import tomllib
 from pathlib import Path
 
-VERSION = "0.1.0-preview.9"  # bump with package.json on release; tests/test_install.py checks they match
+VERSION = "0.1.0-preview.10"  # bump with package.json on release; tests/test_install.py checks they match
 SKILL_DIR = Path(__file__).resolve().parent.parent
 USER_CONFIG = Path(os.environ.get("FLEET_CONFIG", "~/.config/agent-fleet/config.toml")).expanduser()
 HARNESS_SKILL_DIRS = {

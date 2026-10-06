@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.0-preview.10
+
+A worker that hits its usage limit can continue its own session instead of starting over.
+
+- Claude workers now start with `--session-id` set to a UUID that Fleet records on the worker. After the limit resets, `fleet launch <run> <id> <provider> --resume` relaunches with `--resume <id>`, so the worker keeps its conversation and reasoning. A short continuation prompt points it at its prompt file (for any Repair note) and its report path, since relaunch archives the old report. Exit tracking, capacity and file ownership work as for any launch.
+- `--resume` refuses when the worker has no saved session (adapters without `resume`, or workers launched before this version) and when a steer would move it to another provider: a session stays with the account that ran it.
+- Adapters opt in with a `{session}` slot in `launch` plus `session` and `resume` argument fragments in `providers.toml`. Only Claude ships them. A user `launch` override without the slot keeps the old behavior.
+- `STALLED` now names a usage limit among the likely causes. The skill says how to handle one: resume after the reset, or steer within the run's routing and relaunch fresh. It no longer disagrees with the provider reference about whether that needs the owner.
+
 ## 0.1.0-preview.9
 
 - `fleet doctor` groups companion skills under their source (`manaflow-ai/cmux`, `mattpocock/skills`), so the output names where each one comes from even when it is installed.
