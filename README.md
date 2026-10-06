@@ -279,6 +279,8 @@ The lead's context grows with every wave: reports, diffs, check output. Answer q
 
 **In short:** between waves, tell the lead *"Prepare a handoff"* or *"Prepare to be compacted"*, then type the commands it relays. Fleet never resets the lead on its own.
 
+**When a run closes**, no handoff is needed. The lead's closing report ends with a **Next step** block: whether it suggests a fresh lead (the default) or compaction, and a start prompt for the next run with placeholders for the decisions you still owe. Fill them in, type `/clear`, then paste the prompt.
+
 ### How it works
 
 - **Measurement.** Every run command (`wait`, `status`, `resume`, `launch`, …) reads the lead's own session log: the latest model call's usage in Claude Code, `last_token_usage` in Codex. It finds the log through the session ID the host exports to its shell (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`). No hooks or plugins are needed. Cursor and other hosts are not measured.

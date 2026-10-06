@@ -26,6 +26,10 @@ Never hand off, ask to be compacted or delay a wave because of your size alone. 
 
 You cannot compact yourself. Only the owner can, or the host when it auto-compacts.
 
+## When a run closes
+
+No handoff is needed: nothing is running and the run is on disk. Your closing report ends with a **Next step** block (skill step 6): a one-line reset suggestion (a fresh lead by default) and a start prompt for the next run with placeholders for the owner's open decisions. Their decisions travel in that prompt, so nothing goes to `notes.md`.
+
 ## After a compaction or a fresh start
 
 Run commands print `LEAD compacted 230K -> 35K: run fleet resume <run> …` after a large drop. Before any other action, whether or not that line appeared:

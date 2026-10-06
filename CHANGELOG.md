@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- A closing report ends with a **Next step** block: the lead's reset suggestion (a fresh lead by default, compaction only when the next run needs discussion that isn't on disk) and a start prompt for the next run with placeholders for the owner's open decisions. It's built from what the lead already knows, with no extra checks.
+
 ## 0.1.0-preview.16
 
 Antigravity and OpenCode are supported worker adapters. Both ship disabled; enable one in your config.
