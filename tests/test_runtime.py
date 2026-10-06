@@ -11,6 +11,7 @@ import shlex
 import subprocess
 import tempfile
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -700,6 +701,131 @@ class Runtime(unittest.TestCase):
         with patch.object(fleet, "cmux", return_value="\n\nAllow edit?   \n\n\n\n  1. Yes  \n\n\n"):
             self.assertEqual(self.call("peek", "demo", "01"), "Allow edit?\n\n  1. Yes\n")
 
+
+    def test_steer_moves_implementation_launches_until_reset(self):
+        self.setup_run()
+        self.call("steer", "provider", "demo", "reviewer")
+        self.assertIn("steered: writer:writer-model -> reviewer:reviewer-model", self.launch())
+        w = self.state()["workers"]["01"]
+        self.assertEqual((w["provider"], w["model"], w["family"], w["steered"]),
+                         ("reviewer", "reviewer-model", "anthropic", True))
+        self.assertIn("steer: reviewer:<tier model>", self.call("resume", "demo"))
+        self.assertEqual(json.loads(self.call("resume", "demo", "--json").split("Unconfirmed")[0])["steer"],
+                         {"provider": "reviewer"})
+        self.report()
+        self.stop_with_receipt()
+        self.verify()
+        self.call("steer", "reset", "demo")
+        self.assertNotIn("steer:", self.call("resume", "demo"))
+        self.launch("02")
+        w = self.state()["workers"]["02"]
+        self.assertEqual((w["provider"], w["steered"]), ("writer", False))
+
+    def test_steer_skips_reviews_and_review_checks_the_steered_writers_family(self):
+        self.setup_run(review="cross-all")
+        self.call("steer", "provider", "demo", "reviewer")
+        self.launch()
+        (self.repo / "owned.txt").write_text("implemented change\n")
+        self.report()
+        self.stop_with_receipt()
+        self.review_prompt()
+        # The plan's writer family is openai, but the steered writer ran on anthropic.
+        self.assertIn("famil", self.launch("review-01", "reviewer", "review", expected=1))
+        self.launch("review-01", "writer", "review")
+        self.assertEqual(self.state()["workers"]["review-01"]["provider"], "writer")
+
+    def test_steered_model_takes_its_own_family_and_needs_one_for_review(self):
+        self.setup_run(review="cross-all")
+        # A mixed-family account only knows the families its tiers and model_families name.
+        self.cfg["providers"]["writer"].update(family="mixed", model_families={"borrowed-model": "anthropic"})
+        self.call("steer", "provider", "demo", "writer")
+        self.call("steer", "model", "demo", "mystery-model")
+        self.assertIn("no known family", self.call("launch", "demo", "01", "writer", "--tier", "standard",
+                                                   "--family", "openai", expected=1))
+        self.call("steer", "model", "demo", "borrowed-model")
+        self.call("launch", "demo", "01", "writer", "--tier", "standard", "--family", "openai")
+        w = self.state()["workers"]["01"]
+        self.assertEqual((w["model"], w["family"]), ("borrowed-model", "anthropic"))
+
+    def test_steer_onto_the_plans_route_is_not_reported_as_steered(self):
+        self.setup_run()
+        self.call("steer", "provider", "demo", "writer")
+        self.call("steer", "model", "demo", "writer-model")
+        self.assertNotIn("steered:", self.call("launch", "demo", "01", "writer", "--tier", "standard",
+                                               "--family", "openai"))
+        w = self.state()["workers"]["01"]
+        self.assertEqual((w["model"], w["family"], w["steered"]), ("writer-model", "openai", False))
+
+    def test_steer_to_a_provider_without_a_tier_model_names_steer_model(self):
+        self.setup_run()
+        del self.cfg["providers"]["reviewer"]["tiers"]["standard"]["model"]
+        self.call("steer", "provider", "demo", "reviewer")
+        self.assertIn("fleet steer model demo <name>", self.launch(expected=1))
+
+    def test_steer_stays_inside_routing_and_allowed_models(self):
+        self.call("init", "demo", "--workspace", "workspace:1", "--routing", "single:writer")
+        self.assertIn("routing", self.call("steer", "provider", "demo", "reviewer", expected=1))
+        self.assertIn("unknown provider", self.call("steer", "provider", "demo", "nobody", expected=1))
+        self.assertIn("provider first", self.call("steer", "model", "demo", "writer-model", expected=1))
+        self.cfg["providers"]["writer"]["models_allow"] = ["writer-model"]
+        self.call("steer", "provider", "demo", "writer")
+        self.assertIn("models_allow", self.call("steer", "model", "demo", "other-model", expected=1))
+        self.call("steer", "model", "demo", "writer-model")
+        self.assertEqual(json.loads((self.repo / ".fleet/runs/demo/live.json").read_text()),
+                         {"provider": "writer", "model": "writer-model"})
+
+    def test_hold_blocks_new_launches_but_not_running_workers(self):
+        self.setup_run()
+        self.launch()
+        self.call("hold", "--reason", "quota break")
+        run_json = (self.repo / ".fleet/runs/demo/run.json").read_bytes()
+        calls = len(self.cmux_calls)
+        out = self.launch("02", expected=1)
+        self.assertIn("on hold", out)
+        self.assertIn("quota break", out)
+        self.assertEqual((self.repo / ".fleet/runs/demo/run.json").read_bytes(), run_json)
+        self.assertEqual(len(self.cmux_calls), calls)
+        self.assertIn("hold: launches are on hold", self.call("status", "demo"))
+        self.assertIn("hold: launches are on hold", self.call("resume", "demo"))
+        self.assertEqual(json.loads(self.call("resume", "demo", "--json").split("Unconfirmed")[0])["hold"]["reason"],
+                         "quota break")
+        # The running worker still finishes and is verified as usual.
+        self.report()
+        self.stop_with_receipt()
+        self.verify()
+        self.assertIn("released", self.call("release"))
+        self.assertIn("no hold", self.call("release"))
+        self.launch("02")
+
+    def test_wait_on_a_held_run_stops_once_a_worker_exits_by_itself(self):
+        self.setup_run()
+        self.launch()
+        self.call("hold")
+        self.receipt()  # the worker exits without fleet stop, so run.json still says running
+        self.assertIn("EXITED 01", self.call("wait", "demo", "--timeout", "1"))
+        self.assertIn("HOLD", self.call("wait", "demo", "--timeout", "1", "--stall", "0"))
+
+    def test_damaged_hold_file_still_blocks_and_release_removes_it(self):
+        self.setup_run()
+        (self.repo / ".fleet/runs/hold.json").write_text("{not json")
+        self.assertIn("unreadable", self.launch(expected=1))
+        self.assertIn("unreadable", self.call("resume", "demo"))
+        self.assertIn("released", self.call("release"))
+        self.launch()
+
+    def test_wait_on_a_held_idle_run_returns_at_once(self):
+        self.setup_run()
+        self.launch()
+        self.call("hold")
+        self.assertNotIn("HOLD", self.call("wait", "demo", "--timeout", "1", "--interval", "1", expected=2))
+        self.report()
+        self.stop_with_receipt()
+        self.assertIn("REPORT 01", self.call("wait", "demo", "--timeout", "1"))  # events still come first
+        started = time.monotonic()
+        out = self.call("wait", "demo", "--timeout", "60", "--stall", "0")
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertIn("HOLD", out)
+        self.assertIn("PENDING 01 [needs-verification]", out)
 
 class ProcessRunner(unittest.TestCase):
     def test_exit_receipt_follows_real_child_exit_and_records_status(self):

@@ -25,6 +25,16 @@ These are conversational options for you to translate into CLI flags, not an aut
 - If the named run exists, use `fleet resume <run>` (one line per ticket; `--json` for full records), then inspect the reports, decisions, any `notes.md` and reconciled process states. Do not initialize a replacement or relaunch a worker whose exit is unconfirmed.
 - Otherwise use `fleet init <run> [--workspace <ref>] [--routing <mode>] [--review <mode>]`. Map conversational `workspace=`, routing and `review=` directly to these flags. Init validates the selected cmux workspace; never fall back to an unrelated workspace.
 
+### Steering routing
+
+When a provider is failing, rate-limited or a poor fit mid-run, steer future implementation launches instead of rewriting the plan:
+
+- `fleet steer provider <run> <name>` moves future implementation launches to that provider, at the tier's model and effort (or the model pinned by `agents=`). It must be inside the run's routing.
+- `fleet steer model <run> <name>` then picks that provider's model; it must pass `models_allow`.
+- `fleet steer reset <run>` returns to the plan's routing.
+
+Keep passing the plan's provider and tier to `fleet launch`; it prints `steered: ...` and records the worker's actual provider, model and family. Open panes and review launches are never steered, so cross-family review is checked against the family the writer actually ran on. `fleet resume` shows an active steer.
+
 ## 2. Save a complete plan
 
 Discover the exact repository-relative files each ticket needs. Preserve blockers, acceptance criteria, spec decisions and testing requirements. A wave contains tickets with satisfied blockers and disjoint file scopes. Existing owner edits require careful review and must be preserved.
@@ -50,6 +60,7 @@ Give each ticket `context` (agreed spec and testing decisions, actual glossary/A
 - `fleet prompt <run> <id>` writes the prompt from the planned local ticket, fixed worker rules, `.fleet/rules.md` and the ticket's `context`/`checks`. With both planned, the prompt is complete; the fixed rules need no rereading. Otherwise it names the missing fields: replace each `<!-- LEAD: … -->` comment before launch (launch refuses unfilled ones). Preserve the worker rules and the saved file list.
 - Resolve the actual glossary/ADR paths from project configuration. Prefer `GLOSSARY.md` and optional `GLOSSARY-MAP.md`, with `CONTEXT.md` for older repositories. Carry upstream `to-spec` testing and design decisions forward. Do not blindly invoke upstream `/implement`: it includes commits that Fleet forbids.
 - `fleet launch <run> <id> <provider> --tier <tier> [--model <model>] [--effort <effort>] [--family <family>]` must match the saved assignment. The CLI enforces blockers, active file ownership and capacity. Each worker gets its own pane: launch splits the largest pane until the workspace has 8. At 8 it replaces a pane (never yours) that holds only verified workers whose exit is confirmed, closing their surfaces; failing that, it adds a tab to an idle pane (no live worker), so an unverified worker keeps its scrollback. When every other pane has a live worker, launch refuses before touching the run; stop a worker first. `--pane <ref|uuid|index>` picks the pane to split, replace or add a tab to.
+- `fleet hold [--reason <text>]` blocks new launches in this checkout, for every run, while running workers continue; `fleet release` lifts it. Use either only when the owner asks. When launch refuses because of a hold, do not retry: verify running workers as usual, tell the owner, and stop.
 - `fleet peek <run> <id>` shortly after launch, and again within a minute or two, confirms progress or reveals a login, trust, model or permission prompt; they usually appear early. Never assume creating a pane means work started. Peek shows 20 lines; pass `--lines` when a dialog or error is cut off.
 
 ## 4. Watch and resolve blockers
@@ -61,6 +72,7 @@ Every wait is a full turn over your whole context, so wait long and rarely. Use 
 - `EXITED <id>`: the process ended before handing back; run `fleet status`, read its report, then repair or relaunch within its assignment.
 - `STALLED <id>`: its screen has not changed for `--stall` seconds (default 180), including after you answered it; `fleet peek` it for a prompt or error.
 - `UNREACHABLE <id>`: cmux cannot read its pane; the pane may be closed. A missing pane is not exit evidence (step 6).
+- `HOLD`: launches are on hold and no worker is running. Handle any `PENDING <id>` lines, tell the owner, and stop; do not wait again until they release.
 - `TIMEOUT`: nothing new. Handle any `PENDING <id>` lines it prints (reports still waiting on you), otherwise wait again; do not peek or check status by reflex.
 
 Run one wait at a time, and end a background wait before handing the run to another session: a wait consumes the events it prints. Tell the owner about meaningful changes, not each wait.
@@ -80,7 +92,7 @@ Read the implementation report and scoped changes against all criteria. Run the 
 - Stop the reviewer, write concrete verification evidence to a local file, then `fleet verify <run> <review-id> --evidence <evidence-file>`. Verify the writer separately with its own evidence file using the same command. The writer's process must have exited, its report must need verification, required review must be verified, and its current diff must match the reviewed content.
 - Only after successful writer verification update the source ticket's resolved status/acceptance boxes and launch newly unblocked tickets. Reviewers never resolve tickets themselves.
 
-Evidence records commands, outcomes, acceptance criteria and review disposition. Preserve failures and limits honestly. If a stopped worker needs repair within its existing assignment, relaunch only after its prior exit is confirmed; give it the existing edits and remaining scope explicitly. Scope or routing changes after the first launch need a new follow-up run: first stop every worker that could overlap, then carry forward unresolved tickets, partial edits and decisions. Do not edit run.json to bypass immutable planning.
+Evidence records commands, outcomes, acceptance criteria and review disposition. Preserve failures and limits honestly. If a stopped worker needs repair within its existing assignment, relaunch only after its prior exit is confirmed; give it the existing edits and remaining scope explicitly. Scope changes after the first launch, and routing changes that `fleet steer` cannot make, need a new follow-up run: first stop every worker that could overlap, then carry forward unresolved tickets, partial edits and decisions. Do not edit run.json to bypass immutable planning.
 
 ## 6. Recovery and completion
 

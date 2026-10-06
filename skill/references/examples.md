@@ -108,7 +108,7 @@ Use this after `EXITED api-client`, or when a stopped worker needs fixes within 
    ```
 3. `fleet launch settings api-client codex --tier heavy`. The previous report is kept as `reports/api-client.<hex>.previous`, and the diff baseline stays at the first launch.
 
-A change of scope, provider or model is not a repair; use a follow-up run (example 8).
+A change of scope is not a repair; use a follow-up run (example 8). To move future launches to another provider or model, use `fleet steer` (skill step 1, Steering routing).
 
 ## 7. Recover a worker whose exit cannot be confirmed
 
@@ -127,7 +127,7 @@ Recovery frees the slot only. Verify or relaunch the ticket as usual afterwards.
 
 ## 8. Change scope after launch: a follow-up run
 
-The plan of `settings` is frozen. To add a file to `api-client` or move it to another provider:
+The plan of `settings` is frozen. To add a file to `api-client` (moving launches to another provider or model needs only `fleet steer`):
 
 1. Stop every worker that could overlap: `fleet stop settings --all`. A new `fleet init` refuses ("one active run per checkout") until every worker in `settings` has a confirmed exit.
 2. **Review the partial edits yourself first:** `git diff -- src/api.ts src/api.test.ts`. The follow-up run's launch baseline includes them, so its `fleet diff` and any cross-family reviewer will not see them.

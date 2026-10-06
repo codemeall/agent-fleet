@@ -265,6 +265,38 @@ def save_run(repo: Path, run: str, state: dict) -> None:
     atomic_json(run_dir(repo, run) / "run.json", state)
 
 
+def load_live_state(repo: Path, run: str) -> dict:
+    """Load the live state file that overrides routing. Returns empty dict if absent."""
+    f = run_dir(repo, run) / "live.json"
+    if not f.exists():
+        return {}
+    return json.loads(f.read_text())
+
+
+def save_live_state(repo: Path, run: str, state: dict) -> None:
+    """Save the live state file for routing overrides."""
+    atomic_json(run_dir(repo, run) / "live.json", state)
+
+
+def hold_file(repo: Path) -> Path:
+    return contained(repo.resolve(), repo.resolve() / ".fleet" / "runs" / "hold.json")  # beside .lock, gitignored
+
+
+def load_hold(repo: Path) -> dict | None:
+    """The checkout's launch hold (`fleet hold`), or None. It blocks new workers only, never running ones."""
+    f = hold_file(repo)
+    if not f.exists():
+        return None
+    try:
+        return dict(json.loads(f.read_text()))
+    except (ValueError, TypeError):  # still a hold: a damaged file must not let launches through
+        return {"since": "an unknown time", "reason": f"unreadable {f.name}; fleet release removes it"}
+
+
+def hold_text(hold: dict) -> str:
+    return f"launches are on hold since {hold['since']}" + (f" ({hold['reason']})" if hold.get("reason") else "")
+
+
 def worker(state: dict, ticket_id: str) -> dict:
     valid_id(ticket_id)
     w = state["workers"].get(ticket_id)
@@ -330,7 +362,7 @@ def atomic_json(path: Path, data: dict) -> None:
 
 @contextmanager
 def mutation_lock(a):
-    if not hasattr(a, "run") or a.cmd == "wait":
+    if a.cmd not in ("hold", "release") and (not hasattr(a, "run") or a.cmd == "wait"):
         yield
         return
     repo = repo_root()
@@ -363,6 +395,19 @@ def routing_pool(routing: str, cfg: dict) -> dict | None:
             pool[name] = model if sep else None
         return pool
     raise FleetError("routing must be auto, single:<provider> or agents=<provider>[:<model>],...")
+
+
+def check_pool(pool: dict | None, name: str, model: str, what: str, why: str = "") -> None:
+    if pool is not None and (name not in pool or (pool[name] and model != pool[name])):
+        raise FleetError(f"{what} outside pinned routing pool{why}")
+
+
+def apply_steer(a, live: dict) -> None:
+    """Point a launch at the lead's steered provider/model (see `fleet steer`)."""
+    if live.get("provider") and live["provider"] != a.provider:
+        a.provider, a.model, a.effort, a.family = live["provider"], None, None, None  # they fit the old provider
+    if live.get("model"):
+        a.model, a.family = live["model"], None  # a --family describes the plan's model, not this one
 
 
 def allowed_models(pcfg: dict) -> dict[str, str | None] | None:
@@ -827,11 +872,19 @@ def cmd_prompt(a, cfg):
 
 def cmd_launch(a, cfg):
     repo = repo_root()
+    hold = load_hold(repo)
+    if hold:
+        raise FleetError(f"{hold_text(hold)}. Do not retry: verify running workers, tell the owner, and stop "
+                         "until they ask for `fleet release`")
     ensure_other_runs_idle(repo, a.run)
     state = load_run(repo, a.run)
     valid_id(a.id)
     reconcile(repo, state)
     save_run(repo, a.run, state)
+    planned = (a.provider, a.model)
+    if state["prompts"].get(a.id, {}).get("role") == "implementation":  # reviews keep their cross-family route
+        apply_steer(a, load_live_state(repo, a.run))
+    steered = (a.provider, a.model) != planned
     pcfg = provider(cfg, a.provider)
     if not pcfg.get("enabled", True):
         raise FleetError(f"provider '{a.provider}' is turned off in config")
@@ -856,11 +909,30 @@ def cmd_launch(a, cfg):
             raise FleetError("ticket already verified; create a follow-up ticket")
         if any(state["tickets"][b]["status"] != "verified" for b in t["blockers"]):
             raise FleetError("ticket has unverified blockers")
-        model, effort = resolve_model(pcfg, a.tier, a.model, a.effort)
-        if (a.provider, a.tier, model, effort) != (t["provider"], t["tier"], t["model"], t["effort"]):
-            raise FleetError("launch provider/tier/model/effort must match saved plan")
+        try:
+            model, effort = resolve_model(pcfg, a.tier, a.model, a.effort)
+        except FleetError:
+            if not steered:
+                raise
+            raise FleetError(f"{a.provider} has no tiers.{a.tier} model to steer to; pick one with "
+                             f"fleet steer model {a.run} <name>") from None
         family = model_family(pcfg, a.tier, model, a.family)
-        if family != t["family"]:
+        if steered and (a.provider, a.tier, model, effort) == (t["provider"], t["tier"], t["model"], t["effort"]):
+            steered, family = False, t["family"]  # the steer landed on the plan's own route
+        if steered:  # the plan's route no longer applies, so check what plan time would have
+            if a.tier != t["tier"]:
+                raise FleetError("launch tier must match saved plan")
+            check_allowed(pcfg, a.provider, model)
+            check_effort(pcfg, a.provider, effort)
+            check_pool(routing_pool(state["options"]["routing"], cfg), a.provider, model, "steered launch")
+            if t["review_required"] and not family:
+                raise FleetError(f"{a.provider}:{model} has no known family, so this ticket's cross-family review "
+                                 f"could never launch; set it in {a.provider}.model_families")
+            print(f"steered: {t['provider']}:{t['model']} -> {a.provider}:{model} (fleet steer reset to undo)",
+                  file=sys.stderr)
+        elif (a.provider, a.tier, model, effort) != (t["provider"], t["tier"], t["model"], t["effort"]):
+            raise FleetError("launch provider/tier/model/effort must match saved plan")
+        elif family != t["family"]:
             raise FleetError("launch family must match saved plan")
         for other in running:
             owned = state["tickets"][other.get("review_of") or other["id"]]["files"]
@@ -876,11 +948,11 @@ def cmd_launch(a, cfg):
         check_allowed(pcfg, a.provider, model)
         check_effort(pcfg, a.provider, effort)
         family = model_family(pcfg, "review", model, a.family)
-        if not family or not t["family"] or family == t["family"]:
+        writer_family = worker(state, meta["review_of"]).get("family")  # a steered writer left the plan's family
+        if not family or not writer_family or family == writer_family:
             raise FleetError("review requires known different model families; configure family or pass --family")
-        pool = routing_pool(state["options"]["routing"], cfg)
-        if pool is not None and (a.provider not in pool or (pool[a.provider] and model != pool[a.provider])):
-            raise FleetError("reviewer outside pinned routing pool; cross-family review cannot proceed")
+        check_pool(routing_pool(state["options"]["routing"], cfg), a.provider, model,
+                   "reviewer", "; cross-family review cannot proceed")
         assert_scope_idle(state, t["files"])
         if digest(scoped_diff(repo, state, meta["review_of"]).encode()) != meta["diff_sha"]:
             raise FleetError("review snapshot is stale; regenerate diff and prompt")
@@ -899,7 +971,7 @@ def cmd_launch(a, cfg):
     wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_run", str(exit_file), token, command])
     # Persist before launch: an uncertain cmux result must not silently free capacity.
     state["workers"][a.id] = dict(meta, id=a.id, provider=a.provider, model=model, effort=effort,
-        family=family, tier=a.tier, surface="unknown", state="launching", command=command,
+        family=family, tier=a.tier, steered=steered, surface="unknown", state="launching", command=command,
         token=token, exit_file=str(exit_file), launched=time.strftime("%Y-%m-%dT%H:%M:%S"))
     save_run(repo, a.run, state)
     if kind in ("replace", "tab"):  # a new surface in the pane; a replaced pane's old surfaces close below
@@ -1053,6 +1125,8 @@ def cmd_status(a, cfg):
         print(json.dumps(rows, indent=2))
         return
     print(f"run {state['run']}  workspace {state['workspace']}  running {len(active(state))}/{cfg['defaults']['max_parallel']}")
+    if hold := load_hold(repo):
+        print(f"hold: {hold_text(hold)}; running workers continue, `fleet release` lifts it")
     for r in rows:
         age = f"{r['report_age_s'] // 60}m ago" if r["report_age_s"] is not None else ""
         print(f"  {r['id']:<10} {r['worker']:<34} {r['surface']:<12} {r['state']:<9} {r['report']} {age}")
@@ -1161,12 +1235,21 @@ def wait_loop(a, repo: Path, d: Path, seen: Path, statuses, deadline: float) -> 
     while True:
         fresh = scan_reports(d / "reports", seen, statuses)
         # Reload each pass: the lead may launch or stop workers while a background wait runs.
-        events = scan_workers(repo, load_run(repo, a.run), seen, a.stall)
+        state = load_run(repo, a.run)
+        events = scan_workers(repo, state, seen, a.stall)
         if fresh or events:
             for i, status, f in fresh:
                 print(f"REPORT {i} [{status}] {f}")
             for line in events:
                 print(line)
+            return 0
+        hold = load_hold(repo)
+        if hold:  # in memory only, after the EXITED scan: wait holds no lock and never saves
+            reconcile(repo, state)
+        if hold and not active(state):  # a held, idle run has nothing to wait for; waiting would only burn turns
+            print(f"HOLD {hold_text(hold)} and no worker is running; tell the owner and stop, do not wait again")
+            for i, status in pending_reports(d / "reports"):
+                print(f"PENDING {i} [{status}]")
             return 0
         if time.time() >= deadline:
             print(f"TIMEOUT nothing new in {a.timeout}s; wait again")
@@ -1218,14 +1301,23 @@ def cmd_resume(a, cfg):
     save_run(repo, a.run, state)
     rows = report_rows(repo, state)
     notes = run_dir(repo, a.run) / "notes.md"
+    live = load_live_state(repo, a.run)
+    hold = load_hold(repo)
     if a.json:
         print(json.dumps({"run": state["run"], "workspace": state["workspace"], "options": state["options"],
+                          "steer": live or None,
+                          "hold": hold,
                           "tickets": state["tickets"], "decisions": state["decisions"], "workers": rows,
                           "notes": str(notes) if notes.exists() else None}, indent=2))
     else:
         o = state["options"]
         print(f"run {state['run']}  workspace {state['workspace']}  routing {o['routing']}  review {o['review']}  "
               f"max_parallel {o['max_parallel']}")
+        if live:
+            print(f"steer: {live['provider']}:{live.get('model') or '<tier model>'} for implementation launches"
+                  "  (fleet steer reset to undo)")
+        if hold:
+            print(f"hold: {hold_text(hold)}; running workers continue, `fleet release` lifts it")
         print("tickets:")
         for i, t in state["tickets"].items():
             model = f"{t['provider']}:{t['model']}" + (f"@{t['effort']}" if t.get("effort") else "")
@@ -1419,9 +1511,56 @@ def cmd_check(a, cfg):
     return 0
 
 
+def cmd_steer(a, cfg):
+    repo = repo_root()
+    state = load_run(repo, a.run)
+    if a.steer_cmd == "reset":
+        (run_dir(repo, a.run) / "live.json").unlink(missing_ok=True)
+        print("dropped the steer; launches follow the plan")
+        return 0
+    live = load_live_state(repo, a.run)
+    pool = routing_pool(state["options"]["routing"], cfg)
+    if a.steer_cmd == "provider":
+        pcfg = provider(cfg, a.name)
+        if not pcfg.get("enabled", True):
+            raise FleetError(f"provider '{a.name}' is turned off in config")
+        if pool is not None and a.name not in pool:
+            raise FleetError(f"provider '{a.name}' is outside this run's routing {state['options']['routing']}")
+        live = {"provider": a.name}  # a new provider drops any model steered for the old one
+        if pool and pool[a.name]:
+            live["model"] = pool[a.name]
+    else:
+        if not live.get("provider"):
+            raise FleetError("steer a provider first: a model belongs to one provider")
+        check_allowed(provider(cfg, live["provider"]), live["provider"], a.name)
+        check_pool(pool, live["provider"], a.name, "steered model")
+        live["model"] = a.name
+    save_live_state(repo, a.run, live)
+    print(f"future implementation launches use {live['provider']}:{live.get('model') or '<tier model>'}")
+    return 0
+
+
 def first_binary(bin_field: str) -> str:
     tokens = [t for t in shlex.split(bin_field) if "=" not in t or t.startswith("-")]
     return tokens[0] if tokens else bin_field
+
+
+def cmd_hold(a, cfg):
+    repo = repo_root()
+    since = (load_hold(repo) or {}).get("since") or time.strftime("%Y-%m-%dT%H:%M:%S")  # re-holding keeps it
+    hold = {"since": since, "reason": a.reason}
+    hold_file(repo).parent.mkdir(parents=True, exist_ok=True)
+    atomic_json(hold_file(repo), hold)
+    print(f"{hold_text(hold)} for every run in this checkout; running workers continue. `fleet release` lifts it")
+
+
+def cmd_release(a, cfg):
+    f = hold_file(repo_root())
+    if not f.exists():
+        print("no hold; launches were not blocked")
+        return 0
+    f.unlink()  # never parsed: a damaged hold file must still be removable
+    print("released; launches may continue")
 
 
 def cmd_doctor(a, cfg):
@@ -1831,6 +1970,27 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("context", help="show the calling lead's context size (and its zone, when [lead_context] marks are set)")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_context)
+
+    s = sub.add_parser("steer", help="steer future launches to a specific provider or model")
+    steer = s.add_subparsers(dest="steer_cmd", required=True)
+    s_provider = steer.add_parser("provider", help="lock future launches to one provider")
+    s_provider.add_argument("run")
+    s_provider.add_argument("name", help="provider name")
+    s_provider.set_defaults(fn=cmd_steer)
+    s_model = steer.add_parser("model", help="set a model override")
+    s_model.add_argument("run")
+    s_model.add_argument("name", help="model name")
+    s_model.set_defaults(fn=cmd_steer)
+    s_reset = steer.add_parser("reset", help="drop steering overrides")
+    s_reset.add_argument("run")
+    s_reset.set_defaults(fn=cmd_steer)
+
+    s = sub.add_parser("hold", help="block new launches in this checkout; running workers continue")
+    s.add_argument("--reason", help="shown to any lead that tries to launch")
+    s.set_defaults(fn=cmd_hold)
+
+    s = sub.add_parser("release", help="lift the hold so launches may continue")
+    s.set_defaults(fn=cmd_release)
 
     a = ap.parse_args(argv)
     try:

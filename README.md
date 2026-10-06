@@ -171,7 +171,7 @@ Personal overrides live in `~/.config/agent-fleet/config.toml`; start from [conf
 
 ### Updating
 
-1. **Finish or stop active runs.** An update replaces the runtime that live workers report back to. Run `fleet stop <run> --all` and confirm the exits first.
+1. **Finish or stop active runs.** An update replaces the runtime that live workers report back to. `fleet hold` keeps new workers from starting while current ones finish; otherwise run `fleet stop <run> --all`. Confirm the exits first, and `fleet release` after updating.
 2. **Read [CHANGELOG.md](CHANGELOG.md)** for changes that need action from you, such as a config field that now behaves differently.
 3. **Update with the method you installed with:**
 
@@ -314,6 +314,8 @@ Window sizes differ by host and setting: Claude Code runs Opus 5.5 with a 1M win
 - **Saved plan.** `fleet plan` saves every ticket, dependency, exact file scope, model assignment and decision. Run records, prompts, reports and exit receipts live in `.fleet/runs/<run>/`, which Git ignores. Repository-specific checks belong in `.fleet/rules.md`.
 - **Resume.** A fresh lead runs `fleet resume <run>` and reconciles reports and processes before continuing. The plan is frozen after the first launch. Record later decisions in run notes, and use a follow-up run for changed scope.
 - **Capacity.** A report does not free a slot; the worker must actually exit, and a failed stop keeps its slot. Stop an implementation worker before capturing its review diff, then stop and verify the reviewer before accepting the work. This works even with a single slot. Dependents stay blocked until `fleet verify` accepts the ticket.
+- **Steering.** If a provider is failing or rate-limited mid-run, `fleet steer provider <run> <name>` (then optionally `fleet steer model <run> <name>`) moves future implementation launches there without editing the frozen plan; `fleet steer reset <run>` goes back to the plan. It stays inside the run's routing and `models_allow`. Open panes and review launches are never steered, so cross-family review still holds.
+- **Taking a break.** `fleet hold [--reason <text>]` stops new workers from starting in this checkout, for every run. Running workers carry on and can still be verified, and once none is running the lead stops instead of polling. Only `fleet release` lifts the hold; there is no timer. Ask the lead to hold or release, or run the commands yourself. The lead is told to release only when you ask, but it can technically run the command.
 - **Isolation is by instruction, not by the OS.** All workers share one checkout. Exact file scope and read-only review are prompt rules plus lead checks. Use one active run per checkout, keep sensitive or high-conflict work out of concurrent waves, inspect scoped diffs, and run checks on the combined tree. The Git check compares the captured HEAD and index; it can't prove that no Git operation happened in between.
 
 ## Compatibility and adapters
