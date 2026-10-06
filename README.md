@@ -9,6 +9,7 @@ The lead turns approved tickets into a saved execution plan, picks a worker mode
 - [Quick start](#quick-start)
 - [Installation](#installation)
 - [Usage](#usage)
+- [Keeping the lead sharp](#keeping-the-lead-sharp)
 - [State, continuation and safety](#state-continuation-and-safety)
 - [Compatibility and adapters](#compatibility-and-adapters)
 - [Development](#development)
@@ -226,7 +227,87 @@ Fleet starts from approved tickets. It works with plain Markdown tickets, or as 
 
 Point the lead at the real spec, glossary (`GLOSSARY.md`, optionally `GLOSSARY-MAP.md`; older repos may use `CONTEXT.md`), ADRs and tickets. Upstream `/implement` includes a commit step, so Fleet workers follow Fleet's no-commit contract instead. Workers don't need the upstream skills installed. These conventions were checked on 2026-09-30, and upstream may change them.
 
-More: [safe first run](examples/README.md) · [agent workflow](skill/SKILL.md) · [routing](skill/references/routing.md) · [host setup](skill/references/harnesses.md) · [providers](skill/references/providers.md)
+More: [safe first run](examples/README.md) · [agent workflow](skill/SKILL.md) · [routing](skill/references/routing.md) · [host setup](skill/references/harnesses.md) · [providers](skill/references/providers.md) · [lead context](skill/references/lead-context.md) · [worked examples](skill/references/examples.md)
+
+## Keeping the lead sharp
+
+The lead's context grows with every wave: reports, diffs, check output. Answer quality degrades gradually as context grows, well before the window is full, and no vendor publishes a cutoff. So you decide when the lead needs a reset. Fleet shows you how full the lead is and makes the reset safe: `fleet handoff` brings the lead to a safe point, saves what it knows to disk and gives you the exact commands to compact it or replace it with a fresh lead.
+
+**In short:** between waves, tell the lead *"Prepare a handoff"* or *"Prepare to be compacted"*, then type the commands it relays. Fleet never resets the lead on its own.
+
+### How it works
+
+- **Measurement.** Every run command (`wait`, `status`, `resume`, `launch`, …) reads the lead's own session log: the latest model call's usage in Claude Code, `last_token_usage` in Codex. It finds the log through the session ID the host exports to its shell (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`). No hooks or plugins are needed. Cursor and other hosts are not measured.
+- **Your view.** The lead includes its context size when it reports a wave. `fleet context` prints it on demand; ask the lead, or, with [`fleet` on your PATH](#put-fleet-on-your-path-optional), run `! fleet context` yourself in Claude Code:
+  ```text
+  lead context: 312K tokens (no zones set; the owner decides when to hand off or compact)
+  session: claude f5836835  ~/.claude/projects/-Users-me-app/f5836835-….jsonl
+  ```
+- **Safe point.** `fleet handoff` refuses while a background `fleet wait` is running (it would consume events the next lead needs) or before the plan is saved. Reports still waiting on the lead, and workers that exited without handing back, don't block it; they are listed for the next lead. Handoff never stops, messages or closes a worker: it only reads run state and appends to `notes.md`, so workers keep running and reporting while you reset the lead.
+- **After a compaction.** Whether you compact or the host auto-compacts, the next run command spots the drop and tells the lead to resume from disk:
+  ```text
+  LEAD compacted 230K -> 35K: run fleet resume checkout-redesign and read its notes.md before acting; trust the files over your summary
+  ```
+
+### Hand off or compact, between waves
+
+1. Tell the lead what you want. It finishes the current step and does not start the next wave.
+   - *"Prepare a handoff."* (fresh lead)
+   - *"Prepare to be compacted."*
+2. The lead ends any background wait and runs `fleet handoff`, passing every decision or preference that is not yet in the saved plan:
+   ```text
+   fleet handoff checkout-redesign --note "Owner prefers Codex for API tickets." --note "price-format waits on the owner's copy decision."
+   ```
+   `--compact` prepares for compaction instead; `--no-notes` states there is nothing to add.
+3. Fleet appends an entry to `.fleet/runs/<run>/notes.md` and prints your steps for the lead's host:
+   ```text
+   saved to /Users/me/app/.fleet/runs/checkout-redesign/notes.md:
+   ## Handoff 2026-10-06 14:20 (fresh lead, lead at 312K)
+   - Running: api-client (codex). Awaiting the next lead: settings-ui [needs-verification].
+   - Owner prefers Codex for API tickets.
+   - price-format waits on the owner's copy decision.
+
+   Owner, in the lead's session:
+     /clear
+     /fleet resume checkout-redesign   (plugin install: /agent-fleet:fleet resume checkout-redesign)
+
+   Lead: stop here. Relay these steps; do not launch or wait until the owner has acted. Workers keep running.
+   ```
+4. You run the printed steps. The new or compacted lead runs `fleet resume`, reads `notes.md`, handles the reports listed as awaiting it, then carries on.
+
+| Host | Fresh lead | Compaction |
+| --- | --- | --- |
+| Claude Code | `/clear`, then `/fleet resume <run>` | `/compact Fleet lead for run <run>. Keep the run name, … read notes.md before acting.` (printed in full) |
+| Codex | quit and relaunch `codex` (or `/new`), then `$fleet resume <run>` | `/compact`, then send *"Run fleet resume <run> and read notes.md before doing anything else."* |
+| Cursor, others | new session, then `/fleet resume <run>` or send the resume message | compact, then send the resume message |
+
+A fresh lead or a compacted one? A fresh lead is the cleaner reset: predictable size, and nothing but what's on disk. It starts at its host's baseline (system prompt, tools, skills), often 40–60K in Claude Code with many skills or MCP servers and 20–25K in Codex. Compaction keeps the same session and some unsaved nuance, but how well the summary holds up varies. Both are safe once `fleet handoff` has run. Neither host lets the lead compact itself.
+
+If the host auto-compacts and the lead acts without resuming, send: *"Run fleet resume <run> and read notes.md before doing anything else."* Cursor is not measured, so this is always your step there.
+
+### Optional: a size line
+
+To have every run command show the lead's size once it passes a mark, set zones for its host. The line only informs; the lead tells you once and keeps working until you ask for a handoff.
+
+```toml
+[lead_context.claude]
+warn_at = 500000
+dumb_at = 600000
+```
+
+```text
+LEAD 520K nearing the dumb zone (600K): keep reads lean; the owner decides whether to hand off or compact
+LEAD 610K dumb zone (from 600K): tell the owner once and keep working; prepare a handoff or compaction only when they ask (references/lead-context.md)
+```
+
+Window sizes differ by host and setting: Claude Code runs Opus 5.5 with a 1M window and auto-compacts near 967K. Codex runs gpt-6.1-sol and the gpt-6 models at 272K by default (258K usable) and can be raised to 872K in Codex's config, although the API model offers 1.05M. A status line in Claude Code works alongside Fleet; set it to the same marks so its colours match.
+
+### Limits
+
+- Only Claude Code and Codex leads are measured. Their session logs are not a public format, so a host update can break the reading. When it does, Fleet prints nothing and keeps working.
+- A log not written in the last 15 minutes is treated as an earlier session and ignored.
+- The reading is the latest model call's context, so it can trail the live context by one step.
+- A drop of more than 40% from at least 100K counts as a compaction. A Claude Code `/rewind` or cleared tool results can also cause one; resuming from disk is harmless then.
 
 ## State, continuation and safety
 

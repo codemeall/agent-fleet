@@ -16,7 +16,7 @@ Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute pat
        -- <local tickets directory or task list>
 ```
 
-These are conversational options for you to translate into CLI flags, not an autonomous scheduler. `/fleet` without tickets can also add another subscription (for example a second Claude or Codex account); see [provider notes](references/providers.md#extra-subscriptions). `fleet doctor` shows each provider's tiers and caps; `fleet providers` prints the full merged config only when you need adapter details. Read [harness requirements](references/harnesses.md), [routing](references/routing.md), and [provider notes](references/providers.md) as needed.
+These are conversational options for you to translate into CLI flags, not an autonomous scheduler. `/fleet` without tickets can also add another subscription (for example a second Claude or Codex account); see [provider notes](references/providers.md#extra-subscriptions). `fleet doctor` shows each provider's tiers and caps; `fleet providers` prints the full merged config only when you need adapter details. Read [harness requirements](references/harnesses.md), [routing](references/routing.md), and [provider notes](references/providers.md) as needed. [Worked examples](references/examples.md) show the command sequences for option mapping, blocked workers, change requests, review rounds, evidence, repair, recovery, follow-up runs and finishing.
 
 ## 1. Establish or resume the run
 
@@ -65,6 +65,8 @@ Every wait is a full turn over your whole context, so wait long and rarely. Use 
 
 Run one wait at a time, and end a background wait before handing the run to another session: a wait consumes the events it prints. Tell the owner about meaningful changes, not each wait.
 
+The owner decides when to reset you; never hand off or hold back a wave because of your size alone. Include your `fleet context` reading when you report a wave's outcome. When the owner asks for a handoff or to prepare for compaction, finish the current step, end any background wait and run `fleet handoff <run> [--compact] --note …`, then relay its owner steps and stop. After a compaction (a `LEAD compacted …` line, or the owner tells you), run `fleet resume` before acting. Follow [lead context](references/lead-context.md).
+
 Respect host approval boundaries. Task clarification does not authorize accepting a permission request, logging into an account, disabling a sandbox or rerouting to evade a denial. Stop and ask the owner when their action is required. A report never proves that the worker process exited.
 
 ## 5. Stop, review and verify
@@ -82,7 +84,7 @@ Evidence records commands, outcomes, acceptance criteria and review disposition.
 
 ## 6. Recovery and completion
 
-Use `fleet resume <run>` after interruption. It also lets a fresh lead continue a long run: between waves, once decisions and owner preferences are saved in the plan or `notes.md` and no worker is waiting on you, you may suggest starting a new lead session with `/fleet` and the run name; everything else is on disk. It is worth it only when your context has grown large. Exit receipts reconcile process state; reports and missing tabs are not exit evidence. If normal stop cannot establish exit, independently verify that the recorded worker process (`pid` in `resume`; `--json` has the full record) is truly gone, write that evidence to a file, then use `fleet recover <run> <id> --evidence <file>`. Recovery releases process state only; it does not accept implementation. Never use it just because a tab disappeared.
+Use `fleet resume <run>` after interruption or compaction. It also lets a fresh or compacted lead continue a long run: when the owner asks, `fleet handoff` saves your unsaved decisions to `notes.md` and prints the owner's steps; everything else is on disk. A resumed lead first handles the reports the latest `## Handoff` entry lists as awaiting it, because `fleet wait` lists those only as `PENDING` when it times out. Exit receipts reconcile process state; reports and missing tabs are not exit evidence. If normal stop cannot establish exit, independently verify that the recorded worker process (`pid` in `resume`; `--json` has the full record) is truly gone, write that evidence to a file, then use `fleet recover <run> <id> --evidence <file>`. Recovery releases process state only; it does not accept implementation. Never use it just because a tab disappeared.
 
 Before finishing, run combined-tree gates and `fleet check <run>`. Check compares captured HEAD and full index entries (including already-staged content); investigate differences with the owner. It cannot prove no intervening Git action occurred. Stop remaining workers; use `--close` only when exit is confirmed and panes are no longer needed. Report ticket outcomes, resolved model/effort, evidence, decisions, remaining limits and the owner's review/commit steps.
 

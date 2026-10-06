@@ -5,6 +5,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -16,6 +17,9 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# The suite may run inside a Claude Code or Codex session; its own context must not leak into Fleet output.
+for _var in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"):
+    os.environ.pop(_var, None)
 loader = importlib.machinery.SourceFileLoader("fleet_runtime_tests", str(ROOT / "skill/bin/fleet"))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 fleet = importlib.util.module_from_spec(spec)
@@ -148,6 +152,85 @@ class Runtime(unittest.TestCase):
         self.call("diff", "demo", "01", "--output", str(diff))
         self.prompt("review-01", "--review-of", "01", "--diff", str(diff))
         return diff
+
+    def test_run_commands_tell_the_lead_its_zone_and_spot_a_compaction(self):
+        self.setup_run()
+        readings = iter([{"session": "lead-1", "tokens": 131_000, "zone": "dumb", "warn_at": 100_000, "dumb_at": 125_000},
+                         {"session": "lead-1", "tokens": 30_000, "zone": "smart", "warn_at": 100_000, "dumb_at": 125_000},
+                         {"session": "lead-1", "tokens": 31_000, "zone": "smart", "warn_at": 100_000, "dumb_at": 125_000}])
+        with patch.object(fleet, "lead_reading", side_effect=lambda cfg: next(readings)):
+            dumb = self.call("status", "demo")
+            self.assertIn("LEAD 131K dumb zone", dumb)
+            self.assertIn("only when they ask", dumb)
+            self.assertIn("LEAD compacted 131K -> 30K: run fleet resume demo", self.call("status", "demo"))
+            self.assertNotIn("LEAD", self.call("status", "demo"))
+        with patch.object(fleet, "lead_reading", side_effect=RuntimeError("unreadable log")):
+            self.assertNotIn("LEAD", self.call("status", "demo"))  # measurement failures never alter a command
+
+    def test_handoff_refuses_until_the_lead_is_at_a_safe_point(self):
+        self.setup_run()
+        notes = self.repo / ".fleet/runs/demo/notes.md"
+        self.assertIn("--no-notes", self.call("handoff", "demo", expected=1))
+        pid_file = self.repo / ".fleet/runs/demo/.seen/wait.pid"
+        pid_file.write_text(str(os.getpid()))  # a live background wait
+        self.assertIn("still running", self.call("handoff", "demo", "--no-notes", expected=1))
+        self.assertFalse(notes.exists())
+        pid_file.write_text("99999999")  # left behind by a killed wait
+        self.call("handoff", "demo", "--no-notes")
+        self.assertIn("## Handoff", notes.read_text())
+
+    def test_wait_releases_its_pid_marker(self):
+        self.setup_run()
+        self.assertIn("TIMEOUT", self.call("wait", "demo", "--timeout", "1", "--interval", "1", expected=2))
+        self.assertFalse((self.repo / ".fleet/runs/demo/.seen/wait.pid").exists())
+
+    def test_handoff_saves_notes_and_prints_the_owners_steps_for_the_host(self):
+        self.setup_run()
+        self.launch()
+        self.report()
+        with patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "11111111-2222-3333-4444-555555555555"}):
+            out = self.call("handoff", "demo", "--note", "Owner prefers Codex for API tickets.")
+        notes = (self.repo / ".fleet/runs/demo/notes.md").read_text()
+        self.assertIn("(fresh lead)", notes)
+        self.assertIn("- Running: 01 (writer). Awaiting the next lead: 01 [needs-verification].", notes)
+        self.assertIn("- Owner prefers Codex for API tickets.", notes)
+        self.assertIn("/clear", out)
+        self.assertIn("/fleet resume demo", out)
+        self.assertIn("Lead: stop here", out)
+        with patch.dict(os.environ, {"CODEX_THREAD_ID": "01a10dd0-cc90-7880-884b-11a5b4ba24dc"}):
+            out = self.call("handoff", "demo", "--compact", "--no-notes")
+        self.assertIn("(compaction)", (self.repo / ".fleet/runs/demo/notes.md").read_text())
+        self.assertIn("  /compact\n  then send: Run fleet resume demo", out)
+
+    def test_handoff_counts_an_answered_blocked_report_as_handled(self):
+        self.setup_run()
+        self.launch()
+        path = self.repo / ".fleet/runs/demo/reports/01.md"
+        path.write_text("# Worker report\nStatus: blocked\n\nWhich copy should the banner use?\n")
+        old = path.stat().st_mtime - 60
+        os.utime(path, (old, old))
+        self.call("send", "demo", "01", "Use the short copy.")
+        out = self.call("handoff", "demo", "--no-notes")
+        self.assertIn("Awaiting the next lead: nothing.", out)
+
+    def test_handoff_leaves_running_workers_and_their_events_alone(self):
+        self.cfg["defaults"]["max_parallel"] = self.cfg["providers"]["writer"]["max"] = 2
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"]}, {"id": "02", "files": ["next.txt"]}])
+        self.launch()
+        self.launch("02")
+        calls, before = len(self.cmux_calls), self.state()["workers"]
+        self.call("handoff", "demo", "--no-notes")
+        self.assertEqual(len(self.cmux_calls), calls)            # no keys sent, no pane read, closed or replaced
+        self.assertEqual(self.state()["workers"], before)
+        self.report("02")                                          # a worker hands back while the lead resets
+        self.assertIn("REPORT 02 [needs-verification]", self.call("wait", "demo", "--timeout", "0"))
+
+    def test_handoff_lists_a_worker_that_exited_without_handing_back(self):
+        self.setup_run()
+        self.launch()
+        self.receipt(returncode=1)
+        out = self.call("handoff", "demo", "--no-notes")
+        self.assertIn("Running: none. Awaiting the next lead: 01 [exited, returncode=1, report: no report].", out)
 
     def test_two_waves_release_capacity_only_after_process_exit_and_acceptance(self):
         self.setup_run()

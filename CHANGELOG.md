@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+Lets the owner reset a long-running lead safely, by handoff or compaction, between waves.
+
+- Add `fleet handoff <run> [--compact] (--note TEXT … | --no-notes)`. It refuses while a background `fleet wait` is running or before the plan is saved, appends a `## Handoff` entry to the run's `notes.md` (running workers; reports and exited workers awaiting the next lead; the lead's notes) and prints the owner's steps for the lead's host: `/clear` + `/fleet resume`, `/compact` with instructions, or the Codex equivalents. `fleet wait` records its pid while it runs so handoff can tell.
+- Run commands measure the lead's own context from its session log (Claude Code via `CLAUDE_CODE_SESSION_ID`, Codex via `CODEX_THREAD_ID`) and, after a large drop, add one `LEAD compacted …` line on stderr telling the lead to run `fleet resume` before acting. Stdout, `--json` output and exit codes are unchanged, and a reading that fails prints nothing. A response with a server-side tool call (such as the advisor) is read from its last step, not its summed usage.
+- Add `fleet context [--json]` to show the calling lead's context size.
+- Add optional `[lead_context.claude]` and `[lead_context.codex]` marks (`warn_at`, `dumb_at`; none by default). They add a size line to run commands; the lead tells the owner and never hands off on its own.
+- Skill: the lead reports its context size with each wave, hands off or prepares for compaction only when the owner asks, and resumes from disk after compaction. New reference `references/lead-context.md`; the README has a matching section for owners.
+- Skill: new `references/examples.md` with worked command sequences for option mapping, blocked workers, change requests, cross-family review with a fix round, evidence files, repair, recovery, follow-up runs and finishing a run, each checked against the CLI.
+
 ## 0.1.0-preview.6
 
 - `fleet launch` opens each worker in a new pane instead of a tab in an existing one, splitting the largest pane (along its long side) until the workspace has 8 panes. At 8 it replaces a pane, other than the lead's, that holds only verified workers whose exit is confirmed, opening the new worker there and closing their surfaces; failing that, it adds a tab to an idle pane (no live worker), so an unverified worker keeps its scrollback. When every other pane has a live worker it refuses before touching the run (no baseline snapshot, no moved report). `--pane` now chooses the pane to split, replace or add a tab to, and accepts a pane ref, UUID or index as listed by `cmux list-panes`.

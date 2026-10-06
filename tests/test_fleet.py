@@ -1,6 +1,7 @@
 """Unit tests for the pure parts of skill/bin/fleet. Run: python3 -m unittest discover tests"""
 import importlib.machinery
 import importlib.util
+import json
 import os
 import tempfile
 import tomllib
@@ -8,6 +9,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# The suite may run inside a Claude Code or Codex session; its own context must not leak into Fleet output.
+for _var in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"):
+    os.environ.pop(_var, None)
 _loader = importlib.machinery.SourceFileLoader("fleet", str(ROOT / "skill" / "bin" / "fleet"))
 _spec = importlib.util.spec_from_loader("fleet", _loader)
 fleet = importlib.util.module_from_spec(_spec)
@@ -389,6 +393,142 @@ class Binary(unittest.TestCase):
     def test_env_prefix_is_skipped(self):
         self.assertEqual(fleet.first_binary("CLAUDE_CONFIG_DIR=$HOME/.claude-co claude"), "claude")
         self.assertEqual(fleet.first_binary("cursor-agent"), "cursor-agent")
+
+
+class LeadContext(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        zones = {"warn_at": 100_000, "dumb_at": 125_000}
+        self.cfg = {"lead_context": {"claude": zones, "codex": zones}}
+
+    def claude_log(self, sid, entries):
+        f = self.home / "claude" / "projects" / "-repo" / f"{sid}.jsonl"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("".join(json.dumps(e) + "\n" for e in entries))
+        return f
+
+    def codex_log(self, tid, entries):
+        f = self.home / "codex" / "sessions" / "2026" / "10" / "06" / f"rollout-2026-10-06T00-00-00-{tid}.jsonl"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("".join(json.dumps(e) + "\n" for e in entries))
+        return f
+
+    @staticmethod
+    def assistant(cache_read, sidechain=False):
+        return {"type": "assistant", "isSidechain": sidechain, "message": {"usage": {
+            "input_tokens": 2, "cache_creation_input_tokens": 1000, "cache_read_input_tokens": cache_read,
+            "output_tokens": 500}}}
+
+    @staticmethod
+    def token_count(last, total):
+        return {"type": "event_msg", "payload": {"type": "token_count", "info": {
+            "total_token_usage": {"input_tokens": total, "output_tokens": 10},
+            "last_token_usage": {"input_tokens": last, "output_tokens": 10}}}}
+
+    def env(self, **ids):
+        env = {"CLAUDE_CONFIG_DIR": str(self.home / "claude"), "CODEX_HOME": str(self.home / "codex")}
+        if "claude" in ids:
+            env["CLAUDE_CODE_SESSION_ID"] = ids["claude"]
+        if "codex" in ids:
+            env["CODEX_THREAD_ID"] = ids["codex"]
+        return env
+
+    def test_claude_reads_the_latest_main_chain_usage_and_skips_subagents(self):
+        sid = "11111111-2222-3333-4444-555555555555"
+        self.claude_log(sid, [self.assistant(50_000), {"type": "user"}, self.assistant(128_000),
+                              self.assistant(900_000, sidechain=True)])
+        r = fleet.lead_reading(self.cfg, self.env(claude=sid))
+        self.assertEqual((r["host"], r["tokens"], r["zone"]), ("claude", 129_502, "dumb"))
+
+    def test_codex_uses_last_call_usage_not_the_session_total(self):
+        tid = "01a10dd0-cc90-7880-884b-11a5b4ba24dc"
+        self.codex_log(tid, [self.token_count(20_000, 40_000), {"type": "event_msg", "payload": {"type": "task_complete"}},
+                             self.token_count(104_990, 600_000)])
+        r = fleet.lead_reading(self.cfg, self.env(codex=tid))
+        self.assertEqual((r["host"], r["tokens"], r["zone"]), ("codex", 105_000, "warning"))
+
+    def test_zone_boundaries(self):
+        tid = "01a10dd0-cc90-7880-884b-11a5b4ba24dc"
+        for last, zone in ((99_989, "smart"), (99_990, "warning"), (124_989, "warning"), (124_990, "dumb")):
+            with self.subTest(tokens=last + 10):
+                self.codex_log(tid, [self.token_count(last, last)])
+                self.assertEqual(fleet.lead_reading(self.cfg, self.env(codex=tid))["zone"], zone)
+
+    def test_not_a_lead_without_a_session_id_a_log_or_a_recorded_call(self):
+        self.assertIsNone(fleet.lead_reading(self.cfg, self.env()))
+        self.assertIsNone(fleet.lead_reading(self.cfg, self.env(claude="99999999-0000-0000-0000-000000000000")))
+        self.assertIsNone(fleet.lead_reading(self.cfg, self.env(claude="../../etc/passwd")))
+        tid = "01a10dd0-cc90-7880-884b-11a5b4ba24dc"
+        self.codex_log(tid, [{"type": "session_meta", "payload": {}}])
+        self.assertIsNone(fleet.lead_reading(self.cfg, self.env(codex=tid)))
+
+    def test_a_stale_log_is_an_earlier_session_not_this_lead(self):
+        sid = "11111111-2222-3333-4444-555555555555"
+        f = self.claude_log(sid, [self.assistant(130_000)])
+        later = f.stat().st_mtime + fleet.LEAD_STALE_S + 1
+        self.assertIsNone(fleet.lead_reading(self.cfg, self.env(claude=sid), now=later))
+
+    def test_with_both_ids_the_most_recently_written_log_is_the_lead(self):
+        sid, tid = "11111111-2222-3333-4444-555555555555", "01a10dd0-cc90-7880-884b-11a5b4ba24dc"
+        old = self.claude_log(sid, [self.assistant(130_000)])
+        os.utime(old, (old.stat().st_mtime - 60, old.stat().st_mtime - 60))
+        self.codex_log(tid, [self.token_count(30_000, 30_000)])
+        self.assertEqual(fleet.lead_reading(self.cfg, self.env(claude=sid, codex=tid))["host"], "codex")
+
+    def test_notices(self):
+        r = {"tokens": 30_000, "zone": "smart", "warn_at": 100_000, "dumb_at": 125_000}
+        self.assertIsNone(fleet.lead_notice(r, "demo", None))
+        self.assertIn("nearing the dumb zone", fleet.lead_notice(dict(r, tokens=104_000, zone="warning"), "demo", None))
+        self.assertIn("LEAD 131K dumb zone", fleet.lead_notice(dict(r, tokens=131_000, zone="dumb"), "demo", 120_000))
+        compacted = fleet.lead_notice(r, "demo", 140_000)
+        self.assertIn("compacted 140K -> 30K", compacted)
+        self.assertIn("fleet resume demo", compacted)
+        self.assertIsNone(fleet.lead_notice(r, "demo", 60_000))  # a drop below the warning line is not a compaction
+
+    def test_a_server_side_tool_step_does_not_inflate_the_reading(self):
+        # Shape of a real Claude Code entry for a response that called the advisor: the top-level usage sums all steps.
+        sid = "11111111-2222-3333-4444-555555555555"
+        entry = {"type": "assistant", "isSidechain": False, "message": {"usage": {
+            "input_tokens": 4, "cache_creation_input_tokens": 2000, "cache_read_input_tokens": 188_567, "output_tokens": 590,
+            "iterations": [
+                {"type": "message", "input_tokens": 2, "cache_creation_input_tokens": 679, "cache_read_input_tokens": 93_944,
+                 "output_tokens": 186},
+                {"type": "advisor_message", "input_tokens": 96_505, "output_tokens": 4590},
+                {"type": "message", "input_tokens": 2, "cache_creation_input_tokens": 1321, "cache_read_input_tokens": 94_623,
+                 "output_tokens": 404}]}}}
+        self.claude_log(sid, [entry])
+        r = fleet.lead_reading(self.cfg, self.env(claude=sid))
+        self.assertEqual(r["tokens"], 96_350)
+        self.assertIsNone(fleet.lead_notice(dict(r, tokens=97_720, zone="smart"), "demo", r["tokens"]))
+
+    def test_defaults_set_no_zones_so_the_owner_decides(self):
+        cfg = fleet.load_config(Path(self.temp.name) / "missing.toml")
+        self.assertEqual(cfg["lead_context"], {})
+        sid, tid = "11111111-2222-3333-4444-555555555555", "01a10dd0-cc90-7880-884b-11a5b4ba24dc"
+        self.claude_log(sid, [self.assistant(900_000)])
+        self.assertEqual(fleet.lead_reading(cfg, self.env(claude=sid))["zone"], "off")
+        self.codex_log(tid, [self.token_count(200_000, 200_000)])
+        r = fleet.lead_reading(cfg, self.env(codex=tid))
+        self.assertEqual((r["zone"], r["warn_at"]), ("off", None))
+        self.assertIsNone(fleet.lead_notice(r, "demo", None))
+        self.assertIn("compacted 200K -> 30K", fleet.lead_notice(dict(r, tokens=30_000), "demo", 200_000))
+
+    def test_config_sets_zones_per_host_and_rejects_bad_values(self):
+        cfg = Path(self.temp.name) / "config.toml"
+        cfg.write_text("[lead_context.claude]\nwarn_at = 500000\ndumb_at = 600000\n")
+        self.assertEqual(fleet.load_config(cfg)["lead_context"], {"claude": {"warn_at": 500_000, "dumb_at": 600_000}})
+        for body in ("[lead_context.claude]\nwarn_at = 700000\ndumb_at = 600000\n",
+                     "[lead_context.claude]\nwarn_at = true\ndumb_at = 600000\n",
+                     "[lead_context.codex]\nwarn_at = 90000\n",  # both are needed
+                     "[lead_context.claude]\nwarn = 90000\n",
+                     "[lead_context]\nwarn_at = 90000\n",
+                     "lead_context = 5\n"):
+            with self.subTest(body=body):
+                cfg.write_text(body)
+                with self.assertRaises(fleet.FleetError):
+                    fleet.load_config(cfg)
 
 
 if __name__ == "__main__":
