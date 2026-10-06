@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.14
 
 Clearer wording around `wait`, `hold` and `stop`.
 
