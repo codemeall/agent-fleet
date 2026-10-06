@@ -2,7 +2,7 @@
 
 `providers.toml` is the shipped adapter configuration; `fleet providers` prints it merged with personal overrides. Adapter command templates are trusted local executable configuration, not safe inputs from tickets. Model, effort and prompt substitutions are shell-quoted by the runtime. Keep account setup separate from model data.
 
-All model IDs and efforts are examples tied to accounts and CLI versions. Before routing, authenticate through the owner's normal process. `doctor` checks binary presence and login signals, including the login command's exit status, and checks every tier model against the account's list where the CLI can list models (`models` field: Cursor, Antigravity, and Codex through `codex debug models`, which also lists each model's efforts). For Codex doctor also shows the configured default from `config.toml`; Claude's `opus`/`sonnet` aliases follow the current model. Doctor spends no model call and does not guarantee model access. A passing doctor is a preflight check, not an end-to-end compatibility claim.
+All model IDs and efforts are examples tied to accounts and CLI versions. Before routing, authenticate through the owner's normal process. `doctor` checks binary presence and login signals, including the login command's exit status, and checks every tier model against the account's list where the CLI can list models (`models` field: Cursor, Antigravity, OpenCode, and Codex through `codex debug models`, which also lists each model's efforts). For Codex doctor also shows the configured default from `config.toml`; Claude's `opus`/`sonnet` aliases follow the current model. Doctor spends no model call and does not guarantee model access. A passing doctor is a preflight check, not an end-to-end compatibility claim.
 
 ## Keeping models current
 
@@ -10,15 +10,17 @@ Tier models are pinned on purpose: plans record the exact model and cross-family
 
 ## Allowed models
 
-`models_allow` is the owner's list of models the lead may choose, either a list (`["opus", "sonnet"]`) or a table of model ID = family. With a live list (Codex, Cursor, Antigravity) it narrows that list; without one (Claude) it is the list. Tier models always count as allowed, so overriding a tier needs no list edit; the list governs per-ticket pins and review models. `fleet plan` and review launches refuse models outside it, and its families feed cross-family review. Doctor fails when a tier model is outside it and warns when an allowed model is no longer offered. A user's `models_allow` replaces the shipped one; an adapter that `extends` another inherits it. `fleet models <provider> --all` shows the account's full list.
+`models_allow` is the owner's list of models the lead may choose, either a list (`["opus", "sonnet"]`) or a table of model ID = family. With a live list (Codex, Cursor, Antigravity, OpenCode) it narrows that list; without one (Claude) it is the list. Tier models always count as allowed, so overriding a tier needs no list edit; the list governs per-ticket pins and review models. `fleet plan` and review launches refuse models outside it, and its families feed cross-family review. Doctor fails when a tier model is outside it and warns when an allowed model is no longer offered. A user's `models_allow` replaces the shipped one; an adapter that `extends` another inherits it. `fleet models <provider> --all` shows the account's full list.
 
 | Provider | Shipped `models_allow` |
 | --- | --- |
 | Claude | `opus`, `sonnet` (the CLI cannot list models; add `fable` or full IDs such as `claude-opus-5-5` if your plan offers them) |
-| Cursor | A starter set with families; the account offers far more |
+| Cursor, OpenCode | A starter set with families; the account offers far more |
 | Codex, Antigravity | None: the live list is used as is |
 
-`efforts` lists the effort levels a CLI accepts when it cannot report them per model. Claude ships `low, medium, high, xhigh, max` from `claude --help`; that is CLI-wide, so whether a given model accepts a level is only proven at launch. Tier efforts, plans and review launches outside the list are refused. Codex reports efforts per model in its catalog; Cursor encodes effort in the model ID.
+`model_families` (model ID = family) names the family of models in a mixed adapter without narrowing what the lead may choose. Antigravity ships one for every model it lists, so its Claude and GPT-OSS models count as Anthropic and OpenAI in cross-family review.
+
+`efforts` lists the effort levels a CLI accepts when it cannot report them per model. Claude ships `low, medium, high, xhigh, max` from `claude --help`; that is CLI-wide, so whether a given model accepts a level is only proven at launch. Tier efforts, plans and review launches outside the list are refused. Antigravity ships `low, medium, high, max` from `agy --help`. Codex reports efforts per model in its catalog; Cursor encodes effort in the model ID; OpenCode's interactive TUI has no effort flag, so its tiers carry none.
 
 Codex's list comes from `codex debug models`, a debug command that refreshes its catalog over the network and may change between Codex versions. If it fails, doctor reports "model list failed" without failing. When the catalog marks a tier model for retirement, doctor warns (`RETIRING: gpt-5.5 retires 2026-10-14, switch to gpt-5.6-sol`) without failing, and `fleet models codex` shows the date and replacement.
 
@@ -57,9 +59,27 @@ The default launches `cursor-agent` with the chosen model and repository trust, 
 
 Cursor can serve several families. The example tiers identify xAI (`grok-…`), Moonshot (`kimi-…`) and Meta (`muse-…`) separately. Use `cursor-agent --list-models` to confirm your account's exact IDs; parameterized IDs must remain a single argument. A model override needs accurate family metadata, especially for cross-family review. A different CLI name alone is not evidence of a different family.
 
-## Optional and experimental adapters
+## Antigravity
 
-Antigravity (`agy`) is disabled by default. Its example tiers describe Google models, but the adapter itself may serve multiple families. Validate its binary, authentication, model availability, command permissions and shutdown sequence before enabling it. No live compatibility claim is made.
+`agy` ships disabled; enable it with `[providers.agy] enabled = true` once `fleet doctor agy` passes. It was checked live with agy 1.3.0: launch with an interactive first prompt (`-i`), follow-up input, `/exit` back to the shell, `doctor` and `fleet models agy`. `/exit` is the verified quit sequence.
+
+- It runs in `accept-edits` mode: file edits are approved automatically, shell commands still ask. A worker's checks (even `git status`) wait at a prompt until someone answers it in the pane, so watch `fleet peek` after launch.
+- On first use in a folder it asks whether to trust it. Fleet does not answer that for you; the owner does, once per checkout.
+- The model ID names a thinking level (`gemini-3.8-flash-medium`) and `--effort` sets reasoning effort; tiers set both.
+- Its account also offers Claude and GPT-OSS models. `model_families` labels every listed model (Gemini as Google), so an Antigravity Claude model cannot review a Claude writer. A model agy adds later needs an entry there, or `--family`, before it can take part in cross-family review.
+- It cannot name a session at launch (only resume one with `--conversation`), so `fleet launch --resume` does not apply.
+
+## OpenCode
+
+`opencode` ships disabled; enable it with `[providers.opencode] enabled = true`. It was checked live with opencode 1.18.34: launch through the TUI's `--prompt` (submitted at once, the session stays interactive), follow-up input, `/exit` back to the shell, `doctor`, `fleet models opencode`, and a Fleet launch that ended in an in-scope change and a complete report.
+
+- Model IDs are `provider/model`. The shipped tiers and login check assume OpenRouter (`opencode auth login`). `opencode models` lists only providers with credentials, so `login = "opencode models openrouter"` with `login_ok = "openrouter/"` is a real sign-in check; point both at the provider you use.
+- It serves many families, so the adapter is `mixed`: every tier and `models_allow` entry carries its family. The shipped tiers use Zhipu, Alibaba and DeepSeek models, which gives cross-family review options outside Anthropic, OpenAI and Google.
+- Effort: the TUI takes no `--variant` (only `opencode run` does), so tiers carry no effort.
+- Permissions: OpenCode's default build agent allows every tool without asking, except paths outside the workspace and repeated identical calls (`opencode debug agent build` shows the resolved rules). Fleet's worker contract is the only limit unless your `opencode.json` sets `permission`; tighten it there, not in the adapter.
+- Its sessions get IDs OpenCode picks, so `fleet launch --resume` does not apply.
+
+## Placeholder adapters
 
 The disabled `grok` and `muse` entries are incomplete placeholders, not supported providers. Verify that a binary with the expected name is actually the intended product; fill in a no-model authentication check, known family/tier metadata and tested launch/shutdown commands before use.
 

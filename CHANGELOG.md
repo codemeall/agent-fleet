@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+Antigravity and OpenCode are supported worker adapters. Both ship disabled; enable one in your config.
+
+- New `opencode` adapter: launches the TUI with `--prompt` and quits with `/exit`. Model IDs are `provider/model`; the shipped tiers use OpenRouter models from Zhipu, Alibaba and DeepSeek, so a mixed fleet gains cross-family reviewers. `models_allow` ships a starter set with families. The TUI has no effort flag, so tiers carry none. Checked live with opencode 1.18.34.
+- `agy` adapter checked live with agy 1.3.0. It now quits with `/exit`, the verified sequence (it shipped with `ctrl+c` twice), declares its efforts (`low`, `medium`, `high`, `max`) and gives every listed model a family through `model_families`, so its Claude and GPT-OSS models can't review a writer from the same family.
+- Model lists can be bare `provider/model` lines, as `opencode models` prints them; before, doctor reported "listed no models" for such a CLI.
+- Provider notes cover both CLIs, including what they ask before they act: agy asks to trust a new folder and to run each shell command; OpenCode's default agent allows every tool inside the workspace.
+
 ## 0.1.0-preview.15
 
 Fleet now records the cmux UUIDs it was meant to address workers and workspaces by.

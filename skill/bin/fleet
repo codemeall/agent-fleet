@@ -64,7 +64,7 @@ PROMPT_FIELDS = {  # optional per-ticket plan fields that complete a worker prom
 PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
 TEMPLATE_KEYS = {"id", "ticket", "report", "repo", "files", "diff", "review_of", *PROMPT_FIELDS}
 WAIT_MAX = 600  # Claude Code's longest foreground command timeout; other hosts may allow less
-MODEL_LINE_RE = re.compile(r"^\s*([A-Za-z0-9][^\s]*)(?:\t| +- )")
+MODEL_LINE_RE = re.compile(r"^\s*([A-Za-z0-9][^\s]*)(?:\t| +- )|^\s*([A-Za-z0-9][^\s/]*/\S+)\s*$")  # bare lines: provider/model
 
 
 class FleetError(Exception):
@@ -1743,12 +1743,12 @@ def cmd_version(a, cfg):
 
 def parse_models(text: str) -> dict[str, set[str] | None]:
     """Model IDs, with their efforts when known, from a CLI listing: a JSON catalog
-    ({"models": [{"slug", "visibility", "supported_reasoning_levels"}]}), or the first
-    column of `id<TAB>name` / `id - name` lines."""
+    ({"models": [{"slug", "visibility", "supported_reasoning_levels"}]}), the first
+    column of `id<TAB>name` / `id - name` lines, or bare `provider/model` lines."""
     try:
         catalog = json.loads(text)
     except ValueError:
-        return {m.group(1): None for m in map(MODEL_LINE_RE.match, text.splitlines()) if m}
+        return {m.group(1) or m.group(2): None for m in map(MODEL_LINE_RE.match, text.splitlines()) if m}
     out = {}
     for m in catalog.get("models", []) if isinstance(catalog, dict) else []:
         slug = m.get("slug") or m.get("id")

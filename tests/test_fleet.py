@@ -48,7 +48,26 @@ class ProviderConfig(unittest.TestCase):
                          f"env CLAUDE_CONFIG_DIR={home} claude --model opus --effort high go")
         self.assertTrue(fleet.build_launch(p["claude"], "opus", "high", "go")
                         .startswith("env -u CLAUDE_CONFIG_DIR claude --model opus"))
-        self.assertIn("-i go", fleet.build_launch(p["agy"], "gemini-3.1-pro-high", "high", "go"))
+        self.assertEqual(fleet.build_launch(p["agy"], "gemini-3.1-pro-high", "high", "go"),
+                         "agy --model gemini-3.1-pro-high --effort high --mode accept-edits -i go")
+        self.assertEqual(fleet.build_launch(p["opencode"], "openrouter/z-ai/glm-5.3", None, "go"),
+                         "opencode --model openrouter/z-ai/glm-5.3 --prompt go")
+
+    def test_disabled_agy_and_opencode_adapters_are_complete(self):
+        # They ship disabled, so the every-tier test above skips them.
+        for name in ("agy", "opencode"):
+            p = self.cfg["providers"][name]
+            self.assertEqual(p["quit"], ["/exit", "enter"])
+            for tier in ("heavy", "standard", "light", "review"):
+                with self.subTest(provider=name, tier=tier):
+                    model, effort = fleet.resolve_model(p, tier, None, None)
+                    fleet.check_allowed(p, name, model)
+                    fleet.check_effort(p, name, effort)
+                    self.assertIsNotNone(fleet.model_family(p, tier, model))
+                    self.assertNotIn("{", fleet.build_launch(p, model, effort, "Read /x/p.md"))
+        agy = self.cfg["providers"]["agy"]
+        self.assertEqual(fleet.model_family(agy, "standard", "claude-opus-4-6-thinking"), "anthropic")
+        self.assertEqual(fleet.model_family(agy, "standard", "gemini-3.7-flash-high"), "google")
 
     def test_claude_names_its_session_and_can_resume_it(self):
         p, sid = self.cfg["providers"], "0b6c4a52-7c1e-4f0e-9d2a-3f1e2d4c5b6a"
@@ -293,6 +312,11 @@ class Models(unittest.TestCase):
         catalog = ('{"models": [{"slug": "sol", "visibility": "list", "supported_reasoning_levels": '
                    '[{"effort": "low"}, {"effort": "high"}]}, {"slug": "secret", "visibility": "hide"}]}')
         self.assertEqual(fleet.parse_models(catalog), {"sol": {"low", "high"}})
+
+    def test_bare_provider_model_lines(self):
+        text = "Models:\nopencode/big-pickle\nopenrouter/z-ai/glm-5.3  \nhuggingface/deepseek-ai/DeepSeek-V4-Pro\nloading\n"
+        self.assertEqual(list(fleet.parse_models(text)),
+                         ["opencode/big-pickle", "openrouter/z-ai/glm-5.3", "huggingface/deepseek-ai/DeepSeek-V4-Pro"])
 
     def test_catalog_efforts_are_checked(self):
         cat = '{"models": [{"slug": "sol", "supported_reasoning_levels": [{"effort": "low"}]}]}'

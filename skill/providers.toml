@@ -12,6 +12,7 @@
 #   With a live `models` list it narrows that list; without one it is the list. Plans and
 #   review launches outside it are refused. Tier models always count as allowed.
 #   A user's models_allow replaces the shipped one.
+# model_families: model ID = family for a mixed adapter, without narrowing what the lead may choose.
 # efforts: effort levels the CLI accepts, for a CLI that cannot report them per model.
 #   Tier efforts, plans and review launches outside it are refused.
 # tiers: model + effort per ticket weight (see references/routing.md).
@@ -92,21 +93,46 @@ tiers.standard = { model = "kimi-k3-high", family = "moonshot" }
 tiers.light = { model = "grok-4.7-high-fast", family = "xai" }
 tiers.review = { model = "muse-spark-1.3-max", family = "meta" }
 
+# Antigravity: checked live with agy 1.3.0 (launch, follow-up, /exit). Disabled until the owner turns it on.
 [providers.agy]
 enabled = false
 bin = "agy"
 launch = "{bin} --model {model} --effort {effort} --mode accept-edits -i {prompt}"
-quit = ["ctrl+c", "ctrl+c"]
+quit = ["/exit", "enter"]
 login = "agy models"
 login_ok = "gemini"
 models = "agy models"
+efforts = ["low", "medium", "high", "max"]   # from `agy --help`; the model ID also names a thinking level
 family = "mixed"
+# Families for every model `agy models` lists (agy 1.3.0); add new IDs here or pass --family.
+model_families = { "gemini-3.8-flash-high" = "google", "gemini-3.8-flash-medium" = "google", "gemini-3.8-flash-low" = "google", "gemini-3.7-flash-high" = "google", "gemini-3.7-flash-medium" = "google", "gemini-3.7-flash-low" = "google", "gemini-3.6-flash-high" = "google", "gemini-3.6-flash-medium" = "google", "gemini-3.6-flash-low" = "google", "gemini-3.1-pro-high" = "google", "gemini-3.1-pro-low" = "google", "claude-sonnet-4-6" = "anthropic", "claude-opus-4-6-thinking" = "anthropic", "gpt-oss-120b-medium" = "openai" }
 plugins = false
 max = 1
 tiers.heavy = { model = "gemini-3.1-pro-high", effort = "high", family = "google" }
 tiers.standard = { model = "gemini-3.8-flash-high", effort = "high", family = "google" }
 tiers.light = { model = "gemini-3.8-flash-medium", effort = "medium", family = "google" }
 tiers.review = { model = "gemini-3.1-pro-high", effort = "high", family = "google" }
+
+# OpenCode: checked live with opencode 1.18.34 (launch, follow-up, /exit). Disabled until the owner turns it on.
+# Model IDs are provider/model; the shipped tiers assume OpenRouter (`opencode auth login`).
+# The TUI has no effort flag (only `opencode run` takes --variant), so tiers carry none.
+[providers.opencode]
+enabled = false
+bin = "opencode"
+launch = "{bin} --model {model} --prompt {prompt}"
+quit = ["/exit", "enter"]
+login = "opencode models openrouter"   # lists only providers with credentials; point it at yours
+login_ok = "openrouter/"
+models = "opencode models"
+family = "mixed"
+# Starter set; `fleet models opencode --all` lists every model your configured providers offer.
+models_allow = { "openrouter/z-ai/glm-5.3" = "zhipu", "openrouter/qwen/qwen3.7-plus" = "alibaba", "openrouter/deepseek/deepseek-v4-pro" = "deepseek", "openrouter/deepseek/deepseek-v4-flash" = "deepseek", "openrouter/moonshotai/kimi-k2.7-code" = "moonshot", "openrouter/minimax/minimax-m3" = "minimax" }
+plugins = false
+max = 1
+tiers.heavy = { model = "openrouter/z-ai/glm-5.3", family = "zhipu" }
+tiers.standard = { model = "openrouter/qwen/qwen3.7-plus", family = "alibaba" }
+tiers.light = { model = "openrouter/deepseek/deepseek-v4-flash", family = "deepseek" }
+tiers.review = { model = "openrouter/deepseek/deepseek-v4-pro", family = "deepseek" }
 
 # Planned: turned on once the CLI is set up and its adapter is checked.
 [providers.grok]

@@ -4,7 +4,7 @@ Run a fleet of coding-agent CLIs (Claude Code, Codex, Cursor) in visible [cmux](
 
 The lead turns approved tickets into a saved execution plan, picks a worker model and effort for each ticket, watches progress, and verifies every result before dependents start. Workers share one Git checkout with explicit file ownership. **You keep control of commits and publishing.**
 
-> **Preview `0.1.0-preview.15`.** Bundled adapters exist for Claude Code, Codex and Cursor. Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
+> **Preview `0.1.0-preview.15`.** Bundled adapters exist for Claude Code, Codex and Cursor, plus Antigravity and OpenCode (disabled by default). Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
 
 - [Quick start](#quick-start)
 - [Installation](#installation)
@@ -34,7 +34,7 @@ Restart your agent host, open it inside a cmux workspace, and ask:
 ### Requirements
 
 - macOS (cmux is a macOS terminal) with **Python 3.11+**, **Git** and **[cmux](https://github.com/manaflow-ai/cmux)** running with a reachable socket
-- At least one installed, authenticated worker CLI: `claude`, `codex` or `cursor-agent`
+- At least one installed, authenticated worker CLI: `claude`, `codex` or `cursor-agent` (`agy` and `opencode` adapters ship disabled; turn them on in your config)
 - **Node.js 18+** for the installer (not needed at runtime)
 
 The lead host must be allowed to use the local shell, the repository and cmux. Installing the skill does not grant those permissions; see [host setup](skill/references/harnesses.md).
@@ -164,7 +164,7 @@ fleet doctor
 
 `version` prints the runtime's version and the skill directory it runs from. With several installs, it tells you which copy your shell found.
 
-`doctor` checks cmux connectivity, worker executables and login signals, and checks each tier model against the account's model list where the CLI offers one (Codex, Cursor, Antigravity). It cannot guarantee model access or a successful worker session. It also reports:
+`doctor` checks cmux connectivity, worker executables and login signals, and checks each tier model against the account's model list where the CLI offers one (Codex, Cursor, Antigravity, OpenCode). It cannot guarantee model access or a successful worker session. It also reports:
 
 - the runtime's version, and each host's installed `fleet` skill with its version, flagging copies that differ from the runtime you ran. Copies installed before `fleet version` existed show `version unknown`.
 - where each [companion skill](#companion-skills-optional) is installed: the user-level skill directories, plus `.claude/skills`, `.agents/skills` and `.cursor/skills` in the current directory. Missing companions get an install command and never make `doctor` fail. Skills installed through a plugin aren't detected.
@@ -368,13 +368,24 @@ Window sizes differ by host and setting: Claude Code runs Opus 5.5 with a 1M win
 | Lead or worker | Preview scope |
 | --- | --- |
 | Local Claude Code, Codex CLI, Cursor CLI | Bundled worker adapters; the lead needs shell, repository and cmux access |
+| Antigravity (`agy`), OpenCode | Bundled worker adapters, disabled by default; enable one in your config, then run `fleet doctor` |
 | Codex desktop / ChatGPT with local execution | Usable when the same capabilities and permissions are available |
 | Cloud-only or remote session | Needs an explicit connection to the machine running cmux |
 | Other providers or accounts | Configure and test an adapter yourself |
 
 The lead host, worker CLI, provider account and model family are independent choices. For example, a Claude lead can run Codex workers, and Cursor can serve several model families. The bundled model IDs are examples that depend on your account, so check which IDs and effort levels you can actually use before assigning work.
 
-[providers.toml](skill/providers.toml) holds launch templates, login checks, shutdown keys and tiers. Optional `claude-co`, Antigravity and placeholder adapters ship disabled.
+[providers.toml](skill/providers.toml) holds launch templates, login checks, shutdown keys and tiers. The `claude-co` example, Antigravity, OpenCode and the placeholder adapters ship disabled. To use Antigravity or OpenCode:
+
+```toml
+[providers.agy]
+enabled = true
+
+[providers.opencode]
+enabled = true        # the shipped tiers assume OpenRouter; see the provider notes
+```
+
+Add them to `defaults.prefer` for auto routing. See the [provider notes](skill/references/providers.md#antigravity) for what each one asks before it acts.
 
 ### More than one subscription
 

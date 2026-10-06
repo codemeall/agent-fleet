@@ -24,6 +24,13 @@ review = "cross-heavy"
 # effort = "medium"
 # family = "openai"
 
+# Antigravity and OpenCode ship disabled. Turn one on, then run fleet doctor <name>.
+# OpenCode's shipped tiers assume OpenRouter; override its tiers and login check for another provider.
+# [providers.agy]
+# enabled = true
+# [providers.opencode]
+# enabled = true
+
 # Optional second account. Sign it in first (CLAUDE_CONFIG_DIR=~/.claude-co claude).
 # Other accounts: fleet account add <name> --from claude|codex --dir <path>
 # [providers.claude-co]
