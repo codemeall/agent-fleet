@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.16
 
 Antigravity and OpenCode are supported worker adapters. Both ship disabled; enable one in your config.
 
