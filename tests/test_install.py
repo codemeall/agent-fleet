@@ -174,6 +174,8 @@ class InstallTests(unittest.TestCase):
 
     def test_plugin_metadata_matches_package(self):
         package = json.loads((REPO / 'package.json').read_text())
+        runtime = subprocess.run(['python3', str(REPO / 'skill/bin/fleet'), '--version'], text=True, capture_output=True)
+        self.assertEqual(runtime.stdout.strip(), f"fleet {package['version']}", 'bump VERSION in skill/bin/fleet')
         for manifest_path in ['.claude-plugin/plugin.json', 'plugin-manifests/codex.json']:
             manifest = json.loads((REPO / manifest_path).read_text())
             self.assertEqual(manifest['version'], package['version'])

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add `fleet version` and `fleet --version`. They print the runtime's version (and, for `version`, its skill directory) without reading the user config. The version lives in `skill/bin/fleet`, so skills CLI and plugin installs carry it too. A test keeps it equal to `package.json`.
+- `fleet doctor` prints the runtime's version first and shows each host's installed `fleet` skill with its version, flagging copies that differ from the runtime.
+- `fleet doctor` reports the optional companion skills: `cmux` (manaflow-ai/cmux), and `grill-with-docs`, `grill-me`, `to-spec` and `to-tickets` (mattpocock/skills). It checks user-level skill directories and the current directory's `.claude/skills`, `.agents/skills` and `.cursor/skills`, and prints an install command for each one it can't find. Companion skills never change doctor's exit code.
+- README: new "Companion skills (optional)" section with install commands, and `fleet version` and the new doctor output under Verify. The skill and host reference say when the lead may use the companions; the `cmux` skill stays inspection-only under the focus rule.
+
 ## 0.1.0-preview.7
 
 Lets the owner steer, pause and reset a long-running fleet safely: reroute launches, hold new ones, and hand off or compact the lead between waves.

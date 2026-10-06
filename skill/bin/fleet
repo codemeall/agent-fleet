@@ -24,12 +24,25 @@ import time
 import tomllib
 from pathlib import Path
 
+VERSION = "0.1.0-preview.7"  # bump with package.json on release; tests/test_install.py checks they match
 SKILL_DIR = Path(__file__).resolve().parent.parent
 USER_CONFIG = Path(os.environ.get("FLEET_CONFIG", "~/.config/agent-fleet/config.toml")).expanduser()
 HARNESS_SKILL_DIRS = {
     "claude": "~/.claude/skills",
     "codex": "~/.agents/skills",
     "cursor": "~/.cursor/skills",
+}
+PROJECT_SKILL_DIRS = {  # project-scope installs, relative to the checkout doctor runs in
+    "claude": ".claude/skills",
+    "codex": ".agents/skills",
+    "cursor": ".cursor/skills",
+}
+COMPANION_SKILLS = {  # optional skills the lead may use; doctor reports them but never fails on them
+    "cmux": ("manaflow-ai/cmux", "cmux topology: workspaces, panes, surfaces"),
+    "grill-with-docs": ("mattpocock/skills", "stress-test a plan against the repo's docs"),
+    "grill-me": ("mattpocock/skills", "alternative to grill-with-docs"),
+    "to-spec": ("mattpocock/skills", "save the agreed design as a spec"),
+    "to-tickets": ("mattpocock/skills", "split the spec into local tickets for Fleet"),
 }
 DEFAULTS = {
     "workspace": None,
@@ -1566,6 +1579,7 @@ def cmd_release(a, cfg):
 def cmd_doctor(a, cfg):
     ok = True
     accounts: dict[tuple[str, str], list[str]] = {}
+    print(f"fleet         {VERSION}  ({SKILL_DIR})")
     try:
         cmux("ping", timeout=5)
         print("cmux          ready")
@@ -1612,8 +1626,45 @@ def cmd_doctor(a, cfg):
             print(f"accounts      SAME ACCOUNT: {', '.join(same)} all log in as {account}; give each its own account directory")
     for harness, d in skill_dirs(cfg).items():
         target = Path(d).expanduser() / "fleet"
-        print(f"skill@{harness:<7} {'installed' if (target / 'SKILL.md').exists() else 'not installed'}")
+        if not (target / "SKILL.md").exists():
+            print(f"skill@{harness:<7} not installed")
+            continue
+        version = installed_version(target)
+        if version is None:
+            note = "version unknown: installed before `fleet version` existed, or modified"
+        elif version != VERSION:
+            note = f"{version}; this runtime is {VERSION}"
+        else:
+            note = version
+        print(f"skill@{harness:<7} installed ({note})")
+    print("companions    optional; they never change doctor's result")
+    for name, places in companion_skills(cfg).items():
+        source, purpose = COMPANION_SKILLS[name]
+        found = ", ".join(places) if places else f"not found: npx skills add {source} --skill {name}"
+        print(f"  {name:<17}{found}  ({purpose})")
     return 0 if ok else 1
+
+
+def installed_version(skill: Path) -> str | None:
+    """The VERSION an installed copy of the skill declares, or None when it has none."""
+    try:
+        m = re.search(r'^VERSION = "([^"]+)"', (skill / "bin" / "fleet").read_text(), re.M)
+    except OSError:
+        return None
+    return m.group(1) if m else None
+
+
+def companion_skills(cfg: dict) -> dict[str, list[str]]:
+    """Where each companion skill is installed: user-level harness dirs, then this checkout's project dirs."""
+    places = {h: Path(d).expanduser() for h, d in skill_dirs(cfg).items()}
+    places |= {f"{h} (project)": Path.cwd() / d for h, d in PROJECT_SKILL_DIRS.items()}
+    return {name: [where for where, d in places.items() if (d / name / "SKILL.md").exists()]
+            for name in COMPANION_SKILLS}
+
+
+def cmd_version(a, cfg):
+    print(f"fleet {VERSION}")
+    print(f"runtime {SKILL_DIR}")
 
 
 def parse_models(text: str) -> dict[str, set[str] | None]:
@@ -1841,9 +1892,13 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "_run":
         return run_child(argv[1:])
     ap = argparse.ArgumentParser(prog="fleet", description=__doc__.splitlines()[0])
+    ap.add_argument("--version", action="version", version=f"fleet {VERSION}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("doctor", help="check cmux, provider logins and skill installs")
+    s = sub.add_parser("version", help="print this runtime's version and location")
+    s.set_defaults(fn=cmd_version)
+
+    s = sub.add_parser("doctor", help="check cmux, provider logins, skill installs and companion skills")
     s.add_argument("providers", nargs="*")
     s.set_defaults(fn=cmd_doctor)
 
@@ -1993,6 +2048,8 @@ def main(argv: list[str] | None = None) -> int:
     s.set_defaults(fn=cmd_release)
 
     a = ap.parse_args(argv)
+    if a.cmd == "version":  # no config: a broken config must not hide the version
+        return cmd_version(a, None) or 0
     try:
         if hasattr(a, "id"):
             valid_id(a.id)

@@ -18,6 +18,8 @@ Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute pat
 
 These are conversational options for you to translate into CLI flags, not an autonomous scheduler. `/fleet` without tickets can also add another subscription (for example a second Claude or Codex account); see [provider notes](references/providers.md#extra-subscriptions). `fleet doctor` shows each provider's tiers and caps; `fleet providers` prints the full merged config only when you need adapter details. Read [harness requirements](references/harnesses.md), [routing](references/routing.md), and [provider notes](references/providers.md) as needed. [Worked examples](references/examples.md) show the command sequences for option mapping, blocked workers, change requests, review rounds, evidence, repair, recovery, follow-up runs and finishing.
 
+Companion skills are optional, and `fleet doctor` lists which are installed. `grill-with-docs` (or `grill-me`), `to-spec` and `to-tickets` from mattpocock/skills produce the spec and tickets you start from. Run them only when the owner asks, because Fleet starts from approved tickets. You may use the `cmux` skill to inspect windows, workspaces and panes, for example to find a `workspace=` ref. `fleet` still launches, places and stops workers, and the shared-checkout focus rule applies to every cmux action. Workers never need the companion skills.
+
 ## 1. Establish or resume the run
 
 - Read repository instructions, `.fleet/rules.md`, the agreed spec and the full tickets. Export remote issue content to local files first; a URL is not a `--ticket` input. Preserve original IDs and source links, using safe slug IDs for Fleet (`settings-copy`, not a path or URL).

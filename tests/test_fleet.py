@@ -1,5 +1,7 @@
 """Unit tests for the pure parts of skill/bin/fleet. Run: python3 -m unittest discover tests"""
+import contextlib
 import importlib.machinery
+import io
 import importlib.util
 import json
 import os
@@ -218,6 +220,56 @@ class Accounts(unittest.TestCase):
             self.assertEqual(fleet.cmd_doctor(args, cfg), 1)
         finally:
             fleet.cmux = orig
+
+    def test_doctor_reports_companions_and_skill_versions_without_failing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, project = Path(tmp, "home"), Path(tmp, "project")
+            for skill in ("cmux", "grill-me"):
+                (home / "claude" / skill).mkdir(parents=True)
+                (home / "claude" / skill / "SKILL.md").write_text("x")
+            (project / ".agents/skills/to-spec").mkdir(parents=True)
+            (project / ".agents/skills/to-spec/SKILL.md").write_text("x")
+            (home / "codex/fleet/bin").mkdir(parents=True)
+            (home / "codex/fleet/SKILL.md").write_text("x")
+            (home / "codex/fleet/bin/fleet").write_text('VERSION = "0.0.1"\n')
+            dirs, cmux, cwd = fleet.HARNESS_SKILL_DIRS, fleet.cmux, os.getcwd()
+            fleet.HARNESS_SKILL_DIRS = {h: str(home / h) for h in ("claude", "codex")}
+            fleet.cmux = lambda *a, **k: ""
+            os.chdir(project)
+            try:
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = fleet.cmd_doctor(type("A", (), {"providers": []})(), {"providers": {}})
+            finally:
+                fleet.HARNESS_SKILL_DIRS, fleet.cmux = dirs, cmux
+                os.chdir(cwd)
+        text = out.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn(f"fleet         {fleet.VERSION}", text)
+        self.assertIn("skill@claude  not installed", text)
+        self.assertIn(f"skill@codex   installed (0.0.1; this runtime is {fleet.VERSION})", text)
+        self.assertRegex(text, r"\n  cmux +claude  \(")
+        self.assertRegex(text, r"\n  grill-me +claude  \(")
+        self.assertRegex(text, r"\n  to-spec +codex \(project\)  \(")
+        self.assertIn("not found: npx skills add mattpocock/skills --skill to-tickets", text)
+        self.assertIn("not found: npx skills add mattpocock/skills --skill grill-with-docs", text)
+
+    def test_version_needs_no_config(self):
+        old = fleet.USER_CONFIG
+        with tempfile.TemporaryDirectory() as tmp:
+            fleet.USER_CONFIG = Path(tmp, "config.toml")
+            fleet.USER_CONFIG.write_text("not [valid toml")
+            try:
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(fleet.main(["version"]), 0)
+                    with self.assertRaises(SystemExit) as exit_:
+                        fleet.main(["--version"])
+            finally:
+                fleet.USER_CONFIG = old
+        self.assertEqual(exit_.exception.code, 0)
+        self.assertEqual(out.getvalue().splitlines()[0], f"fleet {fleet.VERSION}")
+        self.assertEqual(out.getvalue().splitlines()[-1], f"fleet {fleet.VERSION}")
 
 
 class Models(unittest.TestCase):

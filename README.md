@@ -8,6 +8,7 @@ The lead turns approved tickets into a saved execution plan, picks a worker mode
 
 - [Quick start](#quick-start)
 - [Installation](#installation)
+  - [Companion skills (optional)](#companion-skills-optional)
 - [Usage](#usage)
 - [Keeping the lead sharp](#keeping-the-lead-sharp)
 - [State, continuation and safety](#state-continuation-and-safety)
@@ -122,6 +123,26 @@ Claude Code can also load the checkout directly as a plugin: `claude --plugin-di
 
 To update, run `git pull`, then `./install.sh` again with the same options.
 
+### Companion skills (optional)
+
+Fleet runs without them, and workers never need them. They help the lead before and around a run:
+
+| Skill | Source | What the lead uses it for |
+| --- | --- | --- |
+| `cmux` | [manaflow-ai/cmux](https://github.com/manaflow-ai/cmux) | Inspecting windows, workspaces and panes beyond what `fleet` prints, such as finding the right `workspace=` ref |
+| `grill-with-docs` (or `grill-me`) | [mattpocock/skills](https://github.com/mattpocock/skills) | Stress-testing the plan before any tickets exist |
+| `to-spec` | mattpocock/skills | Saving the agreed design as the spec workers get as context |
+| `to-tickets` | mattpocock/skills | Writing the local Markdown tickets Fleet runs |
+
+Install just these skills with the skills CLI. The cmux repository also ships skills for developing cmux itself, so name the one you want:
+
+```sh
+npx skills add manaflow-ai/cmux --skill cmux -g -a claude-code -a codex -a cursor
+npx skills add mattpocock/skills --skill grill-with-docs --skill grill-me --skill to-spec --skill to-tickets -g -a claude-code -a codex -a cursor
+```
+
+Drop `-g` to install into the current project instead. `fleet doctor` lists where it finds each companion skill. See [Daily workflow](#daily-workflow) for how they fit together.
+
 ### Put `fleet` on your PATH (optional)
 
 The skill never needs `fleet` on PATH; it calls its own copied runtime. For convenience in your shell:
@@ -135,10 +156,16 @@ fleet doctor
 ### Verify
 
 ```sh
+fleet version   # or fleet --version
 fleet doctor
 ```
 
-`doctor` checks cmux connectivity, worker executables and login signals, and checks each tier model against the account's model list where the CLI offers one (Codex, Cursor, Antigravity). It cannot guarantee model access or a successful worker session.
+`version` prints the runtime's version and the skill directory it runs from. With several installs, it tells you which copy your shell found.
+
+`doctor` checks cmux connectivity, worker executables and login signals, and checks each tier model against the account's model list where the CLI offers one (Codex, Cursor, Antigravity). It cannot guarantee model access or a successful worker session. It also reports:
+
+- the runtime's version, and each host's installed `fleet` skill with its version, flagging copies that differ from the runtime you ran. Copies installed before `fleet version` existed show `version unknown`.
+- where each [companion skill](#companion-skills-optional) is installed: the user-level skill directories, plus `.claude/skills`, `.agents/skills` and `.cursor/skills` in the current directory. Missing companions get an install command and never make `doctor` fail. Skills installed through a plugin aren't detected.
 
 When a newer model ships, you don't need a Fleet update. List what your account offers and point a tier at it in your config:
 
@@ -218,7 +245,7 @@ Example request to the lead:
 
 ### Daily workflow
 
-Fleet starts from approved tickets. It works with plain Markdown tickets, or as the execution step after [mattpocock/skills](https://github.com/mattpocock/skills):
+Fleet starts from approved tickets. It works with plain Markdown tickets, or as the execution step after [mattpocock/skills](https://github.com/mattpocock/skills) (see [companion skills](#companion-skills-optional) to install them):
 
 1. Brainstorm and discuss the feature.
 2. Run upstream `grill-with-docs` (or `grill-me`), then `to-spec`, then `to-tickets`.
