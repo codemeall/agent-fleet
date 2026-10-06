@@ -781,7 +781,7 @@ class Runtime(unittest.TestCase):
     def test_steer_moves_implementation_launches_until_reset(self):
         self.setup_run()
         self.call("steer", "provider", "demo", "reviewer")
-        self.assertIn("steered: writer:writer-model -> reviewer:reviewer-model", self.launch())
+        self.assertIn("steered (standard): writer:writer-model -> reviewer:reviewer-model", self.launch())
         w = self.state()["workers"]["01"]
         self.assertEqual((w["provider"], w["model"], w["family"], w["steered"]),
                          ("reviewer", "reviewer-model", "anthropic", True))
@@ -827,7 +827,7 @@ class Runtime(unittest.TestCase):
         self.setup_run()
         self.call("steer", "provider", "demo", "writer")
         self.call("steer", "model", "demo", "writer-model")
-        self.assertNotIn("steered:", self.call("launch", "demo", "01", "writer", "--tier", "standard",
+        self.assertNotIn("steered (", self.call("launch", "demo", "01", "writer", "--tier", "standard",
                                                "--family", "openai"))
         w = self.state()["workers"]["01"]
         self.assertEqual((w["model"], w["family"], w["steered"]), ("writer-model", "openai", False))

@@ -32,16 +32,18 @@ Companion skills are optional, and `fleet doctor` lists which are installed. `gr
 When a provider is failing, rate-limited or a poor fit mid-run, steer future implementation launches instead of rewriting the plan:
 
 - `fleet steer provider <run> <name>` moves future implementation launches to that provider, at the tier's model and effort (or the model pinned by `agents=`). It must be inside the run's routing.
-- `fleet steer model <run> <name>` then picks that provider's model; it must pass `models_allow`.
+- `fleet steer model <run> <name>` then picks that provider's model; it must pass `models_allow`. It replaces every tier's model, light tickets included, so prefer steering the provider alone, which keeps its tier models.
 - `fleet steer reset <run>` returns to the plan's routing.
 
-Keep passing the plan's provider and tier to `fleet launch`; it prints `steered: ...` and records the worker's actual provider, model and family. Open panes and review launches are never steered, so cross-family review is checked against the family the writer actually ran on. `fleet resume` shows an active steer.
+Keep passing the plan's provider and tier to `fleet launch`; it prints `steered (<tier>): ...` and records the worker's actual provider, model and family. Open panes and review launches are never steered, so cross-family review is checked against the family the writer actually ran on. `fleet resume` shows an active steer.
 
 A worker on a usage limit usually shows as `STALLED`; `fleet peek` confirms it. Stop it, then either relaunch after the reset with `--resume`, which continues the worker's own session with its reasoning (adapters with `resume`, such as Claude; same provider only, so not across a steer), or steer within the run's routing and relaunch fresh with a Repair note (examples 6). A usage limit is not a permission denial: steering inside the run's routing needs no further approval. When neither is possible, tell the owner.
 
 ## 2. Save a complete plan
 
 Discover the exact repository-relative files each ticket needs. Preserve blockers, acceptance criteria, spec decisions and testing requirements. A wave contains tickets with satisfied blockers and disjoint file scopes. Existing owner edits require careful review and must be preserved.
+
+Tier each ticket by weight: `heavy` only for cross-module work, authentication, money, data integrity, schemas, new shared abstractions or consequential judgment; `standard` for a feature slice with clear criteria and established patterns; `light` for mechanical, tightly scoped changes such as documentation or isolated repairs. Between two tiers, pick the lighter unless the ticket touches a heavy area. A light ticket that needs more reasoning gets a higher `effort` pin, not a heavier tier.
 
 Show a compact table: wave, ticket, tier, provider/model/effort, exact files. Persist the complete graph with `fleet plan <run> --file <plan.json>` before launch:
 

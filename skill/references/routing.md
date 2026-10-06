@@ -14,12 +14,7 @@ An unavailable explicit choice is a blocker to explain, not permission for a sil
 
 ## Ticket tiers
 
-| Tier | Use |
-| --- | --- |
-| `heavy` | Cross-module work, authentication, money, data integrity, schemas, new shared abstractions or consequential judgment |
-| `standard` | A feature slice with clear criteria and established patterns |
-| `light` | Mechanical, tightly scoped changes such as documentation or isolated repairs |
-| `review` | Dedicated read-only review of a writer's captured diff |
+The skill's step 2 says when to use `heavy`, `standard` and `light`. `review` is for a dedicated read-only review of a writer's captured diff.
 
 Take consequential work first, balance ready providers without exceeding global or provider caps, and queue remaining tickets. Never raise caps merely to avoid waiting. Waves require satisfied blockers and disjoint exact file scopes. A `needs-verification` report does not free a slot: the process must exit.
 

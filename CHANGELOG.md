@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+Helps the lead keep heavy models off light tickets.
+
+- The ticket-tier rule moved from the routing reference into the skill's planning step, so the lead sees it while choosing tiers. It adds a tie-break: between two tiers, pick the lighter unless the ticket touches a heavy area. A light ticket that needs more reasoning gets a higher `effort` pin, not a heavier tier.
+- The skill notes that `fleet steer model` replaces every tier's model, light tickets included, and suggests steering only the provider, which keeps its tier models.
+- The `steered:` line from `fleet launch` now names the ticket's tier (`steered (light): claude:sonnet -> claude:opus`), so the lead can see when a light ticket is upgraded.
+
 ## 0.1.0-preview.11
 
 Fleet no longer types into the wrong terminal after a cmux restart, and `feature-docs` joins the optional companion skills.

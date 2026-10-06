@@ -968,7 +968,7 @@ def cmd_launch(a, cfg):
             if t["review_required"] and not family:
                 raise FleetError(f"{a.provider}:{model} has no known family, so this ticket's cross-family review "
                                  f"could never launch; set it in {a.provider}.model_families")
-            print(f"steered: {t['provider']}:{t['model']} -> {a.provider}:{model} (fleet steer reset to undo)",
+            print(f"steered ({t['tier']}): {t['provider']}:{t['model']} -> {a.provider}:{model} (fleet steer reset to undo)",
                   file=sys.stderr)
         elif (a.provider, a.tier, model, effort) != (t["provider"], t["tier"], t["model"], t["effort"]):
             raise FleetError("launch provider/tier/model/effort must match saved plan")
