@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.7
 
 Lets the owner reset a long-running lead safely, by handoff or compaction, between waves.
 
