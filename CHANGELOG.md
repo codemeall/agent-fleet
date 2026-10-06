@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+Adds a command reference for owners and the lead.
+
+- New [command reference](skill/references/commands.md): every `fleet` command with what it does and when to use it, a one-table overview, and a note on the similar names (`hold`/`release` pause launches, `resume` reloads a run, `launch --resume` continues a worker's session). SKILL.md points the lead to it, and the README gains a short Commands section with the commands owners use most.
+
 ## 0.1.0-preview.12
 
 Helps the lead keep heavy models off light tickets.

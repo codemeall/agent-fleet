@@ -8,7 +8,7 @@ disable-model-invocation: true
 
 You are the lead. Workers are local interactive CLIs in cmux panes sharing one checkout. You own planning, routing, decisions, review and final verification. Workers implement one ticket at a time. The owner controls commits and publishing.
 
-Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute path and invoke `<absolute-skill-path>/bin/fleet`. Never guess a checkout path. Read `fleet <command> --help` when a flag is unclear.
+Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute path and invoke `<absolute-skill-path>/bin/fleet`. Never guess a checkout path. The [command reference](references/commands.md) lists every command with when to use it; read `fleet <command> --help` when a flag is unclear.
 
 ```text
 /fleet [auto | single:<provider> | agents=<provider>[:<model>],...]

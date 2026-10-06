@@ -257,7 +257,22 @@ Fleet starts from approved tickets. It works with plain Markdown tickets, or as 
 
 Point the lead at the real spec, glossary (`GLOSSARY.md`, optionally `GLOSSARY-MAP.md`; older repos may use `CONTEXT.md`), ADRs and tickets. Upstream `/implement` includes a commit step, so Fleet workers follow Fleet's no-commit contract instead. Workers don't need the upstream skills installed. These conventions were checked on 2026-09-30, and upstream may change them.
 
-More: [safe first run](examples/README.md) · [agent workflow](skill/SKILL.md) · [routing](skill/references/routing.md) · [host setup](skill/references/harnesses.md) · [providers](skill/references/providers.md) · [lead context](skill/references/lead-context.md) · [worked examples](skill/references/examples.md)
+### Commands
+
+The lead drives Fleet through the `fleet` CLI; you rarely need to, but you can run any command yourself once [`fleet` is on your PATH](#put-fleet-on-your-path-optional). The [command reference](skill/references/commands.md) lists every command, what it does and when to use it. The ones you're most likely to type or ask for:
+
+| Command | What it does |
+| --- | --- |
+| `fleet hold [--reason <text>]` | Pause: no new workers start in this checkout; running ones carry on |
+| `fleet release` | Lift the hold so launches continue |
+| `fleet resume <run>` | Show a run's plan, workers and reports; a fresh lead starts here |
+| `fleet wait <run> --timeout <s>` | Block until a worker reports, exits, stalls or needs an answer |
+| `fleet status <run>` | Table of workers and their report status |
+| `fleet stop <run> --all` | Quit every worker and confirm it exited; do this before shutting down |
+| `fleet context` | How full the lead's context is |
+| `fleet doctor` | Check cmux, logins, models and installed skills |
+
+More: [safe first run](examples/README.md) · [agent workflow](skill/SKILL.md) · [commands](skill/references/commands.md) · [routing](skill/references/routing.md) · [host setup](skill/references/harnesses.md) · [providers](skill/references/providers.md) · [lead context](skill/references/lead-context.md) · [worked examples](skill/references/examples.md)
 
 ## Keeping the lead sharp
 
