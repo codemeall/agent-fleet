@@ -1,6 +1,6 @@
 {
   "name": "agent-fleet",
-  "version": "0.1.0-preview.16",
+  "version": "0.1.0-preview.17",
   "description": "Lead coding-agent CLIs in cmux from a portable Fleet skill.",
   "author": {
     "name": "codemeall"

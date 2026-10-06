@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.17
+
+A finished run's report tells you what to type next.
 
 - A closing report ends with a **Next step** block: the lead's reset suggestion (a fresh lead by default, compaction only when the next run needs discussion that isn't on disk) and a start prompt for the next run with placeholders for the owner's open decisions. It's built from what the lead already knows, with no extra checks.
 
