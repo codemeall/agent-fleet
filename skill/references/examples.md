@@ -159,6 +159,14 @@ fleet stop settings --all --close                # --close only when every exit 
 
 `fleet check` prints `OK: captured HEAD and index states match the run baseline`, or lists what changed; investigate with the owner. Then report to the owner: each ticket's outcome with its resolved provider, model and effort, the evidence files, the decisions, any remaining limits, and their review and commit steps.
 
+If the owner asks for feature docs, follow the `feature-docs` skill now, before that report: the workers have stopped, so nothing else is writing to the checkout.
+
+```sh
+bash <feature-docs-skill-path>/scripts/feature-docs.sh status . settings   # an existing folder: DRIFT, STALE or MISSING lists what to sync
+```
+
+With no `docs/settings/feature-docs/` yet, write it from `.scratch/settings/` and the code. The run's decisions in `.fleet/runs/settings/notes.md` belong in its `decisions.md`. Add the folder to the files you list for the owner's commit.
+
 ## Handing off the lead
 
 See [lead context](lead-context.md): the owner asks, you run `fleet handoff`, relay the steps and stop.

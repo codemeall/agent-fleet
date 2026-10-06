@@ -43,6 +43,7 @@ COMPANION_SKILLS = {  # optional skills the lead may use; doctor reports them bu
     "grill-me": ("mattpocock/skills", "alternative to grill-with-docs"),
     "to-spec": ("mattpocock/skills", "save the agreed design as a spec"),
     "to-tickets": ("mattpocock/skills", "split the spec into local tickets for Fleet"),
+    "feature-docs": ("codemeall/feature-init", "record the built feature as tracked feature docs"),
 }
 DEFAULTS = {
     "workspace": None,

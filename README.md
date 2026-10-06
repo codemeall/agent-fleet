@@ -133,12 +133,14 @@ Fleet runs without them, and workers never need them. They help the lead before 
 | `grill-with-docs` (or `grill-me`) | [mattpocock/skills](https://github.com/mattpocock/skills) | Stress-testing the plan before any tickets exist |
 | `to-spec` | mattpocock/skills | Saving the agreed design as the spec workers get as context |
 | `to-tickets` | mattpocock/skills | Writing the local Markdown tickets Fleet runs |
+| `feature-docs` | [codemeall/feature-init](https://github.com/codemeall/feature-init) | Recording the built feature as tracked feature docs, since the spec and tickets in `.scratch/` stay local |
 
 Install just these skills with the skills CLI. The cmux repository also ships skills for developing cmux itself, so name the one you want:
 
 ```sh
 npx skills add manaflow-ai/cmux --skill cmux -g -a claude-code -a codex -a cursor
 npx skills add mattpocock/skills --skill grill-with-docs --skill grill-me --skill to-spec --skill to-tickets -g -a claude-code -a codex -a cursor
+npx skills add codemeall/feature-init --skill feature-docs -g -a claude-code -a codex -a cursor
 ```
 
 Drop `-g` to install into the current project instead. `fleet doctor` lists where it finds each companion skill. See [Daily workflow](#daily-workflow) for how they fit together.
@@ -251,6 +253,7 @@ Fleet starts from approved tickets. It works with plain Markdown tickets, or as 
 2. Run upstream `grill-with-docs` (or `grill-me`), then `to-spec`, then `to-tickets`.
 3. Ask Fleet to plan and implement the resulting local tickets.
 4. The lead verifies each ticket, gets any configured cross-family review, and reports back for your review and commit.
+5. Optionally, ask the lead to write the feature docs with `feature-docs` before you commit. The spec and tickets in `.scratch/` are untracked, so `docs/<feature>/feature-docs/` is what records the feature in Git: what was built, the decisions behind it and the tickets it was delivered in. After a later change to the spec, the tickets or the code they cite, ask the lead to sync them.
 
 Point the lead at the real spec, glossary (`GLOSSARY.md`, optionally `GLOSSARY-MAP.md`; older repos may use `CONTEXT.md`), ADRs and tickets. Upstream `/implement` includes a commit step, so Fleet workers follow Fleet's no-commit contract instead. Workers don't need the upstream skills installed. These conventions were checked on 2026-09-30, and upstream may change them.
 

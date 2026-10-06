@@ -264,6 +264,8 @@ class Accounts(unittest.TestCase):
         self.assertRegex(text, r"\n    to-spec +codex \(project\)  \(")
         self.assertIn("not found: npx skills add mattpocock/skills --skill to-tickets", text)
         self.assertIn("not found: npx skills add mattpocock/skills --skill grill-with-docs", text)
+        self.assertRegex(text, r"\n  codemeall/feature-init\n    feature-docs +not found: "
+                               r"npx skills add codemeall/feature-init --skill feature-docs  \(")
 
     def test_version_needs_no_config(self):
         old = fleet.USER_CONFIG
