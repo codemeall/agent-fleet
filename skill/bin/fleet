@@ -1638,10 +1638,14 @@ def cmd_doctor(a, cfg):
             note = version
         print(f"skill@{harness:<7} installed ({note})")
     print("companions    optional; they never change doctor's result")
+    shown = None
     for name, places in companion_skills(cfg).items():
         source, purpose = COMPANION_SKILLS[name]
+        if source != shown:
+            print(f"  {source}")
+            shown = source
         found = ", ".join(places) if places else f"not found: npx skills add {source} --skill {name}"
-        print(f"  {name:<17}{found}  ({purpose})")
+        print(f"    {name:<17}{found}  ({purpose})")
     return 0 if ok else 1
 
 

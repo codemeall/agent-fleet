@@ -248,9 +248,10 @@ class Accounts(unittest.TestCase):
         self.assertIn(f"fleet         {fleet.VERSION}", text)
         self.assertIn("skill@claude  not installed", text)
         self.assertIn(f"skill@codex   installed (0.0.1; this runtime is {fleet.VERSION})", text)
-        self.assertRegex(text, r"\n  cmux +claude  \(")
-        self.assertRegex(text, r"\n  grill-me +claude  \(")
-        self.assertRegex(text, r"\n  to-spec +codex \(project\)  \(")
+        self.assertRegex(text, r"\n  manaflow-ai/cmux\n    cmux +claude  \(")
+        self.assertRegex(text, r"\n  mattpocock/skills\n    grill-with-docs +not found")
+        self.assertRegex(text, r"\n    grill-me +claude  \(")
+        self.assertRegex(text, r"\n    to-spec +codex \(project\)  \(")
         self.assertIn("not found: npx skills add mattpocock/skills --skill to-tickets", text)
         self.assertIn("not found: npx skills add mattpocock/skills --skill grill-with-docs", text)
 
