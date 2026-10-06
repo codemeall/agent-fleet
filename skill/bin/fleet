@@ -1093,6 +1093,12 @@ def surface_uuid(panes: list[dict], ref: str) -> str | None:
     return None
 
 
+def surface_target(w: dict) -> str:
+    """What to address a worker's surface by. Refs like surface:4 restart from 1 with cmux and can then name
+    someone else's terminal, so the UUID recorded at launch wins; without one only the ref is left."""
+    return w.get("surface_id") or w["surface"]
+
+
 def worker_placement(state: dict, want: str | None) -> tuple[str, str, str | None, list[str]]:
     """pick_pane's choice plus, for a replacement, the UUIDs of the surfaces to close afterwards. Only a
     verified worker with a recorded UUID is retired: an unverified one keeps its scrollback for the lead."""
@@ -1123,7 +1129,7 @@ def cmd_send(a, cfg):
     repo = repo_root()
     state = load_run(repo, a.run)
     w = worker(state, a.id)
-    send_keys(state["workspace"], w["surface"], [" ".join(a.text), "enter"])
+    send_keys(state["workspace"], surface_target(w), [" ".join(a.text), "enter"])
     w["last_send"] = time.time()  # the worker owes a response now; wait may report it stalled
     save_run(repo, a.run, state)
     print(f"sent to {a.id} ({w['surface']})")
@@ -1134,7 +1140,7 @@ def cmd_peek(a, cfg):
     state = load_run(repo, a.run)
     w = worker(state, a.id)
     # Read a taller window so bottom padding cannot hide the content, then keep the last --lines lines.
-    screen = cmux("read-screen", "--workspace", state["workspace"], "--surface", w["surface"],
+    screen = cmux("read-screen", "--workspace", state["workspace"], "--surface", surface_target(w),
                   "--lines", str(max(a.lines * 3, 60)))
     # Trailing spaces and runs of blank lines are TUI padding: they cost the lead tokens, not information.
     text = re.sub(r"\n{3,}", "\n\n", "\n".join(line.rstrip() for line in screen.splitlines())).strip("\n")
@@ -1234,7 +1240,8 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
         if status in WAKE_STATUSES + ("verified",) and f.stat().st_mtime >= w.get("last_send", 0):
             continue  # waiting on the lead is not a stall; an answered report no longer counts
         try:
-            screen = cmux("read-screen", "--workspace", state["workspace"], "--surface", w["surface"], "--lines", "40")
+            screen = cmux("read-screen", "--workspace", state["workspace"], "--surface", surface_target(w),
+                          "--lines", "40")
         except (FleetError, OSError, subprocess.TimeoutExpired) as e:
             if mark_once(seen, f"{i}.gone", token):
                 events.append(f"UNREACHABLE {i} {w['surface']}: {str(e).strip()[:200]}; the tab may be closed")
@@ -1314,7 +1321,8 @@ def cmd_stop(a, cfg):
         w = worker(state, i)
         try:
             if w["state"] in ACTIVE_STATES:
-                send_keys(state["workspace"], w["surface"], provider(cfg, w["provider"]).get("quit", ["/exit", "enter"]))
+                send_keys(state["workspace"], surface_target(w),
+                          provider(cfg, w["provider"]).get("quit", ["/exit", "enter"]))
                 deadline = time.monotonic() + a.timeout
                 while w["state"] in ACTIVE_STATES and time.monotonic() < deadline:
                     reconcile(repo, state)
@@ -1323,8 +1331,7 @@ def cmd_stop(a, cfg):
                 if w["state"] in ACTIVE_STATES:
                     raise FleetError("quit sent but process exit unconfirmed; slot retained")
             if a.close and w["state"] != "closed":
-                cmux("close-surface", "--workspace", state["workspace"],
-                     "--surface", w.get("surface_id") or w["surface"])
+                cmux("close-surface", "--workspace", state["workspace"], "--surface", surface_target(w))
                 w["state"] = "closed"
         except (FleetError, OSError, subprocess.TimeoutExpired) as e:
             failed = True

@@ -119,7 +119,7 @@ api-client: quit sent but process exit unconfirmed; slot retained
 ```
 
 1. `fleet peek settings api-client --lines 60` to see whether it is stuck on a prompt; answer or ask the owner.
-2. If it must go: `fleet resume settings --json` shows the worker's `pid`. Confirm it is gone (for example `ps -p <pid>` prints no process), never just because the tab disappeared.
+2. If it must go: `fleet resume settings --json` shows the worker's `pid`. Confirm it is gone (for example `ps -p <pid>` prints no process), never just because the tab disappeared. After a reboot every earlier process is gone and the pid may have been reused: a process that still shows is the worker only if its command is the worker's.
 3. Write what you checked to `.fleet/runs/settings/evidence/api-client-recovery.md`, then:
    ```sh
    fleet recover settings api-client --evidence .fleet/runs/settings/evidence/api-client-recovery.md

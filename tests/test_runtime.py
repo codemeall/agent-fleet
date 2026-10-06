@@ -638,6 +638,27 @@ class Runtime(unittest.TestCase):
         self.assertEqual(self.state()["workers"]["01"]["state"], "stop-failed")
         self.assertEqual(self.scan(), [])
 
+    def test_send_peek_wait_and_stop_address_a_worker_by_uuid_not_its_reusable_ref(self):
+        self.setup_run()
+        self.launch()
+
+        def targets():
+            self.cmux_calls.clear()
+            with patch.object(fleet.time, "sleep"):
+                self.call("send", "demo", "01", "hello")
+                self.call("peek", "demo", "01")
+                self.scan()
+                self.call("stop", "demo", "01", "--timeout", "0", expected=1)
+            return {c[c.index("--surface") + 1] for c in self.cmux_calls if "--surface" in c}
+
+        # After a cmux restart surface:1 can name someone else's terminal; its UUID cannot.
+        self.assertEqual(targets(), {"uuid-surface:1"})
+        state = self.state()
+        del state["workers"]["01"]["surface_id"]  # launch could not record it: the ref is all there is
+        state["workers"]["01"]["state"] = "running"
+        fleet.save_run(self.repo, "demo", state)
+        self.assertEqual(targets(), {"surface:1"})
+
     def test_each_unreachable_episode_wakes_once(self):
         self.setup_run()
         self.launch()
