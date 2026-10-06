@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.0-preview.9
+
+- `fleet doctor` groups companion skills under their source (`manaflow-ai/cmux`, `mattpocock/skills`), so the output names where each one comes from even when it is installed.
+
 ## 0.1.0-preview.8
 
 Shows which Fleet version is running, and which optional companion skills the lead has.
