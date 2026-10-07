@@ -236,7 +236,7 @@ Uninstall removes only the Fleet skill it installed. It keeps modified copies, a
 ```text
 /fleet [auto | single:<provider> | agents=<provider>[:<model>],...]
        [workspace=<ref>] [review=off|cross-heavy|cross-all]
-       -- <local tickets directory or task list>
+       -- <local tickets directory, or tasks in plain words>
 ```
 
 The lead interprets these options and saves them with CLI commands; there's no autonomous scheduler behind them. `single:codex` restricts the pool to one adapter. Required review still needs a *different* model family, so either set `review=off` explicitly or widen the pool. Fleet does not fetch issue URLs. Export tracker tickets to local Markdown first, keeping their IDs, blockers, acceptance criteria and source links.
@@ -247,13 +247,15 @@ Example request to the lead:
 
 ### Daily workflow
 
-Fleet starts from approved tickets. It works with plain Markdown tickets, or as the execution step after [mattpocock/skills](https://github.com/mattpocock/skills) (see [companion skills](#companion-skills-optional) to install them):
+Fleet runs approved tickets, or tasks you confirm in one line. It works with plain Markdown tickets, with tasks described in conversation, or as the execution step after [mattpocock/skills](https://github.com/mattpocock/skills) (see [companion skills](#companion-skills-optional) to install them):
 
 1. Brainstorm and discuss the feature.
 2. Run upstream `grill-with-docs` (or `grill-me`), then `to-spec`, then `to-tickets`.
 3. Ask Fleet to plan and implement the resulting local tickets.
 4. The lead verifies each ticket, gets any configured cross-family review, and reports back for your review and commit.
 5. Optionally, ask the lead to write the feature docs with `feature-docs` before you commit. The spec and tickets in `.scratch/` are untracked, so `docs/<feature>/feature-docs/` is what records the feature in Git: what was built, the decisions behind it and the tickets it was delivered in. After a later change to the spec, the tickets or the code they cite, ask the lead to sync them.
+
+Without those skills, hand the lead work in plain words. It proposes one line per task, and after you confirm it adds them to the open run (or a `desk-YYYYMMDD` run), launches every ready one with `fleet launch --ready` and keeps talking with you while they run. Read-only `investigate` tasks cover research and debugging. See [delegation](skill/references/delegation.md).
 
 Point the lead at the real spec, glossary (`GLOSSARY.md`, optionally `GLOSSARY-MAP.md`; older repos may use `CONTEXT.md`), ADRs and tickets. Upstream `/implement` includes a commit step, so Fleet workers follow Fleet's no-commit contract instead. Workers don't need the upstream skills installed. These conventions were checked on 2026-09-30, and upstream may change them.
 

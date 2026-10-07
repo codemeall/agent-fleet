@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+Hand the lead work mid-conversation, without a ticket folder, and run it beside what is already going.
+
+- `fleet add <run> --file <tasks.json|->` appends tickets to a run before or after its first launch. Saved tickets never change; a new ticket that touches an unverified ticket's files must list it as a blocker. `fleet resume` marks added tickets `+`.
+- A ticket may give `task` (inline text) instead of `ticket`; Fleet writes it to `.fleet/runs/<run>/tasks/<id>.md`.
+- `kind: "investigate"` tickets are read-only workers for research, investigation and debugging: no files, a read-only prompt, no cross-family review, verified on their report.
+- `fleet launch <run> --ready` launches every ticket that can start now in one call, heaviest first, printing one `LAUNCHED` or `SKIPPED <id>: <reason>` line each and no worker screens.
+- `fleet wait --settle <seconds>` (default 5) gathers events that land together into one wake.
+- The skill's new delegation reference covers picking the run, one-line confirmations, desk runs and closing them.
+
 ## 0.1.0-preview.19
 
 Feature docs stay in step with a run.

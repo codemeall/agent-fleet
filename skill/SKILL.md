@@ -13,12 +13,14 @@ Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute pat
 ```text
 /fleet [auto | single:<provider> | agents=<provider>[:<model>],...]
        [workspace=<ref>] [review=off|cross-heavy|cross-all]
-       -- <local tickets directory or task list>
+       -- <local tickets directory, or tasks in plain words>
 ```
 
 These are conversational options for you to translate into CLI flags, not an autonomous scheduler. `/fleet` without tickets can also add another subscription (for example a second Claude or Codex account); see [provider notes](references/providers.md#extra-subscriptions). `fleet doctor` shows each provider's tiers and caps; `fleet providers` prints the full merged config only when you need adapter details. Read [harness requirements](references/harnesses.md), [routing](references/routing.md), and [provider notes](references/providers.md) as needed. [Worked examples](references/examples.md) show the command sequences for option mapping, blocked workers, change requests, review rounds, evidence, repair, recovery, follow-up runs and finishing.
 
-Companion skills are optional, and `fleet doctor` lists which are installed. `grill-with-docs` (or `grill-me`), `to-spec` and `to-tickets` from mattpocock/skills produce the spec and tickets you start from. Run them only when the owner asks; Fleet starts from approved tickets. `feature-docs` from codemeall/feature-init records a built feature as tracked docs in `docs/<feature>/feature-docs/` (step 6). The `cmux` skill can inspect windows, workspaces and panes (to find a `workspace=` ref). `fleet` still launches, places and stops workers, and the shared-checkout focus rule applies to every cmux action. Workers never need the companion skills.
+No ticket folder, or new work mid-run: follow [delegating mid-conversation](references/delegation.md) (inline `task`, read-only `kind: investigate`, `fleet add`, `fleet launch --ready`).
+
+Companion skills are optional; `fleet doctor` lists them and [host setup](references/harnesses.md) says where each fits. Run `grill-with-docs`/`grill-me`, `to-spec` and `to-tickets` only when the owner asks. `feature-docs` is step 6. The `cmux` skill may inspect panes (to find a `workspace=` ref) under the focus rule; `fleet` still launches and stops workers. Workers never need them.
 
 ## 1. Establish or resume the run
 
@@ -98,7 +100,7 @@ Read the report down to `## Appendix` (the `REPORT` line gives the lines) and th
 - Stop the reviewer, write concrete verification evidence to a local file, then `fleet verify <run> <review-id> --evidence <evidence-file>`. Verify the writer separately with its own evidence file using the same command. The writer's process must have exited, its report must need verification, required review must be verified, and its current diff must match the reviewed content.
 - Only after successful writer verification update the source ticket's resolved status/acceptance boxes and launch newly unblocked tickets. Reviewers never resolve tickets themselves.
 
-Evidence records commands, outcomes, acceptance criteria and review disposition. Preserve failures and limits honestly. If a stopped worker needs repair within its existing assignment, relaunch only after its prior exit is confirmed; give it the existing edits and remaining scope explicitly. Scope changes after the first launch, and routing changes that `fleet steer` cannot make, need a new follow-up run: first stop every worker that could overlap, then carry forward unresolved tickets, partial edits and decisions. Do not edit run.json to bypass immutable planning.
+Evidence records commands, outcomes, acceptance criteria and review disposition. Preserve failures and limits honestly. If a stopped worker needs repair within its existing assignment, relaunch only after its prior exit is confirmed; give it the existing edits and remaining scope explicitly. New work goes in with `fleet add`; changing a launched ticket's scope, and routing changes that `fleet steer` cannot make, need a new follow-up run: first stop every worker that could overlap, then carry forward unresolved tickets, partial edits and decisions. Do not edit run.json to bypass immutable planning.
 
 ## 6. Recovery and completion
 

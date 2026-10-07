@@ -15,6 +15,7 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`account add`](#account-add) | Adds a second subscription of an existing provider | The owner has another Claude or Codex account |
 | [`init`](#init) | Starts a run and captures the Git baseline | Starting a new run |
 | [`plan`](#plan) | Saves the ticket graph and routing | After the owner approves the plan, before any launch |
+| [`add`](#add) | Appends tickets or inline tasks to a run, before or after launch | The owner hands you new work mid-conversation or mid-run |
 | [`prompt`](#prompt) | Writes a worker or reviewer prompt | Before each launch |
 | [`launch`](#launch) | Starts a worker in a cmux pane | A ticket is ready and its prompt is written |
 | [`peek`](#peek) | Shows the bottom of a worker's screen | After `STALLED`, or when the launch screen shows a prompt |
@@ -105,9 +106,19 @@ Creates `.fleet/runs/<run>/`, adds it to `.fleet/.gitignore`, and records the HE
 fleet plan <run> --file <plan.json>
 ```
 
-Saves every ticket, blocker, exact file list, tier, provider and decision, and validates dependencies, cycles, scopes and assignments. The plan is frozen once a worker launches. The plan format is in [SKILL.md step 2](../SKILL.md#2-save-a-complete-plan).
+Saves every ticket, blocker, exact file list, tier, provider and decision, and validates dependencies, cycles, scopes and assignments. The plan is frozen once a worker launches. The plan format is in [SKILL.md step 2](../SKILL.md#2-save-a-complete-plan). Each ticket may give `task` (inline text) instead of `ticket`, and `kind: "investigate"` for read-only work that owns no files.
 
-**Use:** after the owner approves the plan, before the first launch. Record later decisions in `notes.md`; changed scope needs a follow-up run ([example 8](examples.md#8-change-scope-after-launch-a-follow-up-run)).
+**Use:** after the owner approves the plan, before the first launch. Record later decisions in `notes.md`; new work goes in with `add`; a launched ticket's changed scope needs a follow-up run ([example 8](examples.md#8-change-scope-after-launch-a-follow-up-run)).
+
+### add
+
+```text
+fleet add <run> --file <tasks.json|->
+```
+
+Appends tickets to a run, before or after its first launch; `-` reads stdin. Same JSON as `plan`. Saved tickets never change. Each entry gives `ticket` (a local file) or `task` (inline text, written to `.fleet/runs/<run>/tasks/<id>.md`), and may set `kind: "investigate"` for read-only work that owns no files. A new ticket whose files overlap an unverified ticket must list it in `blockers`. Added tickets show as `+<id>` in `resume`; added decisions end with `(added <time>)`.
+
+**Use:** for delegation from the conversation and new work in a live run ([delegation](delegation.md)). Changing an already-launched ticket's scope still needs a follow-up run.
 
 ## Launching and talking to workers
 
@@ -118,7 +129,7 @@ fleet prompt <run> <id> [--force]
 fleet prompt <run> <review-id> --review-of <id> --diff <diff-file> [--force]
 ```
 
-Writes `.fleet/runs/<run>/prompts/<id>.md` from the saved ticket, the worker rules, `.fleet/rules.md`, and the ticket's `context` and `checks`. If either is missing from the plan, the prompt keeps a `<!-- LEAD: … -->` comment for you to fill; `launch` refuses until you do. With `--review-of`, it writes a reviewer prompt instead; the writer must be stopped and the diff must match its current changes. `--force` overwrites an existing prompt, but never a live worker's.
+Writes `.fleet/runs/<run>/prompts/<id>.md` from the saved ticket, the worker rules, `.fleet/rules.md`, and the ticket's `context` and `checks`. If either is missing from the plan, the prompt keeps a `<!-- LEAD: … -->` comment for you to fill; `launch` refuses until you do. With `--review-of`, it writes a reviewer prompt instead; the writer must be stopped and the diff must match its current changes. `--force` overwrites an existing prompt, but never a live worker's. For an `investigate` ticket it writes a read-only investigator prompt instead of the worker rules; `--review-of` refuses one, since it has no diff.
 
 **Use:** before each launch, and before each review.
 
@@ -128,6 +139,7 @@ Writes `.fleet/runs/<run>/prompts/<id>.md` from the saved ticket, the worker rul
 fleet launch <run> <id> <provider> --tier heavy|standard|light|review
              [--model <m>] [--effort <e>] [--family <f>] [--pane <ref|uuid|index>] [--resume]
              [--settle <seconds>]
+fleet launch <run> --ready [--pane <ref|uuid|index>]
 ```
 
 Starts the worker in its own cmux pane with the prompt. The provider, tier and pins must match the saved plan; a steer (see `steer`) may change the provider and model, and launch prints `steered (<tier>): …`. Launch enforces blockers, file ownership, capacity and any hold.
@@ -143,6 +155,8 @@ screen after 5s:
 
     1. Yes, proceed
 ```
+
+`--ready` launches every ticket that can start now, heaviest first: never launched, blockers verified, files clear of running work, a complete prompt (written for it when the plan has `context` and `checks`), and room under `max_parallel` and the provider's `max` (the steered provider's, under a steer). It prints `LAUNCHED <id> <provider>:<model> <tier> <surface>` or `SKIPPED <id>: <reason>` per ticket, `NONE ready` when nothing started, and no worker screens. It takes no ticket, provider or pins, and never launches reviewers.
 
 - `--pane` picks the pane to split, replace or add a tab to.
 - `--family` names the model family when an account-specific model isn't recognized.
@@ -177,6 +191,7 @@ Types the text into the worker's pane and presses Enter. `wait` then expects a r
 
 ```text
 fleet wait <run> --timeout <seconds> [--stall <seconds>] [--interval <seconds>] [--any-change]
+           [--settle <seconds>]
 ```
 
 Blocks until something needs the lead, then prints it and exits 0. On timeout it prints `TIMEOUT` and exits 2.
@@ -194,7 +209,7 @@ Blocks until something needs the lead, then prints it and exits 0. On timeout it
 
 A `REPORT` line ends with the report's path and, for a report with an `## Appendix`, the lines above it: `(read lines 1-34 of 180; appendix below)`. Read those lines; the appendix holds supporting detail for a line you doubt.
 
-`--timeout` is at most 600; use the longest your host allows (540 in Claude Code), or run it in the background. `--interval` (default 10) sets how often it polls. `--any-change` wakes on any report change.
+`--timeout` is at most 600; use the longest your host allows (540 in Claude Code), or run it in the background. `--interval` (default 10) sets how often it polls. `--any-change` wakes on any report change. `--settle` (default 5, at most 30) keeps gathering events for that long after the first, never past `--timeout`, so workers finishing together cost one wake; 0 returns at once.
 
 **Use:** whenever workers are running and you have nothing else to do. Run one wait at a time: a wait consumes the events it prints. End a background wait before `handoff`.
 

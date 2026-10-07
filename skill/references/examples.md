@@ -169,6 +169,32 @@ Put its `DRIFT`, `STALE` and `MISSING` lines in the report as sync work for the 
 
 If the owner asks for feature docs, follow the skill now: the workers have stopped, so nothing else is writing to the checkout. With no `docs/settings/feature-docs/` yet, write it from `.scratch/settings/` and the code. The run's decisions in `.fleet/runs/settings/notes.md` belong in its `decisions.md`; the reports and evidence files under `.fleet/runs/settings/` feed its Testing section, and `verified_at` in `fleet resume settings --json` dates each delivered ticket. Add the folder to the files you list for the owner's commit.
 
+## 10. Delegate mid-conversation
+
+Owner: "Find out why test_perf got slower, and fix the flaky test_retry." You propose (see [delegation](delegation.md)):
+
+```text
+fix-flaky → implement · codex · light · tests/test_x.py · checks: pytest -q tests/test_x.py
+why-slow  → investigate · claude · standard · checks: pytest -q tests/test_perf.py --durations=5
+```
+
+After "yes", into the open run (here `settings`; with none open, today's `desk-YYYYMMDD`):
+
+```sh
+fleet add settings --file tasks.json
+fleet launch settings --ready
+fleet wait settings --timeout 540        # in the background; keep talking with the owner
+```
+
+`REPORT why-slow [needs-verification]` names `src/cache.py:88` rebuilding the index on every call:
+
+```sh
+fleet stop settings why-slow
+fleet verify settings why-slow --evidence .fleet/runs/settings/evidence/why-slow.md   # no combined-tree checks
+```
+
+Propose `cache-fix → implement · claude · standard · src/cache.py · checks: pytest -q tests/test_perf.py`; on "yes", `fleet add` it with the finding in `context`, then `fleet launch settings --ready`.
+
 ## Handing off the lead
 
 See [lead context](lead-context.md): the owner asks, you run `fleet handoff`, relay the steps and end your turn.
