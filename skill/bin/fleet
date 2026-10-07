@@ -1607,6 +1607,7 @@ def cmd_verify(a, cfg):
         if sha != w["diff_sha"]:
             raise FleetError("review is stale; regenerate diff and review")
     w["verified"] = True
+    w["verified_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     w["verification_evidence"] = evidence
     text = report.read_text()
     lines = text.splitlines()

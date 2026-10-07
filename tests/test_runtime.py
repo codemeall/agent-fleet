@@ -252,6 +252,17 @@ class Runtime(unittest.TestCase):
         self.launch("02")
         self.assertEqual(self.state()["workers"]["02"]["state"], "running")
 
+    def test_verify_records_when_the_lead_accepted_the_result(self):
+        self.setup_run()
+        self.launch()
+        self.report()
+        self.stop_with_receipt()
+        self.assertNotIn("verified_at", self.state()["workers"]["01"])
+        self.verify()
+        worker = self.state()["workers"]["01"]
+        self.assertTrue(worker["verified"])
+        self.assertRegex(worker["verified_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+
     def test_cross_family_review_at_capacity_one_unblocks_dependents_after_acceptance(self):
         self.setup_run(review="cross-all")
         self.launch()

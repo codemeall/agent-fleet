@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+Feature docs stay in step with a run.
+
+- `fleet verify` records `verified_at` on the accepted worker, so feature docs can date a delivered ticket from the run instead of a commit that does not exist yet. `fleet resume <run> --json` shows it.
+- Before the closing report, a lead with `feature-docs` installed runs its `status` for a feature that already has `docs/<feature>/feature-docs/` and reports the `DRIFT`, `STALE` and `MISSING` lines, so a sync is not forgotten. The skill now says the feature is the `.scratch/<feature>/` folder the tickets live in, not the run name, and names the run's reports and evidence files as sources for the docs.
+- The provider notes explain Codex's `approvals_reviewer = "auto_review"`: an owner-level launch override that sends a worker's approval prompts to Codex's own reviewer instead of leaving them in the pane. It is unrelated to Fleet's cross-family review.
+
 ## 0.1.0-preview.18
 
 The lead reads less and spends fewer turns on a run. Nothing it needs is removed.

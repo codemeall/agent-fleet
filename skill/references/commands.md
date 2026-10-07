@@ -236,7 +236,7 @@ Prints or saves the ticket's changes since launch, including new files. The writ
 fleet verify <run> <id> --evidence <file>
 ```
 
-Accepts a ticket or a review. The worker must have exited, its report must say `Status: needs-verification`, and for a writer, any required review must be verified and match the current diff. It sets the report to `verified`, appends the evidence, and unblocks dependents.
+Accepts a ticket or a review. The worker must have exited, its report must say `Status: needs-verification`, and for a writer, any required review must be verified and match the current diff. It sets the report to `verified`, appends the evidence, records `verified_at` on the worker (shown by `resume --json`), and unblocks dependents.
 
 **Use:** after running the ticket's checks yourself. Verify the reviewer first, then the writer, each with its own evidence file. Only then update the source ticket.
 

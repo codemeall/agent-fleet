@@ -18,7 +18,7 @@ Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute pat
 
 These are conversational options for you to translate into CLI flags, not an autonomous scheduler. `/fleet` without tickets can also add another subscription (for example a second Claude or Codex account); see [provider notes](references/providers.md#extra-subscriptions). `fleet doctor` shows each provider's tiers and caps; `fleet providers` prints the full merged config only when you need adapter details. Read [harness requirements](references/harnesses.md), [routing](references/routing.md), and [provider notes](references/providers.md) as needed. [Worked examples](references/examples.md) show the command sequences for option mapping, blocked workers, change requests, review rounds, evidence, repair, recovery, follow-up runs and finishing.
 
-Companion skills are optional, and `fleet doctor` lists which are installed. `grill-with-docs` (or `grill-me`), `to-spec` and `to-tickets` from mattpocock/skills produce the spec and tickets you start from. Run them only when the owner asks, because Fleet starts from approved tickets. `feature-docs` from codemeall/feature-init records a built feature as tracked feature docs in `docs/<feature>/feature-docs/` (step 6). You may use the `cmux` skill to inspect windows, workspaces and panes, for example to find a `workspace=` ref. `fleet` still launches, places and stops workers, and the shared-checkout focus rule applies to every cmux action. Workers never need the companion skills.
+Companion skills are optional, and `fleet doctor` lists which are installed. `grill-with-docs` (or `grill-me`), `to-spec` and `to-tickets` from mattpocock/skills produce the spec and tickets you start from. Run them only when the owner asks; Fleet starts from approved tickets. `feature-docs` from codemeall/feature-init records a built feature as tracked docs in `docs/<feature>/feature-docs/` (step 6). The `cmux` skill can inspect windows, workspaces and panes (to find a `workspace=` ref). `fleet` still launches, places and stops workers, and the shared-checkout focus rule applies to every cmux action. Workers never need the companion skills.
 
 ## 1. Establish or resume the run
 
@@ -113,7 +113,7 @@ End that closing report with a **Next step** block the owner can paste, built fr
 
 When no further run is proposed, the block holds only the reset suggestion and the owner's review/commit steps.
 
-The spec and tickets under `.scratch/` never reach Git. When the owner asks for feature docs and `feature-docs` is installed, follow that skill once every worker has stopped and `fleet check` has run: write `docs/<feature>/feature-docs/`, or sync it when the feature already has one. Give it the run's `notes.md` and plan decisions as sources. You write these files yourself and leave them uncommitted with the rest of the run.
+The spec and tickets under `.scratch/` never reach Git; the feature is that `.scratch/<feature>/` folder, not the run name (ask the owner if the tickets are elsewhere). With `feature-docs` installed: if `docs/<feature>/feature-docs/` exists, run its `status` after `fleet check` and report its `DRIFT`, `STALE` and `MISSING` lines; when the owner asks for feature docs, follow that skill once every worker has stopped, writing or syncing the folder from the run's `notes.md`, decisions, reports and evidence (`verified_at` in `resume --json` dates a ticket). You write them yourself; they stay uncommitted with the run.
 
 ## Shared-checkout rules
 
