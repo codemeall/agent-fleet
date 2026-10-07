@@ -893,6 +893,53 @@ def cmd_plan(a, cfg):
     save_run(repo, a.run, state)
     print(f"saved {len(tickets)} tickets; routing, dependencies and assignments persist across sessions")
 
+def ancestors(tickets: dict, i: str) -> set[str]:
+    """Every ticket `i` waits on, directly or through other blockers."""
+    out, stack = set(), list(tickets[i]["blockers"])
+    while stack:
+        j = stack.pop()
+        if j not in out:
+            out.add(j)
+            stack.extend(tickets[j]["blockers"])
+    return out
+
+
+def cmd_add(a, cfg):
+    """Append tickets to a run, before or after its first launch. Saved tickets never change."""
+    repo = repo_root()
+    state = load_run(repo, a.run)
+    data = json.loads(sys.stdin.read() if a.file == "-" else Path(a.file).read_text())
+    d = run_dir(repo, a.run)
+    pool = routing_pool(state["options"]["routing"], cfg)
+    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    added, texts = {}, {}
+    for raw in data.get("tickets", []):
+        t, text = validate_ticket(repo, d, state, cfg, pool, raw)
+        i = t["id"]
+        if i in added:
+            raise FleetError(f"duplicate ticket {i}")
+        if i in state["tickets"] or i in state["workers"] or i in state["prompts"]:
+            raise FleetError(f"ticket id {i} is already used in this run")
+        t["added_at"] = now
+        added[i] = t
+        if text is not None:
+            texts[i] = text
+    if not added:
+        raise FleetError("add needs at least one ticket")
+    tickets = {**state["tickets"], **added}
+    check_graph(tickets)
+    for i, t in added.items():
+        # An unverified ticket's review diff goes stale if another worker edits its files first.
+        waits_on = ancestors(tickets, i)
+        for j, old in state["tickets"].items():
+            if old["status"] != "verified" and j not in waits_on and scopes_overlap(t["files"], old["files"]):
+                raise FleetError(f"{i}: files overlap unverified ticket {j}; add {j} to its blockers")
+    write_tasks(d, texts)
+    state["tickets"] = tickets
+    state["decisions"] += [f"{x} (added {now})" for x in data.get("decisions", [])]
+    save_run(repo, a.run, state)
+    print(f"added {len(added)} tickets: {', '.join(added)}")
+
 
 def cmd_prompt(a, cfg):
     repo = repo_root()
@@ -2096,6 +2143,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("run")
     s.add_argument("--file", required=True)
     s.set_defaults(fn=cmd_plan)
+
+    s = sub.add_parser("add", help="append tickets or inline tasks to a run, before or after its first launch")
+    s.add_argument("run")
+    s.add_argument("--file", required=True, help="tickets JSON in the plan format; - reads stdin")
+    s.set_defaults(fn=cmd_add)
 
     s = sub.add_parser("resume", help="reconcile exits and show saved plan and decisions")
     s.add_argument("run")

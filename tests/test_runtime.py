@@ -511,6 +511,86 @@ class Runtime(unittest.TestCase):
         self.verify()
         self.assertIn("  01  verified  standard  writer:", self.call("resume", "demo"))
 
+    def add(self, tickets, decisions=(), expected=0):
+        for t in tickets:
+            t.setdefault("provider", "writer")
+        path = self.repo / "add.json"
+        path.write_text(json.dumps({"tickets": tickets, "decisions": list(decisions)}))
+        return self.call("add", "demo", "--file", str(path), expected=expected)
+
+    def test_add_appends_to_a_run_after_its_first_launch(self):
+        self.setup_run()
+        self.launch()
+        self.assertIn("frozen", self.call("plan", "demo", "--file", str(self.repo / "plan.json"), expected=1))
+        out = self.add([{"id": "03", "task": "Tidy the readme.", "files": ["readme.txt"]}], ["Owner wants it short."])
+        self.assertIn("added 1 tickets: 03", out)
+        state = self.state()
+        self.assertEqual(list(state["tickets"]), ["01", "02", "03"])
+        self.assertRegex(state["tickets"]["03"]["added_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+        self.assertNotIn("added_at", state["tickets"]["01"])
+        self.assertRegex(state["decisions"][-1], r"^Owner wants it short\. \(added \d{4}-\d{2}-\d{2}T")
+        resume = self.call("resume", "demo")
+        self.assertIn(" +03  pending", resume)
+        self.assertIn("  01  pending", resume)
+
+    def test_add_on_a_fresh_run_needs_no_plan(self):
+        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off")
+        self.add([{"id": "solo", "task": "Fix the typo.", "files": ["owned.txt"],
+                   "context": "Typo on line 1.", "checks": "Read the file."}])
+        self.assertNotIn("fill before launch", self.call("prompt", "demo", "solo"))
+        self.launch("solo")
+
+    def test_add_refuses_overlap_with_unverified_work_unless_it_waits_for_it(self):
+        self.setup_run()
+        self.launch()
+        out = self.add([{"id": "03", "task": "Touch owned too.", "files": ["owned.txt"]}], expected=1)
+        self.assertIn("03: files overlap unverified ticket 01; add 01 to its blockers", out)
+        self.assertFalse((self.repo / ".fleet/runs/demo/tasks/03.md").exists())
+        # 02 waits on 01, so waiting on 02 waits on 01 too.
+        self.add([{"id": "03", "task": "Touch owned too.", "files": ["owned.txt"], "blockers": ["02"]}])
+
+    def test_add_lets_new_work_touch_files_of_verified_tickets(self):
+        self.setup_run()
+        self.launch()
+        self.report()
+        self.stop_with_receipt()
+        self.verify()
+        self.add([{"id": "03", "task": "Another pass.", "files": ["owned.txt"]}])
+
+    def test_add_refuses_bad_entries_without_saving_any(self):
+        self.setup_run()
+        before = self.state()["tickets"]
+        for tickets, message in (
+                ([{"id": "01", "task": "Dup.", "files": ["x.txt"]}], "ticket id 01 is already used"),
+                ([{"id": "03", "task": "A.", "files": ["x.txt"]}, {"id": "03", "task": "B.", "files": ["y.txt"]}],
+                 "duplicate ticket 03"),
+                ([{"id": "03", "task": "Loop.", "files": ["x.txt"], "blockers": ["04"]},
+                  {"id": "04", "task": "Loop.", "files": ["y.txt"], "blockers": ["03"]}], "cycle"),
+                ([{"id": "03", "task": "Ok.", "files": ["x.txt"]},
+                  {"id": "04", "task": "Ghost.", "files": ["y.txt"], "blockers": ["nope"]}], "unknown blocker nope"),
+                ([], "at least one ticket")):
+            with self.subTest(message=message):
+                self.assertIn(message, self.add(tickets, expected=1))
+                self.assertEqual(self.state()["tickets"], before)
+        self.assertFalse((self.repo / ".fleet/runs/demo/tasks").exists())
+
+    def test_add_refuses_an_id_a_reviewer_already_uses(self):
+        self.setup_run(review="cross-all")
+        self.launch()
+        (self.repo / "owned.txt").write_text("implemented change\n")
+        self.report()
+        self.stop_with_receipt()
+        self.review_prompt()
+        out = self.add([{"id": "review-01", "task": "Clash.", "files": ["x.txt"]}], expected=1)
+        self.assertIn("ticket id review-01 is already used", out)
+
+    def test_add_reads_tickets_from_stdin(self):
+        self.setup_run()
+        data = json.dumps({"tickets": [{"id": "03", "task": "From stdin.", "files": ["x.txt"], "provider": "writer"}]})
+        with patch.object(sys, "stdin", io.StringIO(data)):
+            self.call("add", "demo", "--file", "-")
+        self.assertEqual(self.state()["tickets"]["03"]["files"], ["x.txt"])
+
     def scan(self, stall=60):
         seen = self.repo / ".fleet/runs/demo/.seen"
         return fleet.scan_workers(self.repo, self.state(), seen, stall)
