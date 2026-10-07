@@ -61,6 +61,7 @@ class Runtime(unittest.TestCase):
             return real_sh(args, **kwargs)
 
         for mocker in (patch.object(fleet, "repo_root", return_value=self.repo),
+                       patch.object(fleet, "LAUNCH_SETTLE_S", 0),  # no start-screen pause unless a test asks
                        patch.object(fleet, "load_config", side_effect=lambda: copy.deepcopy(self.cfg)),
                        patch.object(fleet, "cmux", side_effect=self.fake_cmux),
                        patch.object(fleet, "sh", side_effect=shell)):
@@ -470,6 +471,82 @@ class Runtime(unittest.TestCase):
         self.report()                                           # report handed back: idle is expected
         self.assertEqual(self.scan(), [])
         self.assertEqual(self.scan(), [])
+
+    def test_a_new_workers_unchanged_screen_wakes_sooner_than_the_stall(self):
+        self.setup_run()
+        self.launch()
+        marker = self.repo / ".fleet/runs/demo/.seen/01.screen"
+
+        def idle_for(seconds):
+            marker.unlink(missing_ok=True)
+            self.assertEqual(self.scan(stall=180), [])
+            key, since, flagged = marker.read_text().split("|")
+            marker.write_text(f"{key}|{float(since) - seconds}|{flagged}")
+            return self.scan(stall=180)
+
+        self.assertEqual(idle_for(fleet.LAUNCH_STALL_S - 5), [])
+        self.assertIn("STALLED 01", idle_for(fleet.LAUNCH_STALL_S + 1)[0])  # a prompt at start-up, not a long task
+        self.assertEqual(idle_for(fleet.LAUNCH_STALL_S + 1) and self.scan(stall=0), [])  # --stall 0 still turns it off
+        state = self.state()
+        state["workers"]["01"]["launched_at"] -= fleet.LAUNCH_WATCH_S + 1
+        fleet.save_run(self.repo, "demo", state)
+        self.assertEqual(idle_for(fleet.LAUNCH_STALL_S + 1), [])           # past its first minutes: the full stall
+        self.assertIn("STALLED 01", idle_for(181)[0])
+        del state["workers"]["01"]["launched_at"]                          # a worker from an older runtime
+        fleet.save_run(self.repo, "demo", state)
+        self.assertEqual(idle_for(fleet.LAUNCH_STALL_S + 1), [])
+
+    def test_launch_shows_the_new_workers_screen_after_the_lock(self):
+        self.setup_run()
+        real, held = self.fake_cmux, []
+
+        def cmux(*args, **kwargs):
+            if args[0] == "read-screen":
+                lock = (self.repo / ".fleet/runs/.lock").open("a")
+                try:
+                    fleet.fcntl.flock(lock, fleet.fcntl.LOCK_EX | fleet.fcntl.LOCK_NB)
+                except BlockingIOError:
+                    held.append(True)
+                lock.close()
+                return "banner\n" * 20 + "Do you trust the files in this folder?   \n\n\n\n  1. Yes, proceed\n" + "\n" * 30
+            return real(*args, **kwargs)
+
+        with patch.object(fleet, "cmux", side_effect=cmux), patch.object(fleet.time, "sleep") as sleep:
+            out = self.call("launch", "demo", "01", "writer", "--tier", "standard", "--settle", "3")
+        self.assertIn("screen after 3s:\n", out)
+        self.assertTrue(out.endswith("  Do you trust the files in this folder?\n\n    1. Yes, proceed\n"), out)
+        self.assertEqual(out.count("banner"), fleet.LAUNCH_SCREEN_LINES - 3)
+        self.assertIn(3.0, [c.args[0] for c in sleep.call_args_list])
+        self.assertEqual(held, [])                                         # the pause does not block other commands
+        self.call("stop", "demo", "01", "--timeout", "0", expected=1)
+        self.receipt()
+        self.call("status", "demo")
+
+        def unreadable(*args, **kwargs):
+            if args[0] == "read-screen":
+                raise fleet.FleetError("surface not found")
+            return real(*args, **kwargs)
+
+        with patch.object(fleet, "cmux", side_effect=unreadable), patch.object(fleet.time, "sleep"):
+            out = self.call("launch", "demo", "01", "writer", "--tier", "standard")   # LAUNCH_SETTLE_S is 0 here
+            self.assertNotIn("screen after", out)
+            self.call("stop", "demo", "01", "--timeout", "0", expected=1)
+            self.receipt()
+            self.call("status", "demo")
+            out = self.call("launch", "demo", "01", "writer", "--tier", "standard", "--settle", "1")
+        self.assertIn("screen after 1s: unreadable (surface not found); fleet peek it", out)  # the launch stands
+        self.assertEqual(self.state()["workers"]["01"]["state"], "running")
+        self.assertIn("settle must be between", self.call("launch", "demo", "02", "writer", "--settle", "31", expected=1))
+
+    def test_wait_names_the_lines_of_a_summary_first_report(self):
+        self.setup_run()
+        self.launch()
+        report = self.repo / ".fleet/runs/demo/reports/01.md"
+        report.write_text("# Report 01\n\nStatus: needs-verification\n\n## Findings\n- none\n\n## Appendix\nlong\noutput\n")
+        out = self.call("wait", "demo", "--timeout", "0")
+        self.assertIn(f"REPORT 01 [needs-verification] {report}  (read lines 1-7 of 10; appendix below)", out)
+        self.report()                                                       # no appendix: the whole report is the summary
+        self.assertTrue(self.call("wait", "demo", "--timeout", "0").startswith(f"REPORT 01 [needs-verification] {report}\n"))
 
     def test_launch_splits_a_new_pane_instead_of_adding_a_tab(self):
         self.setup_run()

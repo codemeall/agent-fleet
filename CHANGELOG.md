@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+The lead reads less and spends fewer turns on a run. Nothing it needs is removed.
+
+- Worker and reviewer reports are summary-first. The report format gains an `## Appendix` for supporting detail; everything a verifier needs, including every finding and blocker in full, stays above it. `fleet wait` ends a `REPORT` line with the lines to read, for example `(read lines 1-34 of 180; appendix below)`, and the lead opens the appendix only to check a line it doubts. Reports written by older prompts have no appendix and are read whole, as before.
+- `fleet launch` ends by printing the last lines of the worker's screen 5 seconds in, so a login, trust, model or permission prompt shows without a `fleet peek`. The pause comes after launch releases its lock. `--settle <seconds>` changes it (at most 30); `--settle 0` skips the screen.
+- `fleet wait` reports a worker launched in the last 4 minutes as `STALLED` after 60 seconds of an unchanged screen instead of `--stall` (default 180), which catches a prompt at start-up. `--stall 0` still turns stall detection off. The skill no longer asks for two peeks after every launch.
+- `SKILL.md` has a size budget of 19,000 bytes, checked by a test. Pane placement detail moved to the command reference to make room for the changes above.
+
 ## 0.1.0-preview.17
 
 A finished run's report tells you what to type next.

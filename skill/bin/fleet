@@ -345,6 +345,10 @@ def active(state: dict) -> list[dict]:
 ACTIVE_STATES = {"launching", "running", "stop-failed", "unknown"}
 RETIRED_STATES = {"exited", "recovered"}  # exit confirmed, surface still open; replaceable once verified
 MAX_PANES = 8  # per workspace; past it, a finished worker's pane is replaced rather than split again
+LAUNCH_SETTLE_S = 5  # launch then shows the worker's screen: a login or trust prompt is up by now
+LAUNCH_SCREEN_LINES = 8
+# A prompt that stops a new worker shows in its first minutes, so its unchanged screen wakes the lead sooner.
+LAUNCH_STALL_S, LAUNCH_WATCH_S = 60, 240
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 
 
@@ -1019,6 +1023,7 @@ def cmd_launch(a, cfg):
     state["workers"][a.id] = dict(meta, id=a.id, provider=a.provider, model=model, effort=effort,
         family=family, tier=a.tier, steered=steered, surface="unknown", state="launching", command=command,
         token=token, exit_file=str(exit_file), launched=time.strftime("%Y-%m-%dT%H:%M:%S"),
+        launched_at=time.time(),
         **({"session": session} if session else {}))
     save_run(repo, a.run, state)
     if kind in ("replace", "tab"):  # a new surface in the pane; a replaced pane's old surfaces close below
@@ -1058,6 +1063,30 @@ def cmd_launch(a, cfg):
     label = f"{a.id} · {a.provider}:{model}" + (f"@{effort}" if effort else "")
     sh(["cmux", "rename-tab", "--workspace", state["workspace"], "--surface", w["surface"], label], check=False)
     print(f"{a.id}: {label} on {w['surface']}")
+    if a.settle:  # outside the lock: a read-only look must not hold up the lead's next command
+        a.unlocked = lambda: print_start_screen(state["workspace"], surface_target(w), a.settle)
+
+
+def screen_tail(screen: str, lines: int) -> str:
+    """The last lines of a screen without TUI padding: trailing spaces and runs of blank lines cost the lead
+    tokens, not information."""
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(line.rstrip() for line in screen.splitlines())).strip("\n")
+    return "\n".join(text.splitlines()[-lines:]).lstrip("\n")
+
+
+def print_start_screen(workspace: str, surface: str, settle: float) -> None:
+    """Show what the new worker's screen holds a few seconds in, so the lead sees a login, trust, model or
+    permission prompt without spending a turn on fleet peek. Never fails the launch it follows."""
+    time.sleep(settle)
+    try:
+        screen = cmux("read-screen", "--workspace", workspace, "--surface", surface,
+                      "--lines", str(max(LAUNCH_SCREEN_LINES * 3, 60)))  # as peek: padding must not hide it
+    except (FleetError, OSError, subprocess.TimeoutExpired) as e:
+        print(f"screen after {settle:g}s: unreadable ({str(e).strip()[:200]}); fleet peek it", file=sys.stderr)
+        return
+    tail = screen_tail(screen, LAUNCH_SCREEN_LINES)
+    print(f"screen after {settle:g}s:\n" + "\n".join("  " + line if line else "" for line in tail.splitlines()) if tail
+          else f"screen after {settle:g}s: empty; fleet peek it")
 
 
 def pick_pane(panes: list[dict], retired: set[str], busy: set[str], lead_pane: str | None,
@@ -1169,9 +1198,7 @@ def cmd_peek(a, cfg):
     # Read a taller window so bottom padding cannot hide the content, then keep the last --lines lines.
     screen = cmux("read-screen", "--workspace", state["workspace"], "--surface", surface_target(w),
                   "--lines", str(max(a.lines * 3, 60)))
-    # Trailing spaces and runs of blank lines are TUI padding: they cost the lead tokens, not information.
-    text = re.sub(r"\n{3,}", "\n\n", "\n".join(line.rstrip() for line in screen.splitlines())).strip("\n")
-    print("\n".join(text.splitlines()[-a.lines:]))
+    print(screen_tail(screen, a.lines))
 
 
 def report_rows(repo: Path, state: dict) -> list[dict]:
@@ -1229,6 +1256,16 @@ def scan_reports(reports: Path, seen: Path, statuses: tuple[str, ...] | None) ->
     return fresh
 
 
+def report_extent(text: str) -> str:
+    """For a summary-first report, the lines the lead reads every time; the appendix below them is opened only
+    to check a line the lead doubts."""
+    lines = text.splitlines()
+    for n, line in enumerate(lines):
+        if line.strip().lower() == "## appendix" and n:
+            return f"  (read lines 1-{n} of {len(lines)}; appendix below)"
+    return ""
+
+
 def pending_reports(reports: Path) -> list[tuple[str, str]]:
     return [(f.stem, st) for f in sorted(reports.glob("*.md"))
             if (st := (parse_status(f.read_text()) or "").lower()) in WAKE_STATUSES]
@@ -1276,6 +1313,7 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
         (seen / f"{i}.gone").unlink(missing_ok=True)  # readable again: a later failure is a new episode
         marker = seen / f"{i}.screen"
         now, h = time.time(), digest(screen.encode())
+        limit = min(stall, LAUNCH_STALL_S) if now - w.get("launched_at", 0) < LAUNCH_WATCH_S else stall
         try:
             old_hash, since, flagged = marker.read_text().split("|")
             since = float(since)
@@ -1283,7 +1321,7 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
             old_hash, since, flagged = "", now, "0"
         if old_hash != f"{token}:{h}":
             marker.write_text(f"{token}:{h}|{now}|0")
-        elif flagged == "0" and now - since >= stall:
+        elif flagged == "0" and now - since >= limit:
             marker.write_text(f"{token}:{h}|{since}|1")
             events.append(f"STALLED {i} screen unchanged for {int(now - since)}s; fleet peek {state['run']} {i} "
                           "(permission, login or trust prompt, or usage limit?)")
@@ -1315,7 +1353,7 @@ def wait_loop(a, repo: Path, d: Path, seen: Path, statuses, deadline: float) -> 
         events = scan_workers(repo, state, seen, a.stall)
         if fresh or events:
             for i, status, f in fresh:
-                print(f"REPORT {i} [{status}] {f}")
+                print(f"REPORT {i} [{status}] {f}{report_extent(f.read_text())}")
             for line in events:
                 print(line)
             return 0
@@ -2045,6 +2083,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--family", help="known family for an account-specific model override")
     s.add_argument("--pane", help="split this pane (ref, UUID or index; at the pane limit, replace it or add a tab) "
                    "instead of choosing one")
+    s.add_argument("--settle", type=float, default=LAUNCH_SETTLE_S,
+                   help="seconds before launch prints the worker's screen (0 skips it)")
     s.add_argument("--resume", action="store_true",
                    help="continue the stopped worker's own CLI session (same account), e.g. after a usage limit resets")
     s.set_defaults(fn=cmd_launch)
@@ -2073,7 +2113,8 @@ def main(argv: list[str] | None = None) -> int:
                    help=f"seconds, at most {WAIT_MAX}; use the longest your host's command tool allows")
     s.add_argument("--interval", type=int, default=10)
     s.add_argument("--stall", type=int, default=180,
-                   help="wake when a working worker's screen is unchanged this long (0 disables)")
+                   help=f"wake when a working worker's screen is unchanged this long (0 disables); a worker "
+                        f"launched in the last {LAUNCH_WATCH_S // 60} minutes wakes after {LAUNCH_STALL_S}")
     s.add_argument("--any-change", action="store_true", help="wake on any report change, whatever its status")
     s.set_defaults(fn=cmd_wait)
 
@@ -2134,6 +2175,8 @@ def main(argv: list[str] | None = None) -> int:
         limit = WAIT_MAX if a.cmd == "wait" else 60
         if hasattr(a, "timeout") and not 0 <= a.timeout <= limit:
             raise FleetError(f"timeout must be between 0 and {limit} seconds")
+        if hasattr(a, "settle") and not 0 <= a.settle <= 30:
+            raise FleetError("settle must be between 0 (skip the screen) and 30 seconds")
         if hasattr(a, "stall") and a.stall < 0:
             raise FleetError("stall must be 0 (off) or a number of seconds")
         if hasattr(a, "interval") and not 0 < a.interval <= 60:
@@ -2141,7 +2184,10 @@ def main(argv: list[str] | None = None) -> int:
         cfg = load_config()
         try:
             with mutation_lock(a):
-                return a.fn(a, cfg) or 0
+                code = a.fn(a, cfg) or 0
+            if follow := getattr(a, "unlocked", None):
+                follow()
+            return code
         finally:
             if hasattr(a, "run"):
                 emit_lead_notice(a, cfg)

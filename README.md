@@ -412,6 +412,8 @@ claude plugin validate .claude-plugin/marketplace.json
 
 `skill/` is the single source of truth: agent instructions, runtime, templates and adapter defaults. Everything else is packaging around it.
 
+The lead carries `skill/SKILL.md` on every turn of a run, so a test holds it to 19,000 bytes. Put new guidance in `skill/references/` (read when needed) or in the CLI's output (seen when it applies); to add to `SKILL.md`, move something out.
+
 | Artifact | Source |
 | --- | --- |
 | Portable skill (`setup`, `install.sh`) | `skill/` copied to each host's skills directory |

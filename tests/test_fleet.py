@@ -120,6 +120,20 @@ class Reports(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(fleet.parse_status(text), want)
 
+    def test_the_report_template_marks_where_the_lead_stops_reading(self):
+        template = (ROOT / "skill/templates/report.md").read_text()
+        report = template.split("```markdown\n")[1].split("```")[0]
+        self.assertRegex(fleet.report_extent(report), r"\(read lines 1-\d+ of \d+; appendix below\)")
+        self.assertEqual(fleet.report_extent("# Report\n\nStatus: blocked\n\nWhich copy?\n"), "")
+
+
+class SkillText(unittest.TestCase):
+    def test_the_skill_stays_within_its_context_budget(self):
+        # The lead carries SKILL.md on every turn of a run. New guidance goes in references/ (read when needed) or
+        # in CLI output (seen when it applies); to add to SKILL.md, move something out instead of raising this.
+        size = len((ROOT / "skill/SKILL.md").read_bytes())
+        self.assertLessEqual(size, 19_000, "SKILL.md is over its 19,000-byte budget; move detail to references/")
+
 
 class Wait(unittest.TestCase):
     def setUp(self):

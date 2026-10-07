@@ -17,7 +17,7 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`plan`](#plan) | Saves the ticket graph and routing | After the owner approves the plan, before any launch |
 | [`prompt`](#prompt) | Writes a worker or reviewer prompt | Before each launch |
 | [`launch`](#launch) | Starts a worker in a cmux pane | A ticket is ready and its prompt is written |
-| [`peek`](#peek) | Shows the bottom of a worker's screen | Right after launch, or after `STALLED` |
+| [`peek`](#peek) | Shows the bottom of a worker's screen | After `STALLED`, or when the launch screen shows a prompt |
 | [`send`](#send) | Types a message into a worker's pane | Answering a blocked worker or requesting changes |
 | [`wait`](#wait) | Blocks until something needs the lead | Between actions, while workers run |
 | [`status`](#status) | Lists workers and report statuses | You need a snapshot after `EXITED` or a recovery |
@@ -127,15 +127,29 @@ Writes `.fleet/runs/<run>/prompts/<id>.md` from the saved ticket, the worker rul
 ```text
 fleet launch <run> <id> <provider> --tier heavy|standard|light|review
              [--model <m>] [--effort <e>] [--family <f>] [--pane <ref|uuid|index>] [--resume]
+             [--settle <seconds>]
 ```
 
-Starts the worker in its own cmux pane with the prompt. The provider, tier and pins must match the saved plan; a steer (see `steer`) may change the provider and model, and launch prints `steered (<tier>): …`. Launch enforces blockers, file ownership, capacity and any hold. Up to 8 panes it splits the largest one; at 8 it reuses a pane holding only verified, exited workers, or adds a tab to an idle pane, and refuses when every other pane has a live worker.
+Starts the worker in its own cmux pane with the prompt. The provider, tier and pins must match the saved plan; a steer (see `steer`) may change the provider and model, and launch prints `steered (<tier>): …`. Launch enforces blockers, file ownership, capacity and any hold.
+
+Each worker gets its own pane. Up to 8 panes in the workspace, launch splits the largest one. At 8 it replaces a pane (never the lead's) that holds only verified workers whose exit is confirmed, closing their surfaces. Failing that, it adds a tab to an idle pane (one with no live worker), so an unverified worker keeps its scrollback. When every other pane has a live worker, it refuses before touching the run.
+
+Launch ends by printing the last lines of the worker's screen, 5 seconds in, so a login, trust, model or permission prompt shows without a `peek`:
+
+```text
+api-client: api-client · codex:gpt-6-sol@high on surface:7
+screen after 5s:
+  Do you trust the files in this folder?
+
+    1. Yes, proceed
+```
 
 - `--pane` picks the pane to split, replace or add a tab to.
 - `--family` names the model family when an account-specific model isn't recognized.
 - `--resume` continues the stopped worker's own session (same provider and account, adapters with `resume` such as Claude), for example after a usage limit resets.
+- `--settle` sets the seconds before the screen is printed (default 5, at most 30; 0 skips it).
 
-**Use:** for each ready ticket, and with `--tier review` for each reviewer. Then `peek`.
+**Use:** for each ready ticket, and with `--tier review` for each reviewer. Read the printed screen; `wait` covers a prompt that appears later.
 
 ### peek
 
@@ -145,7 +159,7 @@ fleet peek <run> <id> [--lines N]
 
 Prints the last 20 lines of the worker's screen, or `N`.
 
-**Use:** shortly after launch and again within a minute or two, to catch login, trust, model or permission prompts. Also after `STALLED`. Raise `--lines` when a dialog is cut off. Don't peek by reflex.
+**Use:** after `STALLED`, or when the screen `launch` printed shows a prompt or an error. Raise `--lines` when a dialog is cut off. Don't peek to confirm a start or by reflex: `launch` shows the worker's first screen and `wait` reports a worker that stops.
 
 ### send
 
@@ -169,14 +183,16 @@ Blocks until something needs the lead, then prints it and exits 0. On timeout it
 
 | Line | Meaning | Next |
 | --- | --- | --- |
-| `REPORT <id> [needs-verification]` | The worker handed back | Review and verify |
+| `REPORT <id> [needs-verification]` | The worker handed back | Read the report's summary lines, review and verify |
 | `REPORT <id> [blocked]` | The worker needs a decision | `send` the answer |
 | `EXITED <id>` | The process ended before handing back | `status`, read the report, repair or relaunch |
-| `STALLED <id>` | The screen hasn't changed for `--stall` seconds (default 180; 0 turns it off) | `peek` |
+| `STALLED <id>` | The screen hasn't changed for `--stall` seconds (default 180; 0 turns it off). A worker launched in the last 4 minutes wakes after 60, which catches a prompt at start-up | `peek` |
 | `UNREACHABLE <id>` | cmux can't read the pane | Investigate; a missing pane isn't proof of exit |
 | `HOLD` | Launches are held and no worker is running | Handle `PENDING` lines, tell the owner, end your turn |
 | `TIMEOUT` | Nothing new | Handle `PENDING` lines, otherwise wait again |
 | `PENDING <id> [status]` | A report is still waiting on the lead | Handle it |
+
+A `REPORT` line ends with the report's path and, for a report with an `## Appendix`, the lines above it: `(read lines 1-34 of 180; appendix below)`. Read those lines; the appendix holds supporting detail for a line you doubt.
 
 `--timeout` is at most 600; use the longest your host allows (540 in Claude Code), or run it in the background. `--interval` (default 10) sets how often it polls. `--any-change` wakes on any report change.
 
