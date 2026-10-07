@@ -1,6 +1,7 @@
 ---
 name: fleet
 description: Plan, launch, resume and verify a local fleet of coding-agent CLIs in visible cmux panes for approved tickets, with saved dependencies and explicit file ownership.
+argument-hint: "[auto|single:<provider>|agents=...] [workspace=<ref>] [review=<mode>] -- <tickets dir or tasks>"
 disable-model-invocation: true
 ---
 
@@ -8,7 +9,7 @@ disable-model-invocation: true
 
 You are the lead. Workers are local interactive CLIs in cmux panes sharing one checkout. You own planning, routing, decisions, review and final verification. Workers implement one ticket at a time. The owner controls commits and publishing.
 
-Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute path and invoke `<absolute-skill-path>/bin/fleet`. Never guess a checkout path. The [command reference](references/commands.md) lists every command with when to use it; read `fleet <command> --help` when a flag is unclear.
+Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute path and invoke `python3 <absolute-skill-path>/bin/fleet`. Never guess a checkout path. The [command reference](references/commands.md) lists every command with when to use it; read `fleet <command> --help` when a flag is unclear.
 
 ```text
 /fleet [auto | single:<provider> | agents=<provider>[:<model>],...]
@@ -16,7 +17,7 @@ Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute pat
        -- <local tickets directory, or tasks in plain words>
 ```
 
-These are conversational options for you to translate into CLI flags, not an autonomous scheduler. `/fleet` without tickets can also add another subscription (for example a second Claude or Codex account); see [provider notes](references/providers.md#extra-subscriptions). `fleet doctor` shows each provider's tiers and caps; `fleet providers` prints the full merged config only when you need adapter details. Read [harness requirements](references/harnesses.md), [routing](references/routing.md), and [provider notes](references/providers.md) as needed. [Worked examples](references/examples.md) show the command sequences for option mapping, blocked workers, change requests, review rounds, evidence, repair, recovery, follow-up runs and finishing.
+These are conversational options for you to translate into CLI flags, not an autonomous scheduler. `/fleet` without tickets can also add another subscription (for example a second Claude or Codex account); see [provider notes](references/providers.md#extra-subscriptions). `fleet doctor` shows each provider's tiers and caps; `fleet providers` prints the full merged config only when you need adapter details. Read [harness requirements](references/harnesses.md), [routing](references/routing.md), and [provider notes](references/providers.md) as needed. [Worked examples](references/examples.md) show the command sequences for each step.
 
 No ticket folder, or new work mid-run: follow [delegating mid-conversation](references/delegation.md) (inline `task`, read-only `kind: investigate`, `fleet add`, `fleet launch --ready`).
 
@@ -104,7 +105,7 @@ Evidence records commands, outcomes, acceptance criteria and review disposition.
 
 ## 6. Recovery and completion
 
-Use `fleet resume <run>` after interruption or compaction. It also lets a fresh or compacted lead continue a long run: when the owner asks, `fleet handoff` saves your unsaved decisions to `notes.md` and prints the owner's steps; everything else is on disk. A resumed lead first handles the reports the latest `## Handoff` entry lists as awaiting it, because `fleet wait` lists those only as `PENDING` when it times out. Exit receipts reconcile process state; reports and missing tabs are not exit evidence. If normal stop cannot establish exit, independently verify that the recorded worker process (`pid` in `resume`; `--json` has the full record) is truly gone, write that evidence to a file, then use `fleet recover <run> <id> --evidence <file>`. Recovery releases process state only; it does not accept implementation. Never use it just because a tab disappeared.
+Use `fleet resume <run>` after interruption or compaction. It also lets a fresh or compacted lead continue a long run: when the owner asks, `fleet handoff` saves your unsaved decisions to `notes.md` and prints the owner's steps; everything else is on disk. A resumed lead first handles the reports the latest `## Handoff` entry lists as awaiting it, because `fleet wait` lists those only as `PENDING` when it times out. Exit receipts reconcile process state; reports and missing panes are not exit evidence. If normal stop cannot establish exit, independently verify that the recorded worker process (`pid` in `resume`; `--json` has the full record) is truly gone, write that evidence to a file, then use `fleet recover <run> <id> --evidence <file>`. Recovery releases process state only; it does not accept implementation. Never use it just because a pane disappeared.
 
 Before finishing, run combined-tree gates and `fleet check <run>`. Check compares captured HEAD and full index entries (including already-staged content); investigate differences with the owner. It cannot prove no intervening Git action occurred. Stop remaining workers; use `--close` only when exit is confirmed and panes are no longer needed. Report ticket outcomes, resolved model/effort, evidence, decisions, remaining limits and the owner's review/commit steps.
 

@@ -2,6 +2,20 @@
 
 Command sequences for the cases the skill describes in prose. Each uses the run `settings`; IDs, providers and messages are illustrative. The rules behind each step are in the [skill](../SKILL.md); this page only shows the shape.
 
+## Contents
+
+- [1. Turn the owner's request into a run](#1-turn-the-owners-request-into-a-run)
+- [2. Answer a blocked worker](#2-answer-a-blocked-worker)
+- [3. Request changes while the worker is still running](#3-request-changes-while-the-worker-is-still-running)
+- [4. Cross-family review, with a fix round](#4-cross-family-review-with-a-fix-round)
+- [5. An evidence file](#5-an-evidence-file)
+- [6. Repair or relaunch a stopped worker](#6-repair-or-relaunch-a-stopped-worker)
+- [7. Recover a worker whose exit cannot be confirmed](#7-recover-a-worker-whose-exit-cannot-be-confirmed)
+- [8. Change scope after launch: a follow-up run](#8-change-scope-after-launch-a-follow-up-run)
+- [9. Finish the run](#9-finish-the-run)
+- [10. Delegate mid-conversation](#10-delegate-mid-conversation)
+- [Handing off the lead](#handing-off-the-lead)
+
 ## 1. Turn the owner's request into a run
 
 | Owner writes | You run |
