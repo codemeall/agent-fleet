@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.18
 
 The lead reads less and spends fewer turns on a run. Nothing it needs is removed.
 
