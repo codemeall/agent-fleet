@@ -591,6 +591,36 @@ class Runtime(unittest.TestCase):
             self.call("add", "demo", "--file", "-")
         self.assertEqual(self.state()["tickets"]["03"]["files"], ["x.txt"])
 
+    def test_investigator_reads_beside_a_writer_and_is_verified_on_its_report(self):
+        self.cfg["defaults"]["max_parallel"] = self.cfg["providers"]["writer"]["max"] = 2
+        self.call("init", "demo", "--workspace", "workspace:1", "--review", "cross-all")
+        ticket = self.repo / "01.md"
+        ticket.write_text("# 01\n")
+        self.call("plan", "demo", "--file", self.plan_file([
+            {"id": "01", "ticket": str(ticket), "files": ["owned.txt"], "provider": "writer"},
+            {"id": "why", "kind": "investigate", "task": "Why does owned.txt change on save?", "provider": "writer",
+             "context": "Read owned.txt.", "checks": "git log -- owned.txt"},
+            {"id": "fix", "task": "Apply the finding.", "files": ["next.txt"], "provider": "writer",
+             "blockers": ["why"]}]))
+        self.prompt("01")
+        self.call("prompt", "demo", "why")
+        text = (self.repo / ".fleet/runs/demo/prompts/why.md").read_text()
+        self.assertIn("# Fleet investigator why", text)
+        self.assertIn("Your only writable file is your report", text)
+        self.assertNotIn("# Fleet worker", text)
+        self.assertNotIn("<!--", text)
+        self.launch("01")
+        self.launch("why")  # owns no files, so it runs beside the writer of owned.txt
+        out = self.call("prompt", "demo", "review-why", "--review-of", "why", "--diff", str(self.repo / "none.diff"),
+                        expected=1)
+        self.assertIn("has no diff to review", out)
+        self.report("why")
+        self.stop_with_receipt("why")
+        self.verify("why")  # no cross-family review, even under cross-all
+        self.assertEqual(self.state()["tickets"]["why"]["status"], "verified")
+        self.prompt("fix")
+        self.launch("fix")
+
     def scan(self, stall=60):
         seen = self.repo / ".fleet/runs/demo/.seen"
         return fleet.scan_workers(self.repo, self.state(), seen, stall)

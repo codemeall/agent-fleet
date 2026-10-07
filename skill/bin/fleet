@@ -953,7 +953,10 @@ def cmd_prompt(a, cfg):
         raise FleetError("cannot replace a live worker prompt")
     review_of = a.review_of
     lead_fields = {}
+    investigate = False
     if review_of:
+        if state["tickets"].get(review_of, {}).get("kind") == "investigate":
+            raise FleetError(f"{review_of} is an investigate ticket: it has no diff to review; verify its report directly")
         writer = worker(state, review_of)
         if writer.get("role") != "implementation" or writer["state"] in ACTIVE_STATES:
             raise FleetError("stop the implementation worker before preparing review")
@@ -974,8 +977,9 @@ def cmd_prompt(a, cfg):
         if a.id not in state["tickets"]:
             raise FleetError("save the ticket in fleet plan first")
         t = state["tickets"][a.id]
-        meta = {"role": "implementation"}
-        template = "ticket-prompt.md"
+        meta = {"role": "implementation"}  # an investigator too: launch, stop and verify treat it as a writer of no files
+        investigate = t.get("kind") == "investigate"
+        template = "investigate-prompt.md" if investigate else "ticket-prompt.md"
         # Plan-supplied fields make the prompt complete; missing ones stay LEAD comments, which launch refuses.
         for key, hint in PROMPT_FIELDS.items():
             value = t.get(key)
@@ -987,7 +991,7 @@ def cmd_prompt(a, cfg):
               "repo": str(repo), "files": ", ".join(t["files"]),
               "diff": str(d / "snapshots" / f"{a.id}.diff") if review_of else "",
               "review_of": review_of or "", **lead_fields}
-    parts = [] if review_of else [(SKILL_DIR / "templates" / "preamble.md").read_text()]
+    parts = [] if review_of or investigate else [(SKILL_DIR / "templates" / "preamble.md").read_text()]
     rules = repo / ".fleet" / "rules.md"
     if rules.exists():
         parts.append("## Repo rules\n\n" + rules.read_text())
@@ -1000,9 +1004,10 @@ def cmd_prompt(a, cfg):
     out.write_text(text)
     state["prompts"][a.id] = meta
     save_run(repo, a.run, state)
-    print(out)
-    if todo:
-        print(f"fill before launch: {', '.join(todo)} (or add them to the plan)")
+    if not getattr(a, "quiet", False):  # launch --ready writes prompts without printing each path
+        print(out)
+        if todo:
+            print(f"fill before launch: {', '.join(todo)} (or add them to the plan)")
 
 
 def cmd_launch(a, cfg):
