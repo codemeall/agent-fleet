@@ -10,6 +10,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+import threading
 import sys
 import time
 import unittest
@@ -678,6 +679,31 @@ class Runtime(unittest.TestCase):
         out = self.call("launch", "demo", "01", "writer", "--tier", "standard", "--ready", expected=1)
         self.assertIn("drop <id>, <provider>, --tier", out)
         self.assertIn("launch needs <id> <provider>", self.call("launch", "demo", expected=1))
+
+    def test_wait_settles_so_reports_that_land_together_wake_the_lead_once(self):
+        self.setup_run()
+        self.report("01")
+        timer = threading.Timer(0.5, lambda: self.report("02"))
+        timer.start()
+        self.addCleanup(timer.cancel)
+        out = self.call("wait", "demo", "--timeout", "10", "--settle", "3", "--interval", "1")
+        self.assertIn("REPORT 01", out)
+        self.assertIn("REPORT 02", out)
+
+    def test_wait_settle_zero_returns_at_once_and_settle_never_outlasts_the_timeout(self):
+        self.setup_run()
+        self.report("01")
+        timer = threading.Timer(1.0, lambda: self.report("02"))
+        timer.start()
+        self.addCleanup(timer.cancel)
+        started = time.monotonic()
+        out = self.call("wait", "demo", "--timeout", "10", "--settle", "0")
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertNotIn("REPORT 02", out)
+        timer.join()
+        started = time.monotonic()
+        self.assertIn("REPORT 02", self.call("wait", "demo", "--timeout", "0", "--settle", "30"))
+        self.assertLess(time.monotonic() - started, 2)
 
     def scan(self, stall=60):
         seen = self.repo / ".fleet/runs/demo/.seen"

@@ -65,6 +65,7 @@ TICKET_KINDS = ("implement", "investigate")  # investigate: read-only research o
 TIER_ORDER = ("heavy", "standard", "light")  # launch --ready takes consequential work first
 PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
 TEMPLATE_KEYS = {"id", "ticket", "report", "repo", "files", "diff", "review_of", *PROMPT_FIELDS}
+WAIT_SETTLE_S = 5  # after the first event, gather the others that land with it: one wake, one lead turn
 WAIT_MAX = 600  # Claude Code's longest foreground command timeout; other hosts may allow less
 MODEL_LINE_RE = re.compile(r"^\s*([A-Za-z0-9][^\s]*)(?:\t| +- )|^\s*([A-Za-z0-9][^\s/]*/\S+)\s*$")  # bare lines: provider/model
 
@@ -1553,6 +1554,11 @@ def wait_loop(a, repo: Path, d: Path, seen: Path, statuses, deadline: float) -> 
         state = load_run(repo, a.run)
         events = scan_workers(repo, state, seen, a.stall)
         if fresh or events:
+            settle_until = min(deadline, time.time() + a.settle)
+            while time.time() < settle_until:
+                time.sleep(max(0, min(1, settle_until - time.time())))
+                fresh += scan_reports(d / "reports", seen, statuses)
+                events += scan_workers(repo, load_run(repo, a.run), seen, a.stall)
             for i, status, f in fresh:
                 print(f"REPORT {i} [{status}] {f}{report_extent(f.read_text())}")
             for line in events:
@@ -2327,6 +2333,9 @@ def main(argv: list[str] | None = None) -> int:
                    help=f"wake when a working worker's screen is unchanged this long (0 disables); a worker "
                         f"launched in the last {LAUNCH_WATCH_S // 60} minutes wakes after {LAUNCH_STALL_S}")
     s.add_argument("--any-change", action="store_true", help="wake on any report change, whatever its status")
+    s.add_argument("--settle", type=float, default=WAIT_SETTLE_S,
+                   help="after the first event, seconds to gather others that land with it "
+                        "(at most 30, never past --timeout; 0 returns at once)")
     s.set_defaults(fn=cmd_wait)
 
     s = sub.add_parser("stop", help="send each worker its quit sequence")
@@ -2387,7 +2396,7 @@ def main(argv: list[str] | None = None) -> int:
         if hasattr(a, "timeout") and not 0 <= a.timeout <= limit:
             raise FleetError(f"timeout must be between 0 and {limit} seconds")
         if hasattr(a, "settle") and not 0 <= a.settle <= 30:
-            raise FleetError("settle must be between 0 (skip the screen) and 30 seconds")
+            raise FleetError("settle must be between 0 and 30 seconds")
         if hasattr(a, "stall") and a.stall < 0:
             raise FleetError("stall must be 0 (off) or a number of seconds")
         if hasattr(a, "interval") and not 0 < a.interval <= 60:
