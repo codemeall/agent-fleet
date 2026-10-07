@@ -550,6 +550,14 @@ class Runtime(unittest.TestCase):
         # 02 waits on 01, so waiting on 02 waits on 01 too.
         self.add([{"id": "03", "task": "Touch owned too.", "files": ["owned.txt"], "blockers": ["02"]}])
 
+    def test_add_refuses_overlap_between_tickets_of_the_same_call(self):
+        self.setup_run()
+        out = self.add([{"id": "03", "task": "A.", "files": ["x.txt"]}, {"id": "04", "task": "B.", "files": ["x.txt"]}],
+                       expected=1)
+        self.assertIn("04: files overlap unverified ticket 03; add 03 to its blockers", out)
+        self.add([{"id": "03", "task": "A.", "files": ["x.txt"], "blockers": ["04"]},
+                  {"id": "04", "task": "B.", "files": ["x.txt"]}])  # 03 waits on 04: sequenced either way round
+
     def test_add_lets_new_work_touch_files_of_verified_tickets(self):
         self.setup_run()
         self.launch()
@@ -608,6 +616,7 @@ class Runtime(unittest.TestCase):
         text = (self.repo / ".fleet/runs/demo/prompts/why.md").read_text()
         self.assertIn("# Fleet investigator why", text)
         self.assertIn("Your only writable file is your report", text)
+        self.assertIn("Run the checks listed above as given", text)  # the lead authorized them, caches and all
         self.assertNotIn("# Fleet worker", text)
         self.assertNotIn("<!--", text)
         self.launch("01")
@@ -670,6 +679,13 @@ class Runtime(unittest.TestCase):
         self.receipt(returncode=1)
         self.call("status", "demo")  # reconciles the exit; the ticket is still pending and unverified
         self.assertIn("NONE ready", self.call("launch", "demo", "--ready"))
+
+    def test_launch_ready_keeps_off_the_files_of_an_exited_unverified_ticket(self):
+        self.ready_plan({"id": "a", "task": "A.", "files": ["x.txt"]}, {"id": "b", "task": "B.", "files": ["x.txt"]})
+        self.assertIn("SKIPPED b: files overlap a", self.call("launch", "demo", "--ready"))
+        self.receipt("a")
+        self.call("status", "demo")  # a exited; its diff awaits the lead's verification
+        self.assertIn("SKIPPED b: files overlap a", self.call("launch", "demo", "--ready"))
 
     def test_launch_ready_is_refused_on_hold_and_alongside_a_ticket(self):
         self.setup_run()

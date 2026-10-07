@@ -934,12 +934,17 @@ def cmd_add(a, cfg):
         raise FleetError("add needs at least one ticket")
     tickets = {**state["tickets"], **added}
     check_graph(tickets)
+    # An unverified ticket's review diff goes stale if another worker edits its files first, so two tickets
+    # sharing files must be sequenced: one waits on the other. Saved tickets come first, then this call's in order.
+    earlier = list(state["tickets"])
     for i, t in added.items():
-        # An unverified ticket's review diff goes stale if another worker edits its files first.
         waits_on = ancestors(tickets, i)
-        for j, old in state["tickets"].items():
-            if old["status"] != "verified" and j not in waits_on and scopes_overlap(t["files"], old["files"]):
+        for j in earlier:
+            old = tickets[j]
+            if (old["status"] != "verified" and scopes_overlap(t["files"], old["files"])
+                    and j not in waits_on and i not in ancestors(tickets, j)):
                 raise FleetError(f"{i}: files overlap unverified ticket {j}; add {j} to its blockers")
+        earlier.append(i)
     write_tasks(d, texts)
     state["tickets"] = tickets
     state["decisions"] += [f"{x} (added {now})" for x in data.get("decisions", [])]
@@ -1185,7 +1190,10 @@ def ready_tickets(state: dict, live: dict, cfg: dict, prompts: Path) -> tuple[li
     Also returns why each other never-launched ticket waits."""
     tickets = state["tickets"]
     running = active(state)
-    taken = [(w.get("review_of") or w["id"], tickets[w.get("review_of") or w["id"]]["files"]) for w in running]
+    # Files stay taken until their ticket is verified: an exited writer's diff still awaits review and evidence.
+    held = {w.get("review_of") or w["id"] for w in running}
+    held |= {i for i, t in tickets.items() if i in state["workers"] and t["status"] != "verified"}
+    taken = [(i, tickets[i]["files"]) for i in sorted(held)]
     slots = state["options"]["max_parallel"] - len(running)
     load: dict[str, int] = {}
     for w in running:
