@@ -74,6 +74,10 @@ class FleetError(Exception):
     pass
 
 
+class PaneLimit(FleetError):
+    """Every pane but the lead's holds a live worker, so a new one has nowhere to go."""
+
+
 # ---------- config ----------
 
 REPLACE_KEYS = {"models_allow"}  # a user's list replaces the shipped one instead of merging into it
@@ -934,6 +938,10 @@ def cmd_add(a, cfg):
         raise FleetError("add needs at least one ticket")
     tickets = {**state["tickets"], **added}
     check_graph(tickets)
+    for i, t in added.items():
+        for b in t["blockers"]:
+            if tickets[b]["status"] == "dropped":
+                raise FleetError(f"{i}: blocker {b} was dropped and will never be verified")
     # An unverified ticket's review diff goes stale if another worker edits its files first, so two tickets
     # sharing files must be sequenced: one waits on the other. Saved tickets come first, then this call's in order.
     earlier = list(state["tickets"])
@@ -941,7 +949,7 @@ def cmd_add(a, cfg):
         waits_on = ancestors(tickets, i)
         for j in earlier:
             old = tickets[j]
-            if (old["status"] != "verified" and scopes_overlap(t["files"], old["files"])
+            if (old["status"] == "pending" and scopes_overlap(t["files"], old["files"])
                     and j not in waits_on and i not in ancestors(tickets, j)):
                 raise FleetError(f"{i}: files overlap unverified ticket {j}; add {j} to its blockers")
         earlier.append(i)
@@ -950,6 +958,39 @@ def cmd_add(a, cfg):
     state["decisions"] += [f"{x} (added {now})" for x in data.get("decisions", [])]
     save_run(repo, a.run, state)
     print(f"added {len(added)} tickets: {', '.join(added)}")
+
+
+def cmd_drop(a, cfg):
+    """Retire a ticket nobody will finish, so it stops holding its files and keeping its run open."""
+    repo = repo_root()
+    state = load_run(repo, a.run)
+    reconcile(repo, state)
+    t = state["tickets"].get(a.id)
+    if t is None:
+        raise FleetError(f"no ticket '{a.id}' in this run")
+    if t["status"] != "pending":
+        raise FleetError(f"{a.id} is already {t['status']}")
+    if any((w.get("review_of") or w["id"]) == a.id for w in active(state)):
+        raise FleetError(f"{a.id} has a worker that may still be running; stop it first and confirm its exit")
+    waiting = [i for i, o in state["tickets"].items() if o["status"] == "pending" and a.id in o["blockers"]]
+    if waiting:
+        raise FleetError(f"{', '.join(waiting)} waits on it; drop or finish {'them' if len(waiting) > 1 else 'it'} first")
+    reason = a.reason.strip()
+    if not reason:
+        raise FleetError("say why with --reason; it is saved with the run's decisions")
+    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    t["status"], t["dropped_at"] = "dropped", now
+    state["decisions"].append(f"Dropped {a.id}: {reason} ({now})")
+    report = run_dir(repo, a.run) / "reports" / f"{a.id}.md"
+    if report.exists():  # a handed-back report would otherwise keep waking the lead as PENDING
+        lines = report.read_text().splitlines()
+        for n, line in enumerate(lines):
+            if STATUS_RE.match(line):
+                lines[n] = "Status: dropped"
+                break
+        report.write_text("\n".join(lines) + "\n")
+    save_run(repo, a.run, state)
+    print(f"{a.id}: dropped; its files are free, and any edits it made stay in the checkout for the owner to review")
 
 
 def cmd_prompt(a, cfg):
@@ -1068,6 +1109,8 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         t = state["tickets"][a.id]
         if t["status"] == "verified":
             raise FleetError("ticket already verified; create a follow-up ticket")
+        if t["status"] == "dropped":
+            raise FleetError(f"{a.id} was dropped; add a new ticket for the work instead")
         if any(state["tickets"][b]["status"] != "verified" for b in t["blockers"]):
             raise FleetError("ticket has unverified blockers")
         try:
@@ -1180,7 +1223,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
 
 
 READY_EXCLUSIVE = {"id": "<id>", "provider": "<provider>", "tier": "--tier", "model": "--model",
-                   "effort": "--effort", "family": "--family"}
+                   "effort": "--effort", "family": "--family", "settle": "--settle"}
 
 
 def ready_tickets(state: dict, live: dict, cfg: dict, prompts: Path) -> tuple[list[str], dict[str, str]]:
@@ -1192,7 +1235,7 @@ def ready_tickets(state: dict, live: dict, cfg: dict, prompts: Path) -> tuple[li
     running = active(state)
     # Files stay taken until their ticket is verified: an exited writer's diff still awaits review and evidence.
     held = {w.get("review_of") or w["id"] for w in running}
-    held |= {i for i, t in tickets.items() if i in state["workers"] and t["status"] != "verified"}
+    held |= {i for i, t in tickets.items() if i in state["workers"] and t["status"] == "pending"}
     taken = [(i, tickets[i]["files"]) for i in sorted(held)]
     slots = state["options"]["max_parallel"] - len(running)
     load: dict[str, int] = {}
@@ -1253,10 +1296,15 @@ def launch_ready(a, cfg):
                 cmd_prompt(argparse.Namespace(run=a.run, id=i, ticket=None, review_of=None, diff=None, force=False,
                                               quiet=True), cfg)
             label, w = launch_one(one, cfg)
-        except FleetError as e:
+        except (FleetError, OSError, subprocess.TimeoutExpired) as e:
             if i in load_run(repo, a.run)["workers"]:  # it reached cmux: the lead must inspect it first
-                raise FleetError(f"{i}: {e}; inspect it before launching more") from None
-            why[i] = str(e)
+                for j, reason in why.items():
+                    print(f"SKIPPED {j}: {reason}")
+                for j in picked[picked.index(i) + 1:]:
+                    print(f"SKIPPED {j}: not attempted after {i} failed")
+                raise FleetError(f"{i}: {str(e).strip()[:300]}; inspect it before launching more") from None
+            why[i] = ("pane limit (every pane has a live worker; stop a worker or close a pane)"
+                      if isinstance(e, PaneLimit) else str(e).strip()[:300])
             continue
         launched += 1
         effort = f"@{w['effort']}" if w.get("effort") else ""
@@ -1273,6 +1321,7 @@ def cmd_launch(a, cfg):
     if a.id is None or a.provider is None:
         raise FleetError("launch needs <id> <provider> [--tier …], or --ready to launch every ready ticket")
     a.tier = a.tier or "standard"
+    a.settle = LAUNCH_SETTLE_S if a.settle is None else a.settle
     label, w = launch_one(a, cfg)
     print(f"{a.id}: {label} on {w['surface']}")
 
@@ -1325,7 +1374,7 @@ def pick_pane(panes: list[dict], retired: set[str], busy: set[str], lead_pane: s
         if not busy & set(p.get("surface_refs", [])):
             return "tab", p["ref"], None
     where = f"pane {want} is the lead's or has a live worker" if want else "every pane has a live worker"
-    raise FleetError(f"workspace has {len(panes)} panes (max {MAX_PANES}) and {where}; "
+    raise PaneLimit(f"workspace has {len(panes)} panes (max {MAX_PANES}) and {where}; "
                      "stop a worker or close a pane first")
 
 
@@ -1562,11 +1611,14 @@ def wait_loop(a, repo: Path, d: Path, seen: Path, statuses, deadline: float) -> 
         state = load_run(repo, a.run)
         events = scan_workers(repo, state, seen, a.stall)
         if fresh or events:
-            settle_until = min(deadline, time.time() + a.settle)
+            settle_until, settled = min(deadline, time.time() + a.settle), False
             while time.time() < settle_until:
                 time.sleep(max(0, min(1, settle_until - time.time())))
                 fresh += scan_reports(d / "reports", seen, statuses)
+                settled = True
+            if settled:  # screens once more, not every second: each read is a cmux call per worker
                 events += scan_workers(repo, load_run(repo, a.run), seen, a.stall)
+            fresh = list({i: (i, status, f) for i, status, f in fresh}.values())  # a rewritten report: latest status
             for i, status, f in fresh:
                 print(f"REPORT {i} [{status}] {f}{report_extent(f.read_text())}")
             for line in events:
@@ -1707,7 +1759,7 @@ def awaiting_lead(repo: Path, state: dict) -> list[str]:
     for i, w in state["workers"].items():
         f = reports / f"{i}.md"
         status = (parse_status(f.read_text()) or "no status line").lower() if f.exists() else "no report"
-        if i not in out and w["state"] == "exited" and status not in ("needs-verification", "verified"):
+        if i not in out and w["state"] == "exited" and status not in ("needs-verification", "verified", "dropped"):
             out[i] = f"{i} [exited, returncode={w.get('returncode')}, report: {status}]"
     return list(out.values())
 
@@ -1807,6 +1859,8 @@ def cmd_verify(a, cfg):
     if w["state"] in ACTIVE_STATES:
         raise FleetError("stop worker and confirm exit before accepting its result")
     owner = w.get("review_of") or a.id
+    if state["tickets"][owner]["status"] == "dropped":
+        raise FleetError(f"{owner} was dropped; there is nothing to accept")
     assert_scope_idle(state, state["tickets"][owner]["files"])
     evidence = read_evidence(a.evidence)
     report = run_dir(repo, a.run) / "reports" / f"{a.id}.md"
@@ -1834,7 +1888,11 @@ def cmd_verify(a, cfg):
             break
     report.write_text("\n".join(lines) + "\n\n## Lead verification\n" + evidence + "\n")
     save_run(repo, a.run, state)
-    print(f"{a.id}: verified; update the source ticket only after implementation acceptance")
+    inline = Path(state["tickets"][owner]["ticket"]).parent == (run_dir(repo, a.run) / "tasks").resolve()
+    if w["role"] == "implementation" and inline:
+        print(f"{a.id}: verified; an inline task has no source ticket to update")
+    else:
+        print(f"{a.id}: verified; update the source ticket only after implementation acceptance")
 
 
 def cmd_check(a, cfg):
@@ -2268,6 +2326,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--file", required=True, help="tickets JSON in the plan format; - reads stdin")
     s.set_defaults(fn=cmd_add)
 
+    s = sub.add_parser("drop", help="retire a pending ticket nobody will finish, freeing its files")
+    s.add_argument("run")
+    s.add_argument("id")
+    s.add_argument("--reason", required=True, help="why; saved with the run's decisions")
+    s.set_defaults(fn=cmd_drop)
+
     s = sub.add_parser("resume", help="reconcile exits and show saved plan and decisions")
     s.add_argument("run")
     s.add_argument("--json", action="store_true", help="print the full saved records")
@@ -2306,8 +2370,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--family", help="known family for an account-specific model override")
     s.add_argument("--pane", help="split this pane (ref, UUID or index; at the pane limit, replace it or add a tab) "
                    "instead of choosing one")
-    s.add_argument("--settle", type=float, default=LAUNCH_SETTLE_S,
-                   help="seconds before launch prints the worker's screen (0 skips it)")
+    s.add_argument("--settle", type=float,
+                   help=f"seconds before launch prints the worker's screen (default {LAUNCH_SETTLE_S}; 0 skips it)")
     s.add_argument("--resume", action="store_true",
                    help="continue the stopped worker's own CLI session (same account), e.g. after a usage limit resets")
     s.add_argument("--ready", action="store_true",
@@ -2403,7 +2467,7 @@ def main(argv: list[str] | None = None) -> int:
         limit = WAIT_MAX if a.cmd == "wait" else 60
         if hasattr(a, "timeout") and not 0 <= a.timeout <= limit:
             raise FleetError(f"timeout must be between 0 and {limit} seconds")
-        if hasattr(a, "settle") and not 0 <= a.settle <= 30:
+        if getattr(a, "settle", None) is not None and not 0 <= a.settle <= 30:
             raise FleetError("settle must be between 0 and 30 seconds")
         if hasattr(a, "stall") and a.stall < 0:
             raise FleetError("stall must be 0 (off) or a number of seconds")

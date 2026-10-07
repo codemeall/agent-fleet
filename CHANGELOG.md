@@ -10,6 +10,10 @@ Hand the lead work mid-conversation, without a ticket folder, and run it beside 
 - `fleet launch <run> --ready` launches every ticket that can start now in one call, heaviest first, printing one `LAUNCHED` or `SKIPPED <id>: <reason>` line each and no worker screens.
 - `fleet wait --settle <seconds>` (default 5) gathers events that land together into one wake.
 - The skill's new delegation reference covers picking the run, one-line confirmations, desk runs and closing them.
+- `fleet drop <run> <id> --reason <text>` retires a pending ticket nobody will finish: it frees its files, stops keeping its run open and no longer shows as `PENDING`.
+- `fleet launch --ready` names the pane limit in its skip line, lists the tickets it did not attempt when a launch fails mid-batch, and refuses `--settle` (it prints no screens).
+- `fleet wait --settle` reads worker screens once after settling instead of every second, and prints a report rewritten while settling once, with its latest status.
+- `fleet verify` no longer tells you to update a source ticket for an inline task.
 - The skill's slash menu shows an `argument-hint`, the fallback launch line runs `bin/fleet` through `python3` so a dropped executable bit cannot block it, the recovery step says pane everywhere, and the worked examples open with a contents list.
 
 ## 0.1.0-preview.19

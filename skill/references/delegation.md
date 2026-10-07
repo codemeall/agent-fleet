@@ -63,3 +63,7 @@ Close it when the owner asks, or before they commit (a commit moves HEAD, so `fl
 2. If an `implement` ticket was verified since the last close, run the combined-tree checks once.
 3. `fleet check <run>`.
 4. Report in a few lines: tickets and outcomes, uncommitted files to review, the owner's commit step. No Next-step start prompt; that block is for ticketed runs (skill step 6).
+
+## 6. Abandoned work
+
+A ticket the owner gives up on stays pending: it keeps its run open and holds its files. When the owner says so, stop its worker, then `fleet drop <run> <id> --reason "<owner's words>"`. Drop its dependents first, or tell the owner which tickets wait on it. Point the owner at any edits it left in the checkout.

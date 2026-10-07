@@ -16,6 +16,7 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`init`](#init) | Starts a run and captures the Git baseline | Starting a new run |
 | [`plan`](#plan) | Saves the ticket graph and routing | After the owner approves the plan, before any launch |
 | [`add`](#add) | Appends tickets or inline tasks to a run, before or after launch | The owner hands you new work mid-conversation or mid-run |
+| [`drop`](#drop) | Retires a pending ticket nobody will finish | The owner abandons work, so it stops holding files and keeping its run open |
 | [`prompt`](#prompt) | Writes a worker or reviewer prompt | Before each launch |
 | [`launch`](#launch) | Starts a worker in a cmux pane | A ticket is ready and its prompt is written |
 | [`peek`](#peek) | Shows the bottom of a worker's screen | After `STALLED`, or when the launch screen shows a prompt |
@@ -120,6 +121,16 @@ Appends tickets to a run, before or after its first launch; `-` reads stdin. Sam
 
 **Use:** for delegation from the conversation and new work in a live run ([delegation](delegation.md)). Changing an already-launched ticket's scope still needs a follow-up run.
 
+### drop
+
+```text
+fleet drop <run> <id> --reason <text>
+```
+
+Marks a pending ticket `dropped`: its files are free for new work, it no longer keeps its run open, and its report (if any) says `Status: dropped` so it stops coming back as `PENDING`. The reason is saved with the run's decisions. It refuses while the ticket's worker or reviewer may be running, and while another pending ticket waits on it. Edits the worker already made stay in the checkout. A dropped ticket cannot be launched, verified or used as a new blocker.
+
+**Use:** only when the owner abandons the work. To change it instead, drop it and `add` a new ticket.
+
 ## Launching and talking to workers
 
 ### prompt
@@ -156,7 +167,7 @@ screen after 5s:
     1. Yes, proceed
 ```
 
-`--ready` launches every ticket that can start now, heaviest first: never launched, blockers verified, files clear of running work, a complete prompt (written for it when the plan has `context` and `checks`), and room under `max_parallel` and the provider's `max` (the steered provider's, under a steer). It prints `LAUNCHED <id> <provider>:<model> <tier> <surface>` or `SKIPPED <id>: <reason>` per ticket, `NONE ready` when nothing started, and no worker screens. It takes no ticket, provider or pins, and never launches reviewers.
+`--ready` launches every ticket that can start now, heaviest first: never launched, blockers verified, files clear of running work, a complete prompt (written for it when the plan has `context` and `checks`), and room under `max_parallel` and the provider's `max` (the steered provider's, under a steer). It prints `LAUNCHED <id> <provider>:<model>[@<effort>] <tier> <surface>` or `SKIPPED <id>: <reason>` per ticket (`pane limit` when every pane has a live worker), `NONE ready` when nothing started, and no worker screens. If a launch fails after cmux was asked for a pane, it stops there, lists the tickets it did not attempt, and asks you to inspect that worker first. It takes no ticket, provider, pins or `--settle`, and never launches reviewers.
 
 - `--pane` picks the pane to split, replace or add a tab to.
 - `--family` names the model family when an account-specific model isn't recognized.

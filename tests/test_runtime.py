@@ -259,7 +259,7 @@ class Runtime(unittest.TestCase):
         self.report()
         self.stop_with_receipt()
         self.assertNotIn("verified_at", self.state()["workers"]["01"])
-        self.verify()
+        self.assertIn("update the source ticket", self.verify())
         worker = self.state()["workers"]["01"]
         self.assertTrue(worker["verified"])
         self.assertRegex(worker["verified_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
@@ -626,7 +626,8 @@ class Runtime(unittest.TestCase):
         self.assertIn("has no diff to review", out)
         self.report("why")
         self.stop_with_receipt("why")
-        self.verify("why")  # no cross-family review, even under cross-all
+        out = self.verify("why")  # no cross-family review, even under cross-all
+        self.assertNotIn("update the source ticket", out)  # an inline task has none
         self.assertEqual(self.state()["tickets"]["why"]["status"], "verified")
         self.prompt("fix")
         self.launch("fix")
@@ -720,6 +721,80 @@ class Runtime(unittest.TestCase):
         started = time.monotonic()
         self.assertIn("REPORT 02", self.call("wait", "demo", "--timeout", "0", "--settle", "30"))
         self.assertLess(time.monotonic() - started, 2)
+
+    def test_drop_retires_an_abandoned_ticket_and_frees_its_files(self):
+        self.setup_run()
+        self.launch()
+        self.assertIn("stop it first", self.call("drop", "demo", "01", "--reason", "Owner changed course.", expected=1))
+        self.report()  # handed back, then abandoned by the owner
+        self.stop_with_receipt()
+        self.assertIn("02 waits on it", self.call("drop", "demo", "01", "--reason", "Owner changed course.", expected=1))
+        self.call("drop", "demo", "02", "--reason", "Not needed.")
+        self.assertIn("01: dropped", self.call("drop", "demo", "01", "--reason", "Owner changed course."))
+        state = self.state()
+        self.assertEqual(state["tickets"]["01"]["status"], "dropped")
+        self.assertRegex(state["decisions"][-1], r"^Dropped 01: Owner changed course\. \(\d{4}-")
+        self.assertNotIn('"status": "pending"', (self.repo / ".fleet/runs/demo/run.json").read_text())  # no longer open
+        self.assertIn("already dropped", self.call("drop", "demo", "01", "--reason", "Again.", expected=1))
+        self.add([{"id": "03", "task": "Redo it.", "files": ["owned.txt"]}])  # no blocker needed on dropped work
+        self.assertIn("blocker 01 was dropped",
+                      self.add([{"id": "04", "task": "X.", "files": ["x.txt"], "blockers": ["01"]}], expected=1))
+        self.assertNotIn("PENDING 01", self.call("wait", "demo", "--timeout", "0", expected=2))
+        self.assertIn("Awaiting the next lead: nothing.", self.call("handoff", "demo", "--no-notes"))
+        self.assertIn("was dropped", self.verify(expected=1))
+        self.assertIn("was dropped", self.launch(expected=1))
+        self.assertIn("  01  dropped", self.call("resume", "demo"))
+
+    def test_wait_settle_prints_a_rewritten_report_once_with_its_latest_status(self):
+        self.setup_run()
+        (self.repo / ".fleet/runs/demo/reports/01.md").write_text("# Worker report\nStatus: blocked\n\nWhich copy?\n")
+        timer = threading.Timer(0.5, lambda: self.report("01"))
+        timer.start()
+        self.addCleanup(timer.cancel)
+        out = self.call("wait", "demo", "--timeout", "10", "--settle", "2", "--interval", "1")
+        self.assertEqual(out.count("REPORT 01"), 1, out)
+        self.assertIn("REPORT 01 [needs-verification]", out)
+
+    def test_wait_settle_reads_worker_screens_once_more_not_every_second(self):
+        self.setup_run()
+        self.report("01")
+        calls, real = [], fleet.scan_workers
+        with patch.object(fleet, "scan_workers", side_effect=lambda *args: calls.append(1) or real(*args)):
+            self.call("wait", "demo", "--timeout", "10", "--settle", "3", "--interval", "1")
+        self.assertEqual(len(calls), 2)  # the first pass, then once after settling
+
+    def test_launch_ready_that_stops_mid_batch_still_reports_the_rest(self):
+        self.cfg["defaults"]["max_parallel"] = self.cfg["providers"]["writer"]["max"] = 3
+        self.ready_plan({"id": "a", "task": "A.", "files": ["a.txt"]}, {"id": "b", "task": "B.", "files": ["b.txt"]},
+                        {"id": "c", "task": "C.", "files": ["c.txt"]},
+                        {"id": "d", "task": "D.", "files": ["d.txt"], "blockers": ["a"]})
+        real, splits = self.fake_cmux, []
+
+        def cmux(*args, **kwargs):
+            if "new-split" in args:
+                splits.append(args)
+                if len(splits) == 2:
+                    return "OK"  # no surface named: an uncertain launch, after b's record was saved
+            return real(*args, **kwargs)
+
+        with patch.object(fleet, "cmux", side_effect=cmux):
+            out = self.call("launch", "demo", "--ready", expected=1)
+        self.assertIn("LAUNCHED a", out)
+        self.assertIn("SKIPPED d: blocked by a", out)
+        self.assertIn("SKIPPED c: not attempted after b failed", out)
+        self.assertIn("b: uncertain launch", out)
+        self.assertIn("inspect it before launching more", out)
+
+    def test_launch_ready_names_the_pane_limit_and_refuses_settle(self):
+        self.cfg["defaults"]["max_parallel"] = self.cfg["providers"]["writer"]["max"] = 2
+        self.ready_plan({"id": "a", "task": "A.", "files": ["a.txt"]})
+        self.call("launch", "demo", "--ready")
+        self.panes += [{"ref": f"pane:{n}", "surface_refs": ["surface:1"]} for n in range(2, 8)]
+        self.add([{"id": "b", "task": "B.", "files": ["b.txt"], "context": "Scope only.", "checks": "Read it."}])
+        with patch.dict(fleet.os.environ, {"CMUX_SURFACE_ID": "lead"}):
+            out = self.call("launch", "demo", "--ready")
+        self.assertIn("SKIPPED b: pane limit (every pane has a live worker; stop a worker or close a pane)", out)
+        self.assertIn("drop --settle", self.call("launch", "demo", "--ready", "--settle", "2", expected=1))
 
     def scan(self, stall=60):
         seen = self.repo / ".fleet/runs/demo/.seen"
