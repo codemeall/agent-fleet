@@ -621,6 +621,64 @@ class Runtime(unittest.TestCase):
         self.prompt("fix")
         self.launch("fix")
 
+    def ready_plan(self, *tickets):
+        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off")
+        for t in tickets:
+            t.setdefault("provider", "writer")
+            t.setdefault("context", "Agreed scope only.")
+            t.setdefault("checks", "Read the diff.")
+            for key in [k for k, v in t.items() if v is None]:  # None means "leave this field out of the plan"
+                del t[key]
+        self.call("plan", "demo", "--file", self.plan_file(list(tickets)))
+
+    def test_launch_ready_starts_every_ready_ticket_heaviest_first(self):
+        self.cfg["defaults"]["max_parallel"] = self.cfg["providers"]["writer"]["max"] = 3
+        self.ready_plan(
+            {"id": "a-light", "task": "Light.", "files": ["a.txt"], "tier": "light"},
+            {"id": "b-heavy", "task": "Heavy.", "files": ["b.txt"], "tier": "heavy"},
+            {"id": "c-wait", "task": "Waits.", "files": ["c.txt"], "blockers": ["a-light"]},
+            {"id": "d-clash", "task": "Same file.", "files": ["b.txt"]},
+            {"id": "e-bare", "task": "No context.", "files": ["e.txt"], "context": None, "checks": None})
+        out = self.call("launch", "demo", "--ready")
+        launched = [line.split()[1] for line in out.splitlines() if line.startswith("LAUNCHED")]
+        self.assertEqual(launched, ["b-heavy", "a-light"])
+        self.assertIn("LAUNCHED b-heavy writer:writer-model@high heavy surface:", out)
+        self.assertIn("SKIPPED c-wait: blocked by a-light", out)
+        self.assertIn("SKIPPED d-clash: files overlap b-heavy", out)
+        self.assertIn("SKIPPED e-bare: prompt incomplete", out)
+        self.assertNotIn("screen after", out)
+        self.assertTrue((self.repo / ".fleet/runs/demo/prompts/a-light.md").exists())
+        self.assertIn("NONE ready", self.call("launch", "demo", "--ready"))
+
+    def test_launch_ready_respects_capacity_and_counts_a_steered_provider(self):
+        self.cfg["defaults"]["max_parallel"] = 3  # writer and reviewer each allow 1
+        self.ready_plan({"id": "x", "task": "X.", "files": ["x.txt"]},
+                        {"id": "y", "task": "Y.", "files": ["y.txt"]},
+                        {"id": "z", "task": "Z.", "files": ["z.txt"]})
+        out = self.call("launch", "demo", "--ready")
+        self.assertEqual(out.count("LAUNCHED"), 1)
+        self.assertIn("SKIPPED y: capacity (writer max)", out)
+        self.call("steer", "provider", "demo", "reviewer")
+        out = self.call("launch", "demo", "--ready")
+        self.assertIn("LAUNCHED y reviewer:reviewer-model@high standard", out)
+        self.assertIn("SKIPPED z: capacity (reviewer max)", out)
+
+    def test_launch_ready_never_relaunches_a_ticket_that_already_had_a_worker(self):
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"]}])
+        self.launch()
+        self.receipt(returncode=1)
+        self.call("status", "demo")  # reconciles the exit; the ticket is still pending and unverified
+        self.assertIn("NONE ready", self.call("launch", "demo", "--ready"))
+
+    def test_launch_ready_is_refused_on_hold_and_alongside_a_ticket(self):
+        self.setup_run()
+        self.call("hold")
+        self.assertIn("on hold", self.call("launch", "demo", "--ready", expected=1))
+        self.call("release")
+        out = self.call("launch", "demo", "01", "writer", "--tier", "standard", "--ready", expected=1)
+        self.assertIn("drop <id>, <provider>, --tier", out)
+        self.assertIn("launch needs <id> <provider>", self.call("launch", "demo", expected=1))
+
     def scan(self, stall=60):
         seen = self.repo / ".fleet/runs/demo/.seen"
         return fleet.scan_workers(self.repo, self.state(), seen, stall)

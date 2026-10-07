@@ -330,6 +330,11 @@ def hold_text(hold: dict) -> str:
     return f"launches are on hold since {hold['since']}" + (f" ({hold['reason']})" if hold.get("reason") else "")
 
 
+def hold_refusal(hold: dict) -> FleetError:
+    return FleetError(f"{hold_text(hold)}. Do not retry: verify running workers, tell the owner, and end your turn "
+                      "(do not run `fleet stop`) until they ask for `fleet release`")
+
+
 def worker(state: dict, ticket_id: str) -> dict:
     valid_id(ticket_id)
     w = state["workers"].get(ticket_id)
@@ -1010,12 +1015,12 @@ def cmd_prompt(a, cfg):
             print(f"fill before launch: {', '.join(todo)} (or add them to the plan)")
 
 
-def cmd_launch(a, cfg):
+def launch_one(a, cfg) -> tuple[str, dict]:
+    """Launch one planned ticket or reviewer; returns its tab label and worker record."""
     repo = repo_root()
     hold = load_hold(repo)
     if hold:
-        raise FleetError(f"{hold_text(hold)}. Do not retry: verify running workers, tell the owner, and end your turn "
-                         "(do not run `fleet stop`) until they ask for `fleet release`")
+        raise hold_refusal(hold)
     ensure_other_runs_idle(repo, a.run)
     state = load_run(repo, a.run)
     valid_id(a.id)
@@ -1163,9 +1168,104 @@ def cmd_launch(a, cfg):
         save_run(repo, a.run, state)
     label = f"{a.id} · {a.provider}:{model}" + (f"@{effort}" if effort else "")
     sh(["cmux", "rename-tab", "--workspace", state["workspace"], "--surface", w["surface"], label], check=False)
-    print(f"{a.id}: {label} on {w['surface']}")
     if a.settle:  # outside the lock: a read-only look must not hold up the lead's next command
         a.unlocked = lambda: print_start_screen(state["workspace"], surface_target(w), a.settle)
+    return label, w
+
+
+READY_EXCLUSIVE = {"id": "<id>", "provider": "<provider>", "tier": "--tier", "model": "--model",
+                   "effort": "--effort", "family": "--family"}
+
+
+def ready_tickets(state: dict, live: dict, cfg: dict, prompts: Path) -> tuple[list[str], dict[str, str]]:
+    """What `launch --ready` starts now: never-launched pending tickets with verified blockers, files clear of
+    running and already-picked work, a complete (or writable) prompt, and room under max_parallel and the
+    provider's max, counted on the steered provider when a steer is active. Heaviest first, then plan order.
+    Also returns why each other never-launched ticket waits."""
+    tickets = state["tickets"]
+    running = active(state)
+    taken = [(w.get("review_of") or w["id"], tickets[w.get("review_of") or w["id"]]["files"]) for w in running]
+    slots = state["options"]["max_parallel"] - len(running)
+    load: dict[str, int] = {}
+    for w in running:
+        load[w["provider"]] = load.get(w["provider"], 0) + 1
+    picked, why = [], {}
+    # A ticket that already had a worker is the lead's to repair or relaunch, never --ready's.
+    waiting = [i for i, t in tickets.items() if t["status"] == "pending" and i not in state["workers"]]
+    for i in sorted(waiting, key=lambda i: TIER_ORDER.index(tickets[i]["tier"])):
+        t = tickets[i]
+        name = live.get("provider") or t["provider"]
+        blockers = [b for b in t["blockers"] if tickets[b]["status"] != "verified"]
+        clash = next((j for j, files in taken if scopes_overlap(t["files"], files)), None)
+        prompt = prompts / f"{i}.md"
+        unfilled = unfilled_fields(prompt.read_text()) if i in state["prompts"] and prompt.exists() else []
+        if blockers:
+            why[i] = f"blocked by {', '.join(blockers)}"
+        elif clash:
+            why[i] = f"files overlap {clash}"
+        elif unfilled:
+            why[i] = f"prompt incomplete: fill {', '.join(unfilled)} in {prompt}"
+        elif i not in state["prompts"] and not (t.get("context") and t.get("checks")):
+            why[i] = "prompt incomplete: the plan has no context or checks; fleet prompt it and fill the LEAD comments"
+        elif slots <= 0:
+            why[i] = "capacity (max_parallel)"
+        elif load.get(name, 0) >= provider(cfg, name).get("max", 2):
+            why[i] = f"capacity ({name} max)"
+        else:
+            picked.append(i)
+            taken.append((i, t["files"]))
+            slots -= 1
+            load[name] = load.get(name, 0) + 1
+    return picked, why
+
+
+def launch_ready(a, cfg):
+    """Launch every ticket that can start now, each on its saved assignment (or the steer), in one call."""
+    extra = [flag for key, flag in READY_EXCLUSIVE.items() if getattr(a, key) is not None]
+    if a.resume:
+        extra.append("--resume")
+    if extra:
+        raise FleetError(f"--ready launches each ticket on its saved assignment; drop {', '.join(extra)}")
+    repo = repo_root()
+    if hold := load_hold(repo):
+        raise hold_refusal(hold)
+    ensure_other_runs_idle(repo, a.run)
+    state = load_run(repo, a.run)
+    reconcile(repo, state)
+    save_run(repo, a.run, state)
+    picked, why = ready_tickets(state, load_live_state(repo, a.run), cfg, run_dir(repo, a.run) / "prompts")
+    launched = 0
+    for i in picked:
+        t = state["tickets"][i]
+        one = argparse.Namespace(run=a.run, id=i, provider=t["provider"], tier=t["tier"], model=t["model"],
+                                 effort=t["effort"], family=t["family"], pane=a.pane, settle=0, resume=False)
+        try:
+            if i not in load_run(repo, a.run)["prompts"]:
+                cmd_prompt(argparse.Namespace(run=a.run, id=i, ticket=None, review_of=None, diff=None, force=False,
+                                              quiet=True), cfg)
+            label, w = launch_one(one, cfg)
+        except FleetError as e:
+            if i in load_run(repo, a.run)["workers"]:  # it reached cmux: the lead must inspect it first
+                raise FleetError(f"{i}: {e}; inspect it before launching more") from None
+            why[i] = str(e)
+            continue
+        launched += 1
+        effort = f"@{w['effort']}" if w.get("effort") else ""
+        print(f"LAUNCHED {i} {w['provider']}:{w['model']}{effort} {w['tier']} {w['surface']}")
+    for i, reason in why.items():
+        print(f"SKIPPED {i}: {reason}")
+    if not launched:
+        print("NONE ready")
+
+
+def cmd_launch(a, cfg):
+    if a.ready:
+        return launch_ready(a, cfg)
+    if a.id is None or a.provider is None:
+        raise FleetError("launch needs <id> <provider> [--tier …], or --ready to launch every ready ticket")
+    a.tier = a.tier or "standard"
+    label, w = launch_one(a, cfg)
+    print(f"{a.id}: {label} on {w['surface']}")
 
 
 def screen_tail(screen: str, lines: int) -> str:
@@ -2184,9 +2284,9 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("launch", help=f"launch a worker in a new cmux pane; at {MAX_PANES} panes, replace a finished worker's pane "
                        "or add a tab to an idle one")
     s.add_argument("run")
-    s.add_argument("id")
-    s.add_argument("provider")
-    s.add_argument("--tier", choices=["heavy", "standard", "light", "review"], default="standard")
+    s.add_argument("id", nargs="?")
+    s.add_argument("provider", nargs="?")
+    s.add_argument("--tier", choices=["heavy", "standard", "light", "review"], help="default standard")
     s.add_argument("--model")
     s.add_argument("--effort")
     s.add_argument("--family", help="known family for an account-specific model override")
@@ -2196,6 +2296,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="seconds before launch prints the worker's screen (0 skips it)")
     s.add_argument("--resume", action="store_true",
                    help="continue the stopped worker's own CLI session (same account), e.g. after a usage limit resets")
+    s.add_argument("--ready", action="store_true",
+                   help="launch every ticket that can start now on its saved assignment; no screens are printed")
     s.set_defaults(fn=cmd_launch)
 
     s = sub.add_parser("send", help="type a message into a worker's pane and press enter")
@@ -2277,7 +2379,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "version":  # no config: a broken config must not hide the version
         return cmd_version(a, None) or 0
     try:
-        if hasattr(a, "id"):
+        if getattr(a, "id", None) is not None:  # launch --ready names no ticket
             valid_id(a.id)
         if hasattr(a, "run"):
             valid_id(a.run)
