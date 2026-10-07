@@ -25,6 +25,9 @@
 # extends: copy another adapter (all fields except `enabled`) and override some, e.g. a second
 #   subscription: extends = "claude" + env = { CLAUDE_CONFIG_DIR = "~/.claude-co" }.
 #   `fleet account add <name> --from <adapter> --dir <path>` writes one for you.
+# trust: how launch marks the repo trusted when [defaults] auto_trust = true (off by default):
+#   claude-config sets the project's hasTrustDialogAccepted in the account's .claude.json, codex-flag passes the
+#   trust as a session-only -c override, agy-settings adds the repo to agy's trustedWorkspaces.
 
 [providers.claude]
 enabled = true
@@ -36,6 +39,7 @@ quit = ["/exit", "enter"]
 login = "claude auth status"
 login_ok = '"loggedIn": true'
 account_env = "CLAUDE_CONFIG_DIR"
+trust = "claude-config"
 model_note = "aliases follow the current model"
 models_allow = ["opus", "sonnet"]
 efforts = ["low", "medium", "high", "xhigh", "max"]    # from `claude --help`; per-model support is checked only at launch
@@ -58,11 +62,13 @@ max = 1
 [providers.codex]
 enabled = true
 bin = "codex"
-launch = "{bin} -m {model} -c model_reasoning_effort={effort} -s workspace-write -a on-request {prompt}"
+# check_for_update_on_startup=false: an "Update available" screen would stall a worker before its prompt runs.
+launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c check_for_update_on_startup=false -s workspace-write -a on-request {prompt}"
 quit = ["/quit", "enter"]
 login = "codex login status"
 login_ok = "Logged in"
 account_env = "CODEX_HOME"
+trust = "codex-flag"
 models = "codex debug models"
 model_config = "config.toml"
 default_home = "~/.codex"
@@ -98,6 +104,7 @@ tiers.review = { model = "muse-spark-1.3-max", family = "meta" }
 enabled = false
 bin = "agy"
 launch = "{bin} --model {model} --effort {effort} --mode accept-edits -i {prompt}"
+trust = "agy-settings"
 quit = ["/exit", "enter"]
 login = "agy models"
 login_ok = "gemini"

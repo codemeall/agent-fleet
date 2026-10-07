@@ -157,7 +157,7 @@ Starts the worker in its own cmux pane with the prompt. The provider, tier and p
 
 Each worker gets its own pane. Up to 8 panes in the workspace, launch splits the largest one. At 8 it replaces a pane (never the lead's) that holds only verified workers whose exit is confirmed, closing their surfaces. Failing that, it adds a tab to an idle pane (one with no live worker), so an unverified worker keeps its scrollback. When every other pane has a live worker, it refuses before touching the run.
 
-Launch ends by printing the last lines of the worker's screen, 5 seconds in, so a login, trust, model or permission prompt shows without a `peek`:
+Launch ends by printing the last lines of the worker's screen, 5 seconds in, so a login, trust, model or permission prompt shows without a `peek` (with the owner's `auto_trust` on, launch marks the repo trusted first; see [Folder trust](providers.md#folder-trust)):
 
 ```text
 api-client: api-client · codex:gpt-6-sol@high on surface:7
@@ -194,7 +194,7 @@ fleet send <run> <id> <text ...>
 
 Types the text into the worker's pane and presses Enter. `wait` then expects a response, so a silent worker shows as `STALLED`.
 
-**Use:** answering a `blocked` report, or sending a bounded fix list after setting the report to `Status: changes-requested`. Save decisions to `notes.md`. Never use it to accept a permission or login prompt for the owner.
+**Use:** answering a `blocked` report, or sending a bounded fix list after setting the report to `Status: changes-requested`. Save decisions to `notes.md`. Never use it to accept a trust, permission or login prompt for the owner. Trust prompts go away only when the owner sets `auto_trust` ([Folder trust](providers.md#folder-trust)).
 
 ## Watching
 

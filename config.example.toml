@@ -5,6 +5,9 @@ routing = "auto"
 prefer = ["claude", "codex", "cursor"]
 max_parallel = 3
 review = "cross-heavy"
+# Mark the repo trusted in Claude, Codex and Antigravity before each launch, so their first-run
+# "trust this folder?" screen does not stall a worker. Off by default; only the owner turns it on.
+# auto_trust = true
 
 # Optional lead context marks in tokens (none by default). Run commands then show the lead's size from warn_at and
 # dumb_at; the lead only tells you, and hands off or prepares for compaction when you ask (fleet handoff).

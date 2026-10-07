@@ -19,7 +19,7 @@ Optional companion skills for the lead: `cmux` from `manaflow-ai/cmux`, `grill-w
 2. Confirm cmux is running and the intended workspace exists. Inside cmux the current workspace can be used; otherwise supply `fleet init <run> --workspace <ref>` explicitly.
 3. Run `fleet doctor`; diagnose its actual socket, executable or authentication error.
 4. If the host blocks a required operation, use its normal approval mechanism or have the owner configure a narrow allowance. Consult documentation for that installed host version. Do not disable the sandbox, switch permission modes or route to another harness to evade a rejection.
-5. Launch one small, scoped ticket and inspect it with `fleet peek` before starting a larger wave. Trust, authentication and model selection may still need owner input.
+5. Launch one small, scoped ticket and inspect it with `fleet peek` before starting a larger wave. Trust (unless the owner set `auto_trust`), authentication and model selection may still need owner input.
 
 Claude permission classifiers, Codex sandbox profiles, Cursor allowances and remote-session topology vary by version. There is no universal setup flag that safely fixes all of them. Fleet's bundled launch configuration does not override host restrictions. A cloud-only chat can help plan the work but requires an explicit local execution connection to operate this fleet.
 

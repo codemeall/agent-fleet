@@ -4,6 +4,18 @@
 
 All model IDs and efforts are examples tied to accounts and CLI versions. Before routing, authenticate through the owner's normal process. `doctor` checks binary presence and login signals, including the login command's exit status, and checks every tier model against the account's list where the CLI can list models (`models` field: Cursor, Antigravity, OpenCode, and Codex through `codex debug models`, which also lists each model's efforts). For Codex doctor also shows the configured default from `config.toml`; Claude's `opus`/`sonnet` aliases follow the current model. Doctor spends no model call and does not guarantee model access. A passing doctor is a preflight check, not an end-to-end compatibility claim.
 
+## Folder trust
+
+Claude Code, Codex and Antigravity ask once per folder whether to trust it. With `auto_trust = true` under `[defaults]` in the owner's `~/.config/agent-fleet/config.toml` (off by default), launch marks the repo trusted first, the way each adapter's `trust` field says:
+
+| `trust` | CLI | What launch does |
+|---|---|---|
+| `claude-config` | Claude Code and its extra accounts | sets the project's `hasTrustDialogAccepted` in that account's `.claude.json` (`CLAUDE_CONFIG_DIR`, else `~`) |
+| `codex-flag` | Codex | passes `-c projects={"<repo>"={trust_level="trusted"}}`: trust for that session only, nothing saved |
+| `agy-settings` | Antigravity | adds the repo to `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json` |
+
+Cursor always launches with `--trust`; OpenCode asks nothing. Launch never creates a CLI's file: a CLI that has not run yet, or a file it cannot read or write, gets one stderr line and the worker shows its trust screen as before. `auto_trust` is the owner's decision. The lead never turns it on, and never answers a trust, login or permission prompt with `fleet send`.
+
 ## Keeping models current
 
 Tier models are pinned on purpose: plans record the exact model and cross-family review needs a known family. When a provider ships new models, `fleet models <provider> [filter]` lists what the account offers, then override the tier in the user config (with `family` for a mixed adapter) and run `fleet doctor`. No Fleet release is needed. Shipped defaults are refreshed in releases and noted in the changelog.
@@ -55,7 +67,7 @@ A Codex worker that needs an approval waits in its pane until the owner answers,
 
 ```toml
 [providers.codex]
-launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c approvals_reviewer=auto_review -s workspace-write -a on-request {prompt}"
+launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c check_for_update_on_startup=false -c approvals_reviewer=auto_review -s workspace-write -a on-request {prompt}"
 ```
 
 This is approval routing inside Codex. It is unrelated to Fleet's cross-family review of a ticket's diff, which `review=` controls.
@@ -64,7 +76,7 @@ Use model IDs and effort levels supported by the authenticated account. The ship
 
 ## Cursor
 
-The default launches `cursor-agent` with the chosen model and repository trust, retaining interactive permission handling; it does not use `--force`. A trusted workspace is not permission for an arbitrary command. Inspect trust or command prompts as part of launch verification.
+The default launches `cursor-agent` with the chosen model and repository trust, retaining interactive permission handling; it does not use `--force`. `--trust` is in the shipped launch line, so Cursor is trusted with or without `auto_trust`. A trusted workspace is not permission for an arbitrary command. Inspect trust or command prompts as part of launch verification.
 
 Cursor can serve several families. The example tiers identify xAI (`grok-…`), Moonshot (`kimi-…`) and Meta (`muse-…`) separately. Use `cursor-agent --list-models` to confirm your account's exact IDs; parameterized IDs must remain a single argument. A model override needs accurate family metadata, especially for cross-family review. A different CLI name alone is not evidence of a different family.
 
@@ -73,7 +85,7 @@ Cursor can serve several families. The example tiers identify xAI (`grok-…`), 
 `agy` ships disabled; enable it with `[providers.agy] enabled = true` once `fleet doctor agy` passes. It was checked live with agy 1.3.0: launch with an interactive first prompt (`-i`), follow-up input, `/exit` back to the shell, `doctor` and `fleet models agy`. `/exit` is the verified quit sequence.
 
 - It runs in `accept-edits` mode: file edits are approved automatically, shell commands still ask. A worker's checks (even `git status`) wait at a prompt until someone answers it in the pane, so watch `fleet peek` after launch.
-- On first use in a folder it asks whether to trust it. Fleet does not answer that for you; the owner does, once per checkout.
+- On first use in a folder it asks whether to trust it. With `auto_trust` on, launch adds the repo to its trusted workspaces first ([Folder trust](#folder-trust)); otherwise the owner answers, once per checkout.
 - The model ID names a thinking level (`gemini-3.8-flash-medium`) and `--effort` sets reasoning effort; tiers set both.
 - Its account also offers Claude and GPT-OSS models. `model_families` labels every listed model (Gemini as Google), so an Antigravity Claude model cannot review a Claude writer. A model agy adds later needs an entry there, or `--family`, before it can take part in cross-family review.
 - It cannot name a session at launch (only resume one with `--conversation`), so `fleet launch --resume` does not apply.

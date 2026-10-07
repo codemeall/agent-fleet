@@ -14,6 +14,8 @@ Hand the lead work mid-conversation, without a ticket folder, and run it beside 
 - `fleet launch --ready` names the pane limit in its skip line, lists the tickets it did not attempt when a launch fails mid-batch, and refuses `--settle` (it prints no screens).
 - `fleet wait --settle` reads worker screens once after settling instead of every second, and prints a report rewritten while settling once, with its latest status.
 - `fleet verify` no longer tells you to update a source ticket for an inline task.
+- `auto_trust = true` under `[defaults]` (off by default) has launch mark the repo trusted in Claude Code (the account's `.claude.json`), Codex (a session-only `-c` override) and Antigravity (`trustedWorkspaces`), so a worker no longer waits at the CLI's "trust this folder?" screen. A new adapter field, `trust`, names the method; a file launch cannot update only warns.
+- Codex workers launch with `-c check_for_update_on_startup=false`, so Codex's "Update available" screen no longer stalls a worker before its prompt runs. Update Codex yourself.
 - The skill's slash menu shows an `argument-hint`, the fallback launch line runs `bin/fleet` through `python3` so a dropped executable bit cannot block it, the recovery step says pane everywhere, and the worked examples open with a contents list.
 
 ## 0.1.0-preview.19

@@ -51,6 +51,7 @@ DEFAULTS = {
     "prefer": ["claude", "codex", "cursor"],
     "max_parallel": 6,
     "review": "cross-heavy",
+    "auto_trust": False,  # the owner's opt-in: mark the repo trusted in each worker CLI before launch
 }
 STATUS_RE = re.compile(r"^\s*[*_`]*\s*status\s*[*_`]*\s*:\s*[*_`]*\s*(.+?)\s*[*_`]*\s*$", re.I)
 SURFACE_RE = re.compile(r"(surface:\d+)(?: \(([^)\s]+)\))?")  # the UUID follows when cmux is asked for both
@@ -106,6 +107,8 @@ def load_config(user_path: Path | None = None) -> dict:
         raise FleetError("defaults.max_parallel must be a positive integer")
     if cfg["defaults"]["review"] not in ("off", "cross-heavy", "cross-all"):
         raise FleetError("invalid defaults.review")
+    if not isinstance(cfg["defaults"]["auto_trust"], bool):
+        raise FleetError("defaults.auto_trust must be true or false")
     for name, adapter in cfg["providers"].items():
         if not isinstance(adapter.get("max", 2), int) or adapter.get("max", 2) < 1:
             raise FleetError(f"{name}.max must be a positive integer")
@@ -117,6 +120,8 @@ def load_config(user_path: Path | None = None) -> dict:
             raise FleetError(f"{name}.models_allow must be a list of model IDs or a table of model ID = family")
         if not (isinstance(adapter.get("efforts", []), list) and all(isinstance(e, str) for e in adapter.get("efforts", []))):
             raise FleetError(f"{name}.efforts must be a list of effort levels")
+        if adapter.get("trust") not in (None, *TRUST_METHODS):
+            raise FleetError(f"{name}.trust must be one of {', '.join(TRUST_METHODS)}")
     cfg["lead_context"] = lead_context_config(cfg.get("lead_context", {}))
     return cfg
 
@@ -200,15 +205,86 @@ def resumable(pcfg: dict) -> bool:
 
 
 def build_launch(pcfg: dict, model: str, effort: str | None, prompt: str,
-                 session: str | None = None, resume: bool = False) -> str:
+                 session: str | None = None, resume: bool = False, trust: str = "") -> str:
     template = pcfg["launch"]
     if "{effort}" in template and not effort:
         raise FleetError("this provider's launch needs an effort: pass --effort or set it on the tier")
     flag = pcfg["resume" if resume else "session"].format(id=shlex.quote(session)) if session and resumable(pcfg) else ""
     if not flag:
         template = template.replace(" {session}", "").replace("{session}", "")
-    return env_prefix(pcfg) + template.format(bin=pcfg["bin"], session=flag, model=shlex.quote(model),
+    return env_prefix(pcfg) + template.format(bin=pcfg["bin"] + (" " + trust if trust else ""), session=flag, model=shlex.quote(model),
                                               effort=shlex.quote(effort or ""), prompt=shlex.quote(prompt))
+
+
+# ---------- folder trust ----------
+# With defaults.auto_trust, launch marks the repo trusted where the worker's CLI keeps folder trust, so its
+# first-run "trust this folder?" screen does not stall the worker. An adapter's `trust` names the method.
+
+AGY_SETTINGS = "~/.gemini/antigravity-cli/settings.json"
+
+
+def update_json(path: Path, change) -> None:
+    """Apply change(data), which says whether it changed anything, to a CLI's own JSON file. Replaces the file
+    atomically with its mode kept, and never creates one: a CLI that has not run yet has nothing to trust."""
+    data = json.loads(path.read_text())
+    if not change(data):
+        return
+    temp = path.with_name(f".{path.name}.fleet.{uuid.uuid4().hex}")
+    try:
+        temp.write_text(json.dumps(data, indent=2))
+        temp.chmod(path.stat().st_mode & 0o777)
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def trust_claude(pcfg: dict, repo: str) -> None:
+    """Claude keeps trust per project in .claude.json under the adapter's own account dir, else the home dir."""
+    sets, _ = account_env(pcfg)
+    home = sets.get(pcfg.get("account_env") or "")
+    def change(data):
+        entry = data.setdefault("projects", {}).setdefault(repo, {})
+        if entry.get("hasTrustDialogAccepted") is True:
+            return False
+        entry["hasTrustDialogAccepted"] = True
+        return True
+    update_json(Path(home) / ".claude.json" if home else Path.home() / ".claude.json", change)
+
+
+def trust_agy(pcfg: dict, repo: str) -> None:
+    def change(data):
+        trusted = data.setdefault("trustedWorkspaces", [])
+        if repo in trusted:
+            return False
+        trusted.append(repo)
+        return True
+    update_json(Path(AGY_SETTINGS).expanduser(), change)
+
+
+def codex_trust_args(repo: str) -> str:
+    """Codex takes the trust for this session as a config override and saves nothing. Only the inline-table form
+    works: a dotted key cannot hold a path."""
+    return "-c " + shlex.quote("projects={" + json.dumps(repo) + '={trust_level="trusted"}}')
+
+
+TRUST_METHODS = {"claude-config": trust_claude, "agy-settings": trust_agy, "codex-flag": None}
+
+
+def prepare_trust(cfg: dict, name: str, pcfg: dict, repo: Path) -> str:
+    """Launch arguments that mark repo trusted, after writing any file the CLI reads trust from; "" with auto_trust
+    off. A failed write only warns: the worker then shows its trust screen for the owner, as without auto_trust."""
+    method = pcfg.get("trust")
+    if not cfg["defaults"].get("auto_trust") or not method:
+        return ""
+    path = str(repo.resolve())
+    if method == "codex-flag":
+        return codex_trust_args(path)
+    try:
+        TRUST_METHODS[method](pcfg, path)
+    except (OSError, ValueError, AttributeError, TypeError) as e:
+        print(f"auto_trust: could not mark the repo trusted for {name} ({str(e).strip()[:120]}); "
+              "its trust screen will show", file=sys.stderr)
+    return ""
 
 
 def worker_prompt_line(prompt_path: Path, ticket_id: str) -> str:
@@ -1171,7 +1247,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         report.replace(d / "reports" / f"{a.id}.{uuid.uuid4().hex}.previous")
     token = uuid.uuid4().hex
     line = resume_prompt_line(prompt_path, a.id, report) if a.resume else worker_prompt_line(prompt_path, a.id)
-    command = build_launch(pcfg, model, effort, line, session, a.resume)
+    command = build_launch(pcfg, model, effort, line, session, a.resume, prepare_trust(cfg, a.provider, pcfg, repo))
     exit_file = d / "exits" / f"{a.id}.{token}.json"
     wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_run", str(exit_file), token, command])
     # Persist before launch: an uncertain cmux result must not silently free capacity.

@@ -5,10 +5,12 @@ import io
 import importlib.util
 import json
 import os
+import shlex
 import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 # The suite may run inside a Claude Code or Codex session; its own context must not leak into Fleet output.
@@ -39,7 +41,8 @@ class ProviderConfig(unittest.TestCase):
         p = self.cfg["providers"]
         self.assertEqual(
             fleet.build_launch(p["codex"], "gpt-6-sol", "high", "go"),
-            "env -u CODEX_HOME codex -m gpt-6-sol -c model_reasoning_effort=high -s workspace-write -a on-request go")
+            "env -u CODEX_HOME codex -m gpt-6-sol -c model_reasoning_effort=high -c check_for_update_on_startup=false "
+            "-s workspace-write -a on-request go")
         self.assertEqual(
             fleet.build_launch(p["cursor"], "grok-4.7-high", None, "go"),
             "cursor-agent --model grok-4.7-high --trust go")
@@ -106,6 +109,85 @@ class ProviderConfig(unittest.TestCase):
     def test_example_config_parses(self):
         with open(ROOT / "config.example.toml", "rb") as fh:
             tomllib.load(fh)
+
+
+class AutoTrust(unittest.TestCase):
+    """Launch marks the repo trusted per CLI only when the owner sets auto_trust; never touches the real home."""
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.home = Path(temp.name).resolve()
+        self.repo = self.home / "my repo"
+        self.repo.mkdir()
+        env = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        env.start()
+        self.addCleanup(env.stop)
+        self.cfg = fleet.load_config(Path("/nonexistent/config.toml"))
+        self.cfg["defaults"]["auto_trust"] = True
+        self.claude = self.home / ".claude.json"
+        self.claude.write_text(json.dumps({"projects": {"/other": {"hasTrustDialogAccepted": False}}, "n": 1}))
+        self.claude.chmod(0o600)
+        self.co = self.home / ".claude-co"
+        self.co.mkdir()
+        (self.co / ".claude.json").write_text("{}")
+        self.agy = self.home / ".gemini/antigravity-cli/settings.json"
+        self.agy.parent.mkdir(parents=True)
+        self.agy.write_text(json.dumps({"trustedWorkspaces": ["/Users/x"], "theme": "dark"}))
+
+    def trust(self, name):
+        return fleet.prepare_trust(self.cfg, name, self.cfg["providers"][name], self.repo)
+
+    def test_off_by_default_and_changes_nothing(self):
+        self.assertFalse(fleet.load_config(Path("/nonexistent/config.toml"))["defaults"]["auto_trust"])
+        self.cfg["defaults"]["auto_trust"] = False
+        before = {p: p.read_text() for p in (self.claude, self.agy)}
+        for name in ("claude", "claude-co", "codex", "agy", "cursor"):
+            self.assertEqual(self.trust(name), "")
+        self.assertEqual({p: p.read_text() for p in before}, before)
+
+    def test_codex_gets_a_session_only_inline_table_override(self):
+        args = self.trust("codex")
+        self.assertEqual(shlex.split(args), ["-c", 'projects={"' + str(self.repo) + '"={trust_level="trusted"}}'])
+        self.assertTrue(fleet.build_launch(self.cfg["providers"]["codex"], "m", "high", "go", trust=args)
+                        .startswith("env -u CODEX_HOME codex -c "))
+
+    def test_claude_writes_its_own_account_file_once_and_keeps_the_rest(self):
+        self.assertEqual(self.trust("claude"), "")
+        data = json.loads(self.claude.read_text())
+        self.assertTrue(data["projects"][str(self.repo)]["hasTrustDialogAccepted"])
+        self.assertEqual((data["n"], data["projects"]["/other"]), (1, {"hasTrustDialogAccepted": False}))
+        self.assertEqual(self.claude.stat().st_mode & 0o777, 0o600)
+        mtime = self.claude.stat().st_mtime_ns
+        self.trust("claude")
+        self.assertEqual(self.claude.stat().st_mtime_ns, mtime)          # already trusted: no rewrite
+        self.assertEqual(json.loads((self.co / ".claude.json").read_text()), {})
+        self.trust("claude-co")                                           # claude-co: ~/.claude-co, not ~
+        self.assertIn(str(self.repo), json.loads((self.co / ".claude.json").read_text())["projects"])
+        self.assertEqual([p.name for p in self.home.iterdir() if ".fleet." in p.name], [])
+
+    def test_agy_appends_once(self):
+        self.trust("agy")
+        self.trust("agy")
+        self.assertEqual(json.loads(self.agy.read_text()),
+                         {"trustedWorkspaces": ["/Users/x", str(self.repo)], "theme": "dark"})
+
+    def test_a_missing_or_broken_file_only_warns(self):
+        (self.co / ".claude.json").unlink()
+        self.claude.write_text("{not json")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(self.trust("claude"), "")
+            self.assertEqual(self.trust("claude-co"), "")
+        self.assertFalse((self.co / ".claude.json").exists())             # never created
+        self.assertEqual(err.getvalue().count("its trust screen will show"), 2)
+
+    def test_config_rejects_bad_values(self):
+        for text, msg in (("[defaults]\nauto_trust = \"yes\"\n", "auto_trust"),
+                          ("[providers.codex]\ntrust = \"nope\"\n", "codex.trust")):
+            path = self.home / "bad.toml"
+            path.write_text(text)
+            with self.assertRaisesRegex(fleet.FleetError, msg):
+                fleet.load_config(path)
 
 
 class Reports(unittest.TestCase):

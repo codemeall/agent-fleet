@@ -902,6 +902,20 @@ class Runtime(unittest.TestCase):
         self.report()                                                       # no appendix: the whole report is the summary
         self.assertTrue(self.call("wait", "demo", "--timeout", "0").startswith(f"REPORT 01 [needs-verification] {report}\n"))
 
+    def test_launch_marks_the_repo_trusted_only_with_auto_trust(self):
+        self.cfg["providers"]["writer"]["trust"] = "codex-flag"
+        self.setup_run()
+        self.launch()
+        self.assertNotIn("projects=", self.state()["workers"]["01"]["command"])
+        self.call("stop", "demo", "01", "--timeout", "0", expected=1)
+        self.receipt()
+        self.call("status", "demo")
+        self.cfg["defaults"]["auto_trust"] = True
+        out = self.launch()
+        self.assertTrue(self.state()["workers"]["01"]["command"].startswith(
+            "unused-test-agent -c " + shlex.quote('projects={"' + str(self.repo) + '"={trust_level="trusted"}}')))
+        self.assertNotIn("trust", out)                                      # silent on success
+
     def test_launch_splits_a_new_pane_instead_of_adding_a_tab(self):
         self.setup_run()
         self.panes.append({"ref": "pane:2", "surface_refs": ["surface:shell"], "pixel_frame": {"width": 600, "height": 900}})
