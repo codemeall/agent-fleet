@@ -61,6 +61,8 @@ PROMPT_FIELDS = {  # optional per-ticket plan fields that complete a worker prom
     "context": "agreed spec and testing decisions; actual glossary/ADR paths; existing edits to preserve",
     "checks": "exact bounded commands, working directory and success criteria; say explicitly if manual prose review is sufficient",
 }
+TICKET_KINDS = ("implement", "investigate")  # investigate: read-only research or debugging; owns no files
+TIER_ORDER = ("heavy", "standard", "light")  # launch --ready takes consequential work first
 PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
 TEMPLATE_KEYS = {"id", "ticket", "report", "repo", "files", "diff", "review_of", *PROMPT_FIELDS}
 WAIT_MAX = 600  # Claude Code's longest foreground command timeout; other hosts may allow less
@@ -768,63 +770,79 @@ def cmd_init(a, cfg):
           f"Next: fleet plan {a.run} --file <plan.json>")
 
 
-def cmd_plan(a, cfg):
-    repo = repo_root()
-    state = load_run(repo, a.run)
-    if state["workers"]:
-        raise FleetError("plan is frozen after the first launch; record decisions in run notes, or start another run after stopping workers")
-    data = json.loads(Path(a.file).read_text())
-    tickets = {}
-    pool = routing_pool(state["options"]["routing"], cfg)
-    for raw in data["tickets"]:
-        t = dict(raw)
-        i = valid_id(t["id"])
-        if i in tickets:
-            raise FleetError(f"duplicate ticket {i}")
-        if t.get("tier", "standard") not in ("heavy", "standard", "light"):
-            raise FleetError(f"invalid tier for {i}")
-        t["tier"] = t.get("tier", "standard")
-        pcfg = provider(cfg, t["provider"])
-        if not pcfg.get("enabled", True):
-            raise FleetError(f"disabled provider for {i}")
-        if pool is not None:
-            if t["provider"] not in pool:
-                raise FleetError(f"{i}: provider outside selected routing pool")
-            if pool[t["provider"]]:
-                if t.get("model") and t["model"] != pool[t["provider"]]:
-                    raise FleetError(f"{i}: model conflicts with pinned routing")
-                t["model"] = pool[t["provider"]]
-        t["model"], t["effort"] = resolve_model(pcfg, t["tier"], t.get("model"), t.get("effort"))
-        check_allowed(pcfg, t["provider"], t["model"])
-        check_effort(pcfg, t["provider"], t["effort"])
-        t["family"] = model_family(pcfg, t["tier"], t["model"], t.get("family"))
+def validate_ticket(repo: Path, d: Path, state: dict, cfg: dict, pool: dict | None,
+                    raw: dict) -> tuple[dict, str | None]:
+    """One `plan` or `add` entry, checked and normalized. Returns the ticket and, for an inline `task`, the text
+    to write to tasks/<id>.md once every entry has passed; nothing is written here."""
+    t = dict(raw)
+    i = valid_id(t["id"])
+    t["kind"] = t.get("kind", "implement")
+    if t["kind"] not in TICKET_KINDS:
+        raise FleetError(f"{i}: kind must be implement or investigate")
+    if t.get("tier", "standard") not in ("heavy", "standard", "light"):
+        raise FleetError(f"invalid tier for {i}")
+    t["tier"] = t.get("tier", "standard")
+    pcfg = provider(cfg, t["provider"])
+    if not pcfg.get("enabled", True):
+        raise FleetError(f"disabled provider for {i}")
+    if pool is not None:
+        if t["provider"] not in pool:
+            raise FleetError(f"{i}: provider outside selected routing pool")
+        if pool[t["provider"]]:
+            if t.get("model") and t["model"] != pool[t["provider"]]:
+                raise FleetError(f"{i}: model conflicts with pinned routing")
+            t["model"] = pool[t["provider"]]
+    t["model"], t["effort"] = resolve_model(pcfg, t["tier"], t.get("model"), t.get("effort"))
+    check_allowed(pcfg, t["provider"], t["model"])
+    check_effort(pcfg, t["provider"], t["effort"])
+    t["family"] = model_family(pcfg, t["tier"], t["model"], t.get("family"))
+    task = t.pop("task", None)
+    if (task is None) == ("ticket" not in t):
+        raise FleetError(f"{i}: give exactly one of ticket (a local file) or task (inline text)")
+    if task is not None:
+        if not isinstance(task, str) or not task.strip():
+            raise FleetError(f"{i}: task must be nonempty text")
+        task = task.strip()
+        t["ticket"] = str(contained(d, d / "tasks" / f"{i}.md").resolve())
+    else:
         ticket = Path(t["ticket"])
         if not ticket.is_absolute():
             ticket = repo / ticket
         if not ticket.is_file():
             raise FleetError(f"missing local ticket: {ticket}; export remote issues first")
         t["ticket"] = str(ticket.resolve())
+    if t["kind"] == "investigate":
+        if t.get("files"):
+            raise FleetError(f"{i}: an investigate ticket owns no files; name the paths to read in its context")
+        t["files"] = []
+    else:
         if not t.get("files") or not isinstance(t["files"], list):
             raise FleetError(f"{i}: files must be a nonempty list of exact repo-relative paths")
         t["files"] = sorted(set(safe_file(repo, f) for f in t["files"]))
-        t["blockers"] = t.get("blockers", [])
-        if not isinstance(t["blockers"], list):
-            raise FleetError(f"{i}: blockers must be a list")
-        for key in ("context", "checks"):
-            if key not in t:
-                continue
-            value = t[key]
-            if isinstance(value, list) and all(isinstance(x, str) and x.strip() for x in value):
-                value = "\n".join(f"- {x.strip()}" for x in value)
-            if not isinstance(value, str) or not value.strip():
-                raise FleetError(f"{i}: {key} must be nonempty text or a list of nonempty strings; omit it to fill the prompt by hand")
-            t[key] = value.strip()
-        t["status"] = "pending"
-        t["review_required"] = state["options"]["review"] == "cross-all" or (state["options"]["review"] == "cross-heavy" and t["tier"] == "heavy")
-        tickets[i] = t
-    if not tickets:
-        raise FleetError("plan must contain at least one ticket")
+    t["blockers"] = t.get("blockers", [])
+    if not isinstance(t["blockers"], list):
+        raise FleetError(f"{i}: blockers must be a list")
+    for key in ("context", "checks"):
+        if key not in t:
+            continue
+        value = t[key]
+        if isinstance(value, list) and all(isinstance(x, str) and x.strip() for x in value):
+            value = "\n".join(f"- {x.strip()}" for x in value)
+        if not isinstance(value, str) or not value.strip():
+            raise FleetError(f"{i}: {key} must be nonempty text or a list of nonempty strings; omit it to fill the prompt by hand")
+        t[key] = value.strip()
+    t["status"] = "pending"
+    review = state["options"]["review"]
+    # An investigator leaves no diff, so there is nothing for a cross-family reviewer to read.
+    t["review_required"] = t["kind"] == "implement" and (
+        review == "cross-all" or (review == "cross-heavy" and t["tier"] == "heavy"))
+    return t, task
+
+
+def check_graph(tickets: dict) -> None:
+    """Every blocker names a ticket, and no ticket waits on itself through others."""
     visited, visiting = set(), set()
+
     def visit(i):
         if i not in tickets:
             raise FleetError(f"unknown blocker {i}")
@@ -839,6 +857,37 @@ def cmd_plan(a, cfg):
         visited.add(i)
     for i in tickets:
         visit(i)
+
+
+def write_tasks(d: Path, texts: dict[str, str]) -> None:
+    """Inline tasks become ticket files inside the run, so prompts and resume treat them like any ticket."""
+    for i, text in texts.items():
+        path = contained(d, d / "tasks" / f"{i}.md")
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(f"# Task {i}\n\n{text}\n")
+
+
+def cmd_plan(a, cfg):
+    repo = repo_root()
+    state = load_run(repo, a.run)
+    if state["workers"]:
+        raise FleetError("plan is frozen after the first launch; add new tickets with fleet add, record decisions "
+                         "in run notes, or start another run after stopping workers")
+    data = json.loads(Path(a.file).read_text())
+    d = run_dir(repo, a.run)
+    pool = routing_pool(state["options"]["routing"], cfg)
+    tickets, texts = {}, {}
+    for raw in data["tickets"]:
+        t, text = validate_ticket(repo, d, state, cfg, pool, raw)
+        if t["id"] in tickets:
+            raise FleetError(f"duplicate ticket {t['id']}")
+        tickets[t["id"]] = t
+        if text is not None:
+            texts[t["id"]] = text
+    if not tickets:
+        raise FleetError("plan must contain at least one ticket")
+    check_graph(tickets)
+    write_tasks(d, texts)
     state["tickets"] = tickets
     state["decisions"] = data.get("decisions", [])
     save_run(repo, a.run, state)
@@ -1444,7 +1493,9 @@ def cmd_resume(a, cfg):
             model = f"{t['provider']}:{t['model']}" + (f"@{t['effort']}" if t.get("effort") else "")
             ticket = Path(t["ticket"])
             ticket = ticket.relative_to(repo) if ticket.is_relative_to(repo) else ticket
-            print(f"  {i}  {t['status']}  {t['tier']}  {model}  family={t.get('family') or '?'}"
+            mark = "+" if t.get("added_at") else " "  # added to the run after its plan was saved (fleet add)
+            kind = "  investigate" if t.get("kind") == "investigate" else ""
+            print(f" {mark}{i}  {t['status']}  {t['tier']}{kind}  {model}  family={t.get('family') or '?'}"
                   f"{'  review' if t.get('review_required') else ''}  blockers=[{', '.join(t['blockers'])}]"
                   f"  ticket={ticket}  files={', '.join(t['files'])}")
         print("decisions:")

@@ -453,6 +453,64 @@ class Runtime(unittest.TestCase):
             with self.subTest(checks=checks):
                 self.assertIn("checks must be nonempty", self.call("plan", "demo", "--file", str(plan), expected=1))
 
+    def plan_file(self, tickets, decisions=()):
+        plan = self.repo / "plan.json"
+        plan.write_text(json.dumps({"tickets": tickets, "decisions": list(decisions)}))
+        return str(plan)
+
+    def test_plan_writes_an_inline_task_into_the_run(self):
+        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off")
+        self.call("plan", "demo", "--file", self.plan_file([
+            {"id": "fix", "task": "  Make the banner copy shorter.\n", "files": ["owned.txt"], "provider": "writer"}]))
+        t = self.state()["tickets"]["fix"]
+        path = self.repo / ".fleet/runs/demo/tasks/fix.md"
+        self.assertEqual(t["ticket"], str(path.resolve()))
+        self.assertEqual(path.read_text(), "# Task fix\n\nMake the banner copy shorter.\n")
+        self.assertEqual(t["kind"], "implement")
+        self.assertNotIn("task", t)
+        self.prompt("fix")
+        self.launch("fix")
+
+    def test_plan_needs_exactly_one_of_ticket_or_task(self):
+        self.call("init", "demo", "--workspace", "workspace:1")
+        ticket = self.repo / "01.md"
+        ticket.write_text("# 01\n")
+        for entry, message in (({"ticket": str(ticket), "task": "Also inline."}, "exactly one of ticket"),
+                               ({}, "exactly one of ticket"),
+                               ({"task": "  "}, "task must be nonempty")):
+            with self.subTest(entry=entry):
+                plan = self.plan_file([dict(entry, id="01", files=["owned.txt"], provider="writer")])
+                self.assertIn(message, self.call("plan", "demo", "--file", plan, expected=1))
+        self.assertEqual(self.state()["tickets"], {})
+        self.assertFalse((self.repo / ".fleet/runs/demo/tasks").exists())
+
+    def test_plan_applies_each_kinds_file_and_review_rules(self):
+        self.call("init", "demo", "--workspace", "workspace:1", "--review", "cross-all")
+        for entry, message in (({"kind": "investigate", "files": ["owned.txt"]}, "owns no files"),
+                               ({"kind": "implement"}, "files must be a nonempty list"),
+                               ({"kind": "debug", "files": ["owned.txt"]}, "kind must be implement or investigate")):
+            with self.subTest(entry=entry):
+                plan = self.plan_file([dict(entry, id="01", task="Look.", provider="writer")])
+                self.assertIn(message, self.call("plan", "demo", "--file", plan, expected=1))
+        self.call("plan", "demo", "--file", self.plan_file([
+            {"id": "why", "kind": "investigate", "task": "Why?", "provider": "writer"},
+            {"id": "fix", "task": "Fix.", "files": ["owned.txt"], "provider": "writer"}]))
+        tickets = self.state()["tickets"]
+        self.assertEqual((tickets["why"]["files"], tickets["why"]["review_required"]), ([], False))
+        self.assertTrue(tickets["fix"]["review_required"])
+
+    def test_tickets_saved_before_kind_existed_still_launch_verify_and_resume(self):
+        self.setup_run()
+        state = self.state()
+        for t in state["tickets"].values():
+            t.pop("kind")
+        (self.repo / ".fleet/runs/demo/run.json").write_text(json.dumps(state))
+        self.launch()
+        self.report()
+        self.stop_with_receipt()
+        self.verify()
+        self.assertIn("  01  verified  standard  writer:", self.call("resume", "demo"))
+
     def scan(self, stall=60):
         seen = self.repo / ".fleet/runs/demo/.seen"
         return fleet.scan_workers(self.repo, self.state(), seen, stall)
