@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0-preview.21
+
+Workers in a shared checkout handle other workers' edits and the lead's local-server checks.
+
+- The worker preamble says a failure in a file outside the worker's scope is probably another worker's edit in progress: do not fix it, re-run once after a short wait, and report it if it persists.
+- The worker preamble says the ticket's checks run as given, including checks against a local server the owner already runs, so the rule against network calls no longer reads as forbidding them.
+
 ## 0.1.0-preview.20
 
 Hand the lead work mid-conversation, without a ticket folder, and run it beside what is already going.
