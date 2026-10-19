@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fleet: the mechanics of running coding agents in cmux panes.
+"""fleet: the mechanics of running coding agents in cmux panes or headless tmux windows.
 
 The lead agent decides what to run; this tool launches, watches and stops it.
 Standard library only (Python 3.11+), so any harness with a shell can drive it.
@@ -52,6 +52,8 @@ DEFAULTS = {
     "max_parallel": 6,
     "review": "cross-heavy",
     "auto_trust": False,  # the owner's opt-in: mark the repo trusted in each worker CLI before launch
+    "backend": "auto",  # cmux (visible panes), tmux (headless) or auto: cmux inside cmux, else tmux
+    "tmux_socket": "fleet",  # tmux -L name for headless workers; "" uses your default tmux server
 }
 STATUS_RE = re.compile(r"^\s*[*_`]*\s*status\s*[*_`]*\s*:\s*[*_`]*\s*(.+?)\s*[*_`]*\s*$", re.I)
 SURFACE_RE = re.compile(r"(surface:\d+)(?: \(([^)\s]+)\))?")  # the UUID follows when cmux is asked for both
@@ -109,6 +111,10 @@ def load_config(user_path: Path | None = None) -> dict:
         raise FleetError("invalid defaults.review")
     if not isinstance(cfg["defaults"]["auto_trust"], bool):
         raise FleetError("defaults.auto_trust must be true or false")
+    if cfg["defaults"]["backend"] not in ("auto", *BACKENDS):
+        raise FleetError(f"defaults.backend must be auto, {' or '.join(BACKENDS)}")
+    if not isinstance(cfg["defaults"]["tmux_socket"], str) or not re.fullmatch(r"[A-Za-z0-9_-]*", cfg["defaults"]["tmux_socket"]):
+        raise FleetError("defaults.tmux_socket must be a plain name (letters, numbers, - or _), or \"\" for the default server")
     for name, adapter in cfg["providers"].items():
         if not isinstance(adapter.get("max", 2), int) or adapter.get("max", 2) < 1:
             raise FleetError(f"{name}.max must be a positive integer")
@@ -339,6 +345,217 @@ def cmux(*args: str, timeout: int = 30) -> str:
     return sh(["cmux", *args], timeout=timeout)
 
 
+# ---------- terminal backends ----------
+# Each worker runs in a terminal Fleet can read, type into and close. cmux shows workers as visible panes beside
+# the lead (macOS). tmux runs them headless in a detached session the owner can attach to from any terminal.
+# A run keeps the backend it was created with (state["backend"]; runs from before backends existed are cmux).
+
+BACKENDS = ("cmux", "tmux")
+TMUX_SIZE = ("220", "60")  # a detached session has no client to size it, so TUIs render at this size
+TMUX_KEYS = {"enter": "Enter", "ctrl+c": "C-c", "escape": "Escape", "tab": "Tab"}
+# The lead's own session markers must not reach a worker: tmux windows inherit the environment of whoever
+# started the server, and Claude Code refuses to start inside another Claude Code session.
+LEAD_ENV = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CODEX_THREAD_ID",
+            "CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "TMUX", "TMUX_PANE")
+
+
+def pick_backend(requested: str | None, cfg: dict, workspace: str | None) -> str:
+    """The backend for a new run. `auto` keeps every setup that worked before on cmux (inside cmux, or with a
+    workspace named) and otherwise runs workers headless in tmux."""
+    choice = requested or cfg["defaults"]["backend"]
+    if choice != "auto":
+        return choice
+    if workspace or os.environ.get("CMUX_WORKSPACE_ID"):
+        return "cmux"
+    if shutil.which("tmux"):
+        return "tmux"
+    if shutil.which("cmux"):
+        return "cmux"
+    raise FleetError("no terminal backend: run inside cmux (or pass --workspace), or install tmux to run workers headless")
+
+
+def tmux_session_name(repo: Path, run: str) -> str:
+    """One session per run, named for the checkout so two clones with the same run name never share one."""
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", repo.name).strip("-")[:32] or "repo"
+    return f"fleet-{slug}-{run}-{digest(str(repo).encode())[:4]}"
+
+
+def terminal(state: dict):
+    return Tmux(state) if state.get("backend") == "tmux" else Cmux(state)
+
+
+class Cmux:
+    name = "cmux"
+
+    def __init__(self, state: dict):
+        self.ws = state.get("workspace")
+
+    @staticmethod
+    def check(cfg: dict) -> str:
+        cmux("ping", timeout=5)
+        return "ready"
+
+    def where(self) -> str:
+        return f"workspace {self.ws}"
+
+    def place(self, state: dict, want: str | None):
+        return worker_placement(state, want)
+
+    def open(self, state: dict, place, repo: Path, wrapped: str, label: str) -> tuple[str, str | None, str]:
+        """Start `wrapped` in a new surface; returns its ref, its UUID (or None) and why the UUID is missing."""
+        kind, target, direction, _ = place
+        if kind in ("replace", "tab"):  # a new surface in the pane; a replaced pane's old surfaces close in retire
+            args = ["new-surface", "--workspace", self.ws, "--pane", target,
+                    "--working-directory", str(repo), "--command", wrapped, "--focus", "false"]
+        else:  # new-split has no --working-directory
+            args = ["new-split", direction, "--workspace", self.ws, "--surface", target,
+                    "--command", f"cd {shlex.quote(str(repo))} && exec {wrapped}", "--focus", "false"]
+        out = cmux("--id-format", "both", *args)
+        m = SURFACE_RE.search(out)
+        if not m:
+            raise FleetError(f"uncertain launch; inspect cmux before recovery: {out.strip()}")
+        # Refs like surface:4 restart from 1 with cmux, so only the UUID safely names this surface later.
+        surface, sid, why = m.group(1), m.group(2), "cmux did not list it"
+        if not sid:
+            try:
+                sid = listed_surface_uuid(self.ws, surface)
+            except (FleetError, OSError, subprocess.TimeoutExpired, ValueError, KeyError) as e:
+                why = str(e).strip()[:200]
+        sh(["cmux", "rename-tab", "--workspace", self.ws, "--surface", surface, label], check=False)
+        return surface, sid, why
+
+    def retire(self, state: dict, place) -> bool:
+        """Close the surfaces of a replaced pane (verified workers whose exit is confirmed)."""
+        old = place[3]
+        for surface in old:
+            try:
+                cmux("close-surface", "--workspace", self.ws, "--surface", surface)
+            except (FleetError, OSError, subprocess.TimeoutExpired) as e:
+                print(f"could not close finished worker surface {surface}: {str(e).strip()[:200]}", file=sys.stderr)
+                continue
+            for other in state["workers"].values():
+                if other.get("surface_id") == surface and other.get("state") in RETIRED_STATES:
+                    other["state"] = "closed"
+        return bool(old)
+
+    def read(self, w: dict, lines: int) -> str:
+        return cmux("read-screen", "--workspace", self.ws, "--surface", surface_target(w), "--lines", str(lines))
+
+    def send(self, w: dict, items: list[str]) -> None:
+        send_keys(self.ws, surface_target(w), items)
+
+    def close(self, w: dict) -> None:
+        try:
+            cmux("close-surface", "--workspace", self.ws, "--surface", surface_target(w))
+        except FleetError:  # cmux may already have closed the surface when the worker exited
+            if not surface_gone(self.ws, surface_target(w)):
+                raise
+
+    def attach_argv(self, w: dict, read_only: bool = False) -> list[str] | None:
+        return None  # cmux already shows every worker as a tab beside the lead
+
+    def locate(self, w: dict) -> str:
+        return f"cmux tab {w.get('surface', '?')} in workspace {self.ws}"
+
+
+class Tmux:
+    """Workers in windows of one detached tmux session per run, on Fleet's own tmux server (`-L fleet`) unless
+    defaults.tmux_socket names another. A window stays open after its worker exits (remain-on-exit), so its
+    scrollback is still there for the lead; `fleet stop --close` closes it."""
+    name = "tmux"
+
+    def __init__(self, state: dict):
+        self.session = state["workspace"]
+        self.socket = state.get("tmux_socket", "fleet")
+
+    @staticmethod
+    def base(socket: str) -> list[str]:
+        return ["tmux", *(["-L", socket] if socket else [])]
+
+    def tmux(self, *args: str, check: bool = True) -> str:
+        return sh([*self.base(self.socket), *args], timeout=30, check=check)
+
+    @staticmethod
+    def check(cfg: dict) -> str:
+        if not shutil.which("tmux"):
+            raise FleetError("tmux is not installed (brew install tmux, or apt install tmux)")
+        return sh(["tmux", "-V"], timeout=5).strip()
+
+    def where(self) -> str:
+        return f"tmux session {self.session}"
+
+    def place(self, state: dict, want: str | None):
+        if want:
+            raise FleetError("--pane applies to cmux runs; under tmux each worker gets its own window")
+        return None
+
+    def open(self, state: dict, place, repo: Path, wrapped: str, label: str) -> tuple[str, str | None, str]:
+        command = "env " + " ".join(f"-u {name}" for name in LEAD_ENV) + " " + wrapped
+        fmt = "#{pid} #{window_id}"  # the server's pid tells a restarted server's reused window ids apart
+        label = label.replace(" · ", " ")  # tmux mangles non-ASCII names outside a UTF-8 locale
+        exists = subprocess.run([*self.base(self.socket), "has-session", "-t", f"={self.session}"],
+                                capture_output=True, timeout=30).returncode == 0
+        if exists:
+            out = self.tmux("new-window", "-d", "-t", f"={self.session}:", "-n", label, "-c", str(repo),
+                            "-P", "-F", fmt, command)
+        else:
+            out = self.tmux("new-session", "-d", "-s", self.session, "-x", TMUX_SIZE[0], "-y", TMUX_SIZE[1],
+                            "-n", label, "-c", str(repo), "-P", "-F", fmt, command)
+        m = re.fullmatch(r"(\d+) (@\d+)", out.strip())
+        if not m:
+            raise FleetError(f"uncertain launch; inspect tmux before recovery: {out.strip()}")
+        pid, window = m.groups()
+        self.tmux("set-option", "-w", "-t", window, "remain-on-exit", "on", check=False)
+        return window, f"{pid}/{window}", ""
+
+    def retire(self, state: dict, place) -> bool:
+        return False  # windows cost nothing; finished ones stay until stop --close
+
+    def target(self, w: dict) -> str:
+        """The worker's window id, once tmux confirms that same server still has it. A restarted server reuses
+        ids like @3, which could then name a window that is not this worker's."""
+        pid, _, window = (w.get("surface_id") or "").partition("/")
+        if not window:
+            raise FleetError(f"no recorded tmux window for {w.get('id')}")
+        try:
+            listing = self.tmux("list-windows", "-a", "-F", "#{pid} #{window_id}")
+        except FleetError as e:
+            raise FleetError(f"tmux window {window} is gone: {e}") from None
+        if f"{pid} {window}" not in listing.splitlines():
+            raise FleetError(f"tmux window {window} is gone (closed, or its tmux server restarted)")
+        return window
+
+    def read(self, w: dict, lines: int) -> str:
+        return self.tmux("capture-pane", "-p", "-J", "-t", self.target(w), "-S", f"-{lines}")
+
+    def send(self, w: dict, items: list[str]) -> None:
+        window = self.target(w)
+        for item in items:
+            if item in TMUX_KEYS:
+                self.tmux("send-keys", "-t", window, TMUX_KEYS[item])
+            else:
+                self.tmux("send-keys", "-t", window, "-l", "--", item)
+            time.sleep(0.4)
+
+    def close(self, w: dict) -> None:
+        try:
+            window = self.target(w)
+        except FleetError:
+            return  # already gone, so already closed
+        self.tmux("kill-window", "-t", window)
+
+    def attach_argv(self, w: dict, read_only: bool = False) -> list[str] | None:
+        window = self.target(w)
+        if os.environ.get("TMUX") and not self.socket:  # the owner is already a client of this server
+            return [*self.base(self.socket), "switch-client", "-t", window]
+        return [*self.base(self.socket), "select-window", "-t", window, ";",
+                "attach-session", *(["-r"] if read_only else []), "-t", f"={self.session}"]
+
+    def locate(self, w: dict) -> str:
+        sock = f"-L {self.socket} " if self.socket else ""
+        return f"tmux {sock}attach -t ={self.session}  (window {w.get('surface', '?')})"
+
+
 def repo_root(start: Path | None = None) -> Path:
     return Path(sh(["git", "rev-parse", "--show-toplevel"], cwd=start or Path.cwd()).strip())
 
@@ -485,7 +702,7 @@ def atomic_json(path: Path, data: dict) -> None:
 
 @contextmanager
 def mutation_lock(a):
-    if a.cmd not in ("hold", "release") and (not hasattr(a, "run") or a.cmd == "wait"):
+    if a.cmd not in ("hold", "release") and (not hasattr(a, "run") or a.cmd in ("wait", *OWNER_VIEWS)):
         yield
         return
     repo = repo_root()
@@ -832,13 +1049,22 @@ def cmd_init(a, cfg):
     d = run_dir(repo, a.run)
     if (d / "run.json").exists():
         raise FleetError(f"run already exists; use fleet resume {a.run}")
-    workspace = a.workspace or cfg["defaults"]["workspace"] or os.environ.get("CMUX_WORKSPACE_ID")
-    if not workspace:
-        raise FleetError("no cmux workspace: pass --workspace or run inside cmux")
-    # Fail before creating state for an invalid workspace. Keep its UUID: cmux renumbers refs like workspace:2
-    # when it restarts, and the ref could then name another project's workspace.
-    listing = json.loads(cmux("--json", "--id-format", "both", "list-panes", "--workspace", workspace))
-    given, workspace = workspace, listing.get("workspace_id") or workspace
+    backend = pick_backend(a.backend, cfg, a.workspace or cfg["defaults"]["workspace"])
+    extra = {"backend": backend}
+    if backend == "cmux":
+        workspace = a.workspace or cfg["defaults"]["workspace"] or os.environ.get("CMUX_WORKSPACE_ID")
+        if not workspace:
+            raise FleetError("no cmux workspace: pass --workspace or run inside cmux (or --backend tmux for headless workers)")
+        # Fail before creating state for an invalid workspace. Keep its UUID: cmux renumbers refs like workspace:2
+        # when it restarts, and the ref could then name another project's workspace.
+        listing = json.loads(cmux("--json", "--id-format", "both", "list-panes", "--workspace", workspace))
+        given, workspace = workspace, listing.get("workspace_id") or workspace
+    else:
+        if a.workspace:
+            raise FleetError("--workspace names a cmux workspace; a tmux run gets its own session")
+        Tmux.check(cfg)  # fail before creating state when tmux is missing
+        given = workspace = tmux_session_name(repo, a.run)
+        extra["tmux_socket"] = cfg["defaults"]["tmux_socket"]
     options = dict(cfg["defaults"], routing=a.routing or cfg["defaults"]["routing"],
                    review=a.review or cfg["defaults"]["review"])
     routing_pool(options["routing"], cfg)
@@ -848,12 +1074,16 @@ def cmd_init(a, cfg):
     previous = gi.read_text() if gi.exists() else ""
     if "runs/" not in previous.splitlines():
         gi.write_text(previous + ("\n" if previous and not previous.endswith("\n") else "") + "runs/\n")
-    state = {"schema": 2, "run": a.run, "repo": str(repo), "workspace": workspace,
+    state = {"schema": 2, "run": a.run, "repo": str(repo), "workspace": workspace, **extra,
              "created": time.strftime("%Y-%m-%dT%H:%M:%S"), "baseline": git_snapshot(repo),
              "options": options, "tickets": {}, "workers": {}, "prompts": {}, "decisions": []}
     save_run(repo, a.run, state)
-    print(f"run dir: {d}\nworkspace: {workspace}{'' if given == workspace else f' ({given})'}\n"
-          f"Next: fleet plan {a.run} --file <plan.json>")
+    if backend == "cmux":
+        print(f"run dir: {d}\nworkspace: {workspace}{'' if given == workspace else f' ({given})'}")
+    else:
+        print(f"run dir: {d}\nbackend: tmux (headless): workers start in session {workspace}; the owner watches them "
+              f"with `fleet agents {a.run}`")
+    print(f"Next: fleet plan {a.run} --file <plan.json>")
 
 
 def validate_ticket(repo: Path, d: Path, state: dict, cfg: dict, pool: dict | None,
@@ -1237,7 +1467,8 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         if digest(scoped_diff(repo, state, meta["review_of"]).encode()) != meta["diff_sha"]:
             raise FleetError("review snapshot is stale; regenerate diff and prompt")
     # Place before any side effect: a refused placement must not freeze a baseline or move the report.
-    kind, target, direction, old_surfaces = worker_placement(state, a.pane)
+    term = terminal(state)
+    place = term.place(state, a.pane)
     d = run_dir(repo, a.run)
     baseline = d / "snapshots" / f"{a.id}.json"
     if meta["role"] == "implementation" and not baseline.exists():
@@ -1250,51 +1481,25 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     command = build_launch(pcfg, model, effort, line, session, a.resume, prepare_trust(cfg, a.provider, pcfg, repo))
     exit_file = d / "exits" / f"{a.id}.{token}.json"
     wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_run", str(exit_file), token, command])
-    # Persist before launch: an uncertain cmux result must not silently free capacity.
+    # Persist before launch: an uncertain terminal result must not silently free capacity.
     state["workers"][a.id] = dict(meta, id=a.id, provider=a.provider, model=model, effort=effort,
         family=family, tier=a.tier, steered=steered, surface="unknown", state="launching", command=command,
         token=token, exit_file=str(exit_file), launched=time.strftime("%Y-%m-%dT%H:%M:%S"),
         launched_at=time.time(),
         **({"session": session} if session else {}))
     save_run(repo, a.run, state)
-    if kind in ("replace", "tab"):  # a new surface in the pane; a replaced pane's old surfaces close below
-        args = ["new-surface", "--workspace", state["workspace"], "--pane", target,
-                "--working-directory", str(repo), "--command", wrapped, "--focus", "false"]
-    else:  # new-split has no --working-directory
-        args = ["new-split", direction, "--workspace", state["workspace"], "--surface", target,
-                "--command", f"cd {shlex.quote(str(repo))} && exec {wrapped}", "--focus", "false"]
-    out = cmux("--id-format", "both", *args)
-    m = SURFACE_RE.search(out)
-    if not m:
-        raise FleetError(f"uncertain launch; inspect cmux before recovery: {out.strip()}")
+    label = f"{a.id} · {a.provider}:{model}" + (f"@{effort}" if effort else "")
+    surface, sid, why = term.open(state, place, repo, wrapped, label)
     w = state["workers"][a.id]
-    w["surface"], w["state"] = m.group(1), "running"
-    # Refs like surface:4 restart from 1 with cmux, so only the UUID safely names this surface later.
-    w["surface_id"], why = m.group(2), "cmux did not list it"
-    if not w["surface_id"]:
-        try:
-            w["surface_id"] = listed_surface_uuid(state["workspace"], w["surface"])
-        except (FleetError, OSError, subprocess.TimeoutExpired, ValueError, KeyError) as e:
-            why = str(e).strip()[:200]
-    if not w["surface_id"]:
-        print(f"could not record {w['surface']}'s UUID ({why}); it is addressed by its ref and its pane will not "
+    w["surface"], w["surface_id"], w["state"] = surface, sid, "running"
+    if not sid:
+        print(f"could not record {surface}'s UUID ({why}); it is addressed by its ref and its pane will not "
               "be replaced", file=sys.stderr)
     save_run(repo, a.run, state)
-    for surface in old_surfaces:  # UUIDs of verified workers whose exit is confirmed
-        try:
-            cmux("close-surface", "--workspace", state["workspace"], "--surface", surface)
-        except (FleetError, OSError, subprocess.TimeoutExpired) as e:
-            print(f"could not close finished worker surface {surface}: {str(e).strip()[:200]}", file=sys.stderr)
-            continue
-        for other in state["workers"].values():
-            if other.get("surface_id") == surface and other.get("state") in RETIRED_STATES:
-                other["state"] = "closed"
-    if old_surfaces:
+    if term.retire(state, place):
         save_run(repo, a.run, state)
-    label = f"{a.id} · {a.provider}:{model}" + (f"@{effort}" if effort else "")
-    sh(["cmux", "rename-tab", "--workspace", state["workspace"], "--surface", w["surface"], label], check=False)
     if a.settle:  # outside the lock: a read-only look must not hold up the lead's next command
-        a.unlocked = lambda: print_start_screen(state["workspace"], surface_target(w), a.settle)
+        a.unlocked = lambda: print_start_screen(term, w, a.settle)
     return label, w
 
 
@@ -1409,13 +1614,12 @@ def screen_tail(screen: str, lines: int) -> str:
     return "\n".join(text.splitlines()[-lines:]).lstrip("\n")
 
 
-def print_start_screen(workspace: str, surface: str, settle: float) -> None:
+def print_start_screen(term, w: dict, settle: float) -> None:
     """Show what the new worker's screen holds a few seconds in, so the lead sees a login, trust, model or
     permission prompt without spending a turn on fleet peek. Never fails the launch it follows."""
     time.sleep(settle)
     try:
-        screen = cmux("read-screen", "--workspace", workspace, "--surface", surface,
-                      "--lines", str(max(LAUNCH_SCREEN_LINES * 3, 60)))  # as peek: padding must not hide it
+        screen = term.read(w, max(LAUNCH_SCREEN_LINES * 3, 60))  # as peek: padding must not hide it
     except (FleetError, OSError, subprocess.TimeoutExpired) as e:
         print(f"screen after {settle:g}s: unreadable ({str(e).strip()[:200]}); fleet peek it", file=sys.stderr)
         return
@@ -1520,7 +1724,7 @@ def cmd_send(a, cfg):
     repo = repo_root()
     state = load_run(repo, a.run)
     w = worker(state, a.id)
-    send_keys(state["workspace"], surface_target(w), [" ".join(a.text), "enter"])
+    terminal(state).send(w, [" ".join(a.text), "enter"])
     w["last_send"] = time.time()  # the worker owes a response now; wait may report it stalled
     save_run(repo, a.run, state)
     print(f"sent to {a.id} ({w['surface']})")
@@ -1531,9 +1735,229 @@ def cmd_peek(a, cfg):
     state = load_run(repo, a.run)
     w = worker(state, a.id)
     # Read a taller window so bottom padding cannot hide the content, then keep the last --lines lines.
-    screen = cmux("read-screen", "--workspace", state["workspace"], "--surface", surface_target(w),
-                  "--lines", str(max(a.lines * 3, 60)))
+    screen = terminal(state).read(w, max(a.lines * 3, 60))
     print(screen_tail(screen, a.lines))
+
+
+# ---------- owner views ----------
+# For the owner, not the lead: browse a run's workers, watch any one live and attach to it. They only read run
+# state (no lock, nothing saved), so they can stay open beside a running lead.
+
+OWNER_VIEWS = ("agents", "attach")
+AGENT_REFRESH_S = 1.0
+STATE_MARKS = {"running": "running", "launching": "starting", "stop-failed": "stop failed", "unknown": "unknown",
+               "exited": "exited", "recovered": "recovered", "closed": "closed"}
+
+
+def latest_run(repo: Path) -> str:
+    root = repo / ".fleet" / "runs"
+    runs = sorted(root.glob("*/run.json"), key=lambda f: f.stat().st_mtime) if root.is_dir() else []
+    if not runs:
+        raise FleetError("no runs in this checkout yet")
+    return runs[-1].parent.name
+
+
+def ticket_title(state: dict, w: dict, cache: dict) -> str:
+    """A worker's one-line description: its ticket's first heading, or what it reviews."""
+    i = w["id"]
+    if i not in cache:
+        if w.get("review_of"):
+            cache[i] = f"review of {w['review_of']}"
+        else:
+            title = ""
+            try:
+                for line in Path(state["tickets"][i]["ticket"]).read_text().splitlines():
+                    if line.strip():
+                        title = line.strip().lstrip("#").strip()
+                        break
+            except (OSError, KeyError):
+                pass
+            cache[i] = title
+    return cache[i]
+
+
+def agent_rows(repo: Path, run: str, titles: dict) -> tuple[dict, list[dict]]:
+    """Run state reconciled in memory, plus one row per worker in launch order."""
+    state = load_run(repo, run)
+    reconcile(repo, state)
+    reports = {r["id"]: r["report"] for r in report_rows(repo, state)}
+    rows = []
+    for w in sorted(state["workers"].values(), key=lambda w: w.get("launched_at", 0)):
+        effort = f"@{w['effort']}" if w.get("effort") else ""
+        age = int(time.time() - w["launched_at"]) if w.get("launched_at") else None
+        rows.append({"w": w, "id": w["id"], "worker": f"{w.get('provider', '?')}:{w.get('model', '?')}{effort}",
+                     "state": STATE_MARKS.get(w.get("state"), w.get("state", "-")), "live": w.get("state") in ACTIVE_STATES,
+                     "report": reports.get(w["id"], "-"), "title": ticket_title(state, w, titles),
+                     "age": "" if age is None else f"{age // 3600}h{age % 3600 // 60:02d}m" if age >= 3600 else f"{age // 60}m"})
+    return state, rows
+
+
+def cmd_attach(a, cfg):
+    repo = repo_root()
+    state = load_run(repo, a.run)
+    w = worker(state, a.id)
+    term = terminal(state)
+    argv = term.attach_argv(w, a.read_only)
+    if argv is None:
+        print(f"{a.id} runs in {term.locate(w)}; switch to it there. `fleet agents {a.run}` shows its screen here.")
+        return 0
+    env = None if "switch-client" in argv else {k: v for k, v in os.environ.items() if k != "TMUX"}
+    return subprocess.call(argv, env=env)
+
+
+def cmd_agents(a, cfg):
+    repo = repo_root()
+    run = a.run or latest_run(repo)
+    valid_id(run)
+    if a.list or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        state, rows = agent_rows(repo, run, {})
+        term = terminal(state)
+        print(f"run {run}  {term.where()}  {len(active(state))} running")
+        for r in rows:
+            print(f"  {'●' if r['live'] else '○'} {r['id']:<12} {r['worker']:<30} {r['state']:<11} {r['report']:<20} "
+                  f"{r['age']:>6}  {r['title']}")
+        if not rows:
+            print("  (no workers launched yet)")
+        elif term.name == "tmux":
+            print(f"open one: fleet attach {run} <id>   (or {term.locate(rows[0]['w']).split('  ')[0]}, then prefix+w)")
+        return 0
+    import curses
+    import locale
+    locale.setlocale(locale.LC_ALL, "")
+    os.environ.setdefault("ESCDELAY", "25")  # esc goes back at once instead of after curses' default second
+    return curses.wrapper(lambda screen: AgentsView(repo, run, screen).loop())
+
+
+class AgentsView:
+    """A worker browser in the spirit of Claude Code's agent list: ↑/↓ picks a worker, its screen shows live
+    below, enter opens it full screen, a attaches (tmux), q leaves."""
+
+    def __init__(self, repo: Path, run: str, screen):
+        self.repo, self.run, self.scr = repo, run, screen
+        self.selected, self.full, self.message, self.titles = 0, False, "", {}
+        self.state, self.rows = {}, []
+
+    def put(self, y: int, x: int, text: str, attr: int = 0) -> None:
+        height, width = self.scr.getmaxyx()
+        if 0 <= y < height and x < width - 1:
+            try:
+                self.scr.addnstr(y, x, text, width - 1 - x, attr)
+            except Exception:  # curses raises on the bottom-right cell; nothing to recover
+                pass
+
+    def colour(self, row: dict) -> int:
+        import curses
+        if not curses.has_colors():
+            return 0
+        report = row["report"].lower()
+        pair = 3 if "blocked" in report or row["state"] in ("stop failed", "unknown") else \
+            2 if "needs-verification" in report else 1 if row["live"] else 4
+        return curses.color_pair(pair) | (curses.A_DIM if pair == 4 else 0)
+
+    def refresh_rows(self) -> None:
+        try:
+            self.state, self.rows = agent_rows(self.repo, self.run, self.titles)
+        except (FleetError, OSError, ValueError, KeyError) as e:
+            self.message = f"could not read run: {str(e)[:120]}"
+        self.selected = max(0, min(self.selected, len(self.rows) - 1))
+
+    def screen_of(self, row: dict, lines: int) -> list[str]:
+        if row["w"].get("surface", "unknown") == "unknown":
+            return ["(no terminal recorded for this worker)"]
+        try:
+            text = terminal(self.state).read(row["w"], max(lines * 3, 60))
+        except (FleetError, OSError, subprocess.TimeoutExpired) as e:
+            return [f"(screen unreadable: {str(e).strip()[:200]})"]
+        return screen_tail(text, lines).splitlines()
+
+    def draw(self) -> None:
+        import curses
+        self.scr.erase()
+        height, width = self.scr.getmaxyx()
+        term = terminal(self.state) if self.state else None
+        keys = "↑/↓ select · enter open · a attach · q quit" if not self.full else "esc back · ↑/↓ next worker · a attach · q quit"
+        if self.full and self.rows:
+            row = self.rows[self.selected]
+            self.put(0, 0, f" {row['id']} · {row['worker']} · {row['state']} · {row['report']}  {row['title']}",
+                     curses.A_REVERSE)
+            for y, line in enumerate(self.screen_of(row, height - 2), start=1):
+                self.put(y, 0, line)
+        else:
+            running = sum(r["live"] for r in self.rows)
+            self.put(0, 0, f" fleet {self.run}  ·  {term.where() if term else ''}  ·  {running} running, "
+                           f"{len(self.rows)} workers", curses.A_BOLD)
+            list_height = max(1, min(len(self.rows), (height - 4) // 2))
+            top = max(0, self.selected - list_height + 1)
+            for y, row in enumerate(self.rows[top:top + list_height], start=2):
+                chosen = top + y - 2 == self.selected
+                mark = "●" if chosen else "○"
+                text = (f" {mark} {row['id']:<12} {row['worker']:<28} {row['state']:<11} {row['report']:<20} "
+                        f"{row['age']:>6}  {row['title']}")
+                self.put(y, 0, text, self.colour(row) | (curses.A_BOLD | curses.A_REVERSE if chosen else 0))
+            if not self.rows:
+                self.put(2, 2, "no workers launched yet; this view refreshes on its own")
+            sep = 2 + list_height
+            self.put(sep, 0, "─" * (width - 1), curses.A_DIM)
+            if self.rows:
+                row = self.rows[self.selected]
+                self.put(sep, 2, f" {row['id']} ", curses.A_BOLD)
+                for y, line in enumerate(self.screen_of(row, height - sep - 2), start=sep + 1):
+                    self.put(y, 0, line)
+        self.put(height - 1, 0, f" {self.message or keys}", curses.A_DIM)
+        self.scr.refresh()
+
+    def attach(self) -> None:
+        import curses
+        if not self.rows:
+            return
+        row = self.rows[self.selected]
+        term = terminal(self.state)
+        try:
+            argv = term.attach_argv(row["w"])
+        except FleetError as e:
+            self.message = str(e)[:160]
+            return
+        if argv is None:
+            self.message = f"{row['id']} runs in {term.locate(row['w'])}; enter shows it here"
+            return
+        curses.endwin()
+        nested = os.environ.get("TMUX") and "switch-client" not in argv
+        print(f"attaching to {row['id']}; detach with your tmux prefix{' twice (you are inside tmux)' if nested else ''}, "
+              "then d, to come back", flush=True)
+        env = None if "switch-client" in argv else {k: v for k, v in os.environ.items() if k != "TMUX"}
+        subprocess.call(argv, env=env)
+        self.scr.clear()
+
+    def loop(self) -> int:
+        import curses
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        if curses.has_colors():
+            curses.use_default_colors()
+            for pair, fg in ((1, curses.COLOR_GREEN), (2, curses.COLOR_YELLOW), (3, curses.COLOR_RED), (4, -1)):
+                curses.init_pair(pair, fg, -1)
+        self.scr.timeout(int(AGENT_REFRESH_S * 1000))
+        while True:
+            self.refresh_rows()
+            self.draw()
+            key = self.scr.getch()
+            if key == -1:
+                continue
+            self.message = ""
+            if key in (ord("q"), ord("Q")):
+                return 0
+            if key in (curses.KEY_UP, ord("k")):
+                self.selected = max(0, self.selected - 1)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                self.selected = min(len(self.rows) - 1, self.selected + 1)
+            elif key in (curses.KEY_ENTER, 10, 13, curses.KEY_RIGHT, ord("l")) and self.rows:
+                self.full = True
+            elif key in (27, curses.KEY_LEFT, ord("h"), curses.KEY_BACKSPACE, 127):
+                self.full = False
+            elif key == ord("a"):
+                self.attach()
 
 
 def report_rows(repo: Path, state: dict) -> list[dict]:
@@ -1561,7 +1985,7 @@ def cmd_status(a, cfg):
     if a.json:
         print(json.dumps(rows, indent=2))
         return
-    print(f"run {state['run']}  workspace {state['workspace']}  running {len(active(state))}/{cfg['defaults']['max_parallel']}")
+    print(f"run {state['run']}  {terminal(state).where()}  running {len(active(state))}/{cfg['defaults']['max_parallel']}")
     if hold := load_hold(repo):
         print(f"hold: {hold_text(hold)}; running workers continue, `fleet release` lifts it")
     for r in rows:
@@ -1639,8 +2063,7 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
         if status in WAKE_STATUSES + ("verified",) and f.stat().st_mtime >= w.get("last_send", 0):
             continue  # waiting on the lead is not a stall; an answered report no longer counts
         try:
-            screen = cmux("read-screen", "--workspace", state["workspace"], "--surface", surface_target(w),
-                          "--lines", "40")
+            screen = terminal(state).read(w, 40)
         except (FleetError, OSError, subprocess.TimeoutExpired) as e:
             if mark_once(seen, f"{i}.gone", token):
                 events.append(f"UNREACHABLE {i} {w['surface']}: {str(e).strip()[:200]}; the tab may be closed")
@@ -1729,8 +2152,7 @@ def cmd_stop(a, cfg):
         w = worker(state, i)
         try:
             if w["state"] in ACTIVE_STATES:
-                send_keys(state["workspace"], surface_target(w),
-                          provider(cfg, w["provider"]).get("quit", ["/exit", "enter"]))
+                terminal(state).send(w, provider(cfg, w["provider"]).get("quit", ["/exit", "enter"]))
                 deadline = time.monotonic() + a.timeout
                 while w["state"] in ACTIVE_STATES and time.monotonic() < deadline:
                     reconcile(repo, state)
@@ -1739,11 +2161,7 @@ def cmd_stop(a, cfg):
                 if w["state"] in ACTIVE_STATES:
                     raise FleetError("quit sent but process exit unconfirmed; slot retained")
             if a.close and w["state"] != "closed":
-                try:
-                    cmux("close-surface", "--workspace", state["workspace"], "--surface", surface_target(w))
-                except FleetError:  # cmux may already have closed the surface when the worker exited
-                    if not surface_gone(state["workspace"], surface_target(w)):
-                        raise
+                terminal(state).close(w)
                 w["state"] = "closed"
         except (FleetError, OSError, subprocess.TimeoutExpired) as e:
             failed = True
@@ -1765,21 +2183,22 @@ def cmd_resume(a, cfg):
     live = load_live_state(repo, a.run)
     hold = load_hold(repo)
     if a.json:
-        print(json.dumps({"run": state["run"], "workspace": state["workspace"], "options": state["options"],
+        print(json.dumps({"run": state["run"], "backend": terminal(state).name, "workspace": state["workspace"],
+                          "options": state["options"],
                           "steer": live or None,
                           "hold": hold,
                           "tickets": state["tickets"], "decisions": state["decisions"], "workers": rows,
                           "notes": str(notes) if notes.exists() else None}, indent=2))
     else:
         o = state["options"]
-        print(f"run {state['run']}  workspace {state['workspace']}  routing {o['routing']}  review {o['review']}  "
+        print(f"run {state['run']}  {terminal(state).where()}  routing {o['routing']}  review {o['review']}  "
               f"max_parallel {o['max_parallel']}")
         if live:
             print(f"steer: {live['provider']}:{live.get('model') or '<tier model>'} for implementation launches"
                   "  (fleet steer reset to undo)")
         if hold:
             print(f"hold: {hold_text(hold)}; running workers continue, `fleet release` lifts it")
-        if WORKSPACE_REF_RE.match(state["workspace"]):  # a run from before init stored the UUID
+        if terminal(state).name == "cmux" and WORKSPACE_REF_RE.match(state["workspace"]):  # from before init stored the UUID
             print(f"workspace: {state['workspace']} is a cmux ref, which cmux renumbers when it restarts; confirm it "
                   "still names this run's workspace before launching")
         print("tickets:")
@@ -2040,14 +2459,22 @@ def cmd_doctor(a, cfg):
     ok = True
     accounts: dict[tuple[str, str], list[str]] = {}
     print(f"fleet         {VERSION}  ({SKILL_DIR})")
-    try:
-        cmux("ping", timeout=5)
-        print("cmux          ready")
-    except (FleetError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+    chosen = cfg.get("defaults", DEFAULTS).get("backend", "auto")
+    usable = []
+    print(f"backend       {chosen}" + ("  (cmux inside cmux or with a workspace, else headless tmux)" if chosen == "auto" else ""))
+    for name, term in (("cmux", Cmux), ("tmux", Tmux)):
+        try:
+            note = term.check(cfg)
+            usable.append(name)
+            print(f"{name:<13} {note}")
+        except (FleetError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+            needed = chosen == name
+            print(f"{name:<13} {'NOT REACHABLE' if name == 'cmux' else 'NOT AVAILABLE'}: {e}"
+                  + ("" if needed or chosen == "auto" else "  (not your backend; ignored)"))
+            if name == "cmux" and (os.environ.get("CODEX_SANDBOX") or os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED")):
+                print("              Check host socket permissions; do not bypass a denied permission through another harness.")
+    if chosen in BACKENDS and chosen not in usable or chosen == "auto" and not usable:
         ok = False
-        print(f"cmux          NOT REACHABLE: {e}")
-        if os.environ.get("CODEX_SANDBOX") or os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED"):
-            print("              Check host socket permissions; do not bypass a denied permission through another harness.")
     print(f"config        {USER_CONFIG if USER_CONFIG.exists() else 'none (built-in defaults)'}")
     names = a.providers or list(cfg["providers"])
     for name in names:
@@ -2362,7 +2789,7 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("version", help="print this runtime's version and location")
     s.set_defaults(fn=cmd_version)
 
-    s = sub.add_parser("doctor", help="check cmux, provider logins, skill installs and companion skills")
+    s = sub.add_parser("doctor", help="check the terminal backends, provider logins, skill installs and companion skills")
     s.add_argument("providers", nargs="*")
     s.set_defaults(fn=cmd_doctor)
 
@@ -2387,7 +2814,10 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("init", help="start a run: dirs + git baseline")
     s.add_argument("run")
-    s.add_argument("--workspace")
+    s.add_argument("--backend", choices=["auto", *BACKENDS],
+                   help="cmux: visible panes beside the lead; tmux: headless workers the owner opens with fleet agents "
+                        "(default: defaults.backend, else auto)")
+    s.add_argument("--workspace", help="cmux workspace ref or UUID")
     s.add_argument("--routing")
     s.add_argument("--review", choices=["off", "cross-heavy", "cross-all"])
     s.set_defaults(fn=cmd_init)
@@ -2435,8 +2865,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_prompt)
 
-    s = sub.add_parser("launch", help=f"launch a worker in a new cmux pane; at {MAX_PANES} panes, replace a finished worker's pane "
-                       "or add a tab to an idle one")
+    s = sub.add_parser("launch", help=f"launch a worker in a new cmux pane (at {MAX_PANES} panes, replace a finished worker's "
+                       "pane or add a tab to an idle one) or a new tmux window")
     s.add_argument("run")
     s.add_argument("id", nargs="?")
     s.add_argument("provider", nargs="?")
@@ -2494,6 +2924,18 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--timeout", type=float, default=10)
     s.set_defaults(fn=cmd_stop)
 
+    s = sub.add_parser("agents", help="owner's view: browse a run's workers and watch or attach to any one "
+                                      "(arrow keys; --list prints them)")
+    s.add_argument("run", nargs="?", help="default: the run changed most recently")
+    s.add_argument("--list", action="store_true", help="print the workers and how to open each, without the browser")
+    s.set_defaults(fn=cmd_agents)
+
+    s = sub.add_parser("attach", help="owner's view: open one worker's terminal (tmux attach; cmux names its tab)")
+    s.add_argument("run")
+    s.add_argument("id")
+    s.add_argument("--read-only", action="store_true", help="watch without being able to type into the worker")
+    s.set_defaults(fn=cmd_attach)
+
     s = sub.add_parser("check", help="compare HEAD and index with the captured baseline")
     s.add_argument("run")
     s.set_defaults(fn=cmd_check)
@@ -2538,7 +2980,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if getattr(a, "id", None) is not None:  # launch --ready names no ticket
             valid_id(a.id)
-        if hasattr(a, "run"):
+        if getattr(a, "run", None) is not None:  # agents may pick the latest run itself
             valid_id(a.run)
         limit = WAIT_MAX if a.cmd == "wait" else 60
         if hasattr(a, "timeout") and not 0 <= a.timeout <= limit:
@@ -2557,7 +2999,7 @@ def main(argv: list[str] | None = None) -> int:
                 follow()
             return code
         finally:
-            if hasattr(a, "run"):
+            if getattr(a, "run", None) is not None and a.cmd not in OWNER_VIEWS:
                 emit_lead_notice(a, cfg)
     except (FleetError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as e:
         print(f"fleet: {e}", file=sys.stderr)

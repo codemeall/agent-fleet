@@ -1,6 +1,6 @@
 # Agent Fleet
 
-Run a fleet of coding-agent CLIs (Claude Code, Codex, Cursor) in visible [cmux](https://github.com/manaflow-ai/cmux) panes, led by the agent you are already talking to.
+Run a fleet of coding-agent CLIs (Claude Code, Codex, Cursor) led by the agent you are already talking to: in visible [cmux](https://github.com/manaflow-ai/cmux) panes beside the lead, or headless in [tmux](https://github.com/tmux/tmux), where you browse every worker and open any one with `fleet agents`.
 
 The lead turns approved tickets into a saved execution plan, picks a worker model and effort for each ticket, watches progress, and verifies every result before dependents start. Workers share one Git checkout with explicit file ownership. **You keep control of commits and publishing.**
 
@@ -10,6 +10,7 @@ The lead turns approved tickets into a saved execution plan, picks a worker mode
 - [Installation](#installation)
   - [Companion skills (optional)](#companion-skills-optional)
 - [Usage](#usage)
+- [Where workers run: cmux or headless](#where-workers-run-cmux-or-headless)
 - [Keeping the lead sharp](#keeping-the-lead-sharp)
 - [State, continuation and safety](#state-continuation-and-safety)
 - [Compatibility and adapters](#compatibility-and-adapters)
@@ -21,11 +22,11 @@ The lead turns approved tickets into a saved execution plan, picks a worker mode
 # 1. Install the skill globally with the skills CLI
 npx skills add codemeall/agent-fleet -g -a claude-code -a codex -a cursor
 
-# 2. Check cmux, Python and worker CLIs
+# 2. Check the terminal backend (cmux or tmux), Python and worker CLIs
 ~/.claude/skills/fleet/bin/fleet doctor
 ```
 
-Restart your agent host, open it inside a cmux workspace, and ask:
+Restart your agent host, open it inside a cmux workspace (or any terminal with tmux installed, for headless workers), and ask:
 
 > Use `/fleet` with auto routing for the approved tickets in `.scratch/my-feature/issues`.
 
@@ -33,11 +34,13 @@ Restart your agent host, open it inside a cmux workspace, and ask:
 
 ### Requirements
 
-- macOS (cmux is a macOS terminal) with **Python 3.11+**, **Git** and **[cmux](https://github.com/manaflow-ai/cmux)** running with a reachable socket
+- **Python 3.11+** and **Git**, plus a terminal backend for the workers:
+  - **[cmux](https://github.com/manaflow-ai/cmux)** (macOS) running with a reachable socket, for workers in visible panes beside the lead, or
+  - **[tmux](https://github.com/tmux/tmux)** 3.0+ (macOS or Linux, including SSH sessions and containers), for headless workers you open with `fleet agents`
 - At least one installed, authenticated worker CLI: `claude`, `codex` or `cursor-agent` (`agy` and `opencode` adapters ship disabled; turn them on in your config)
 - **Node.js 18+** for the installer (not needed at runtime)
 
-The lead host must be allowed to use the local shell, the repository and cmux. Installing the skill does not grant those permissions; see [host setup](skill/references/harnesses.md).
+The lead host must be allowed to use the local shell, the repository and cmux or tmux. Installing the skill does not grant those permissions; see [host setup](skill/references/harnesses.md).
 
 ### Pick an install method
 
@@ -164,7 +167,7 @@ fleet doctor
 
 `version` prints the runtime's version and the skill directory it runs from. With several installs, it tells you which copy your shell found.
 
-`doctor` checks cmux connectivity, worker executables and login signals, and checks each tier model against the account's model list where the CLI offers one (Codex, Cursor, Antigravity, OpenCode). It cannot guarantee model access or a successful worker session. It also reports:
+`doctor` checks the terminal backends (cmux connectivity, tmux availability; only your configured one has to pass), worker executables and login signals, and checks each tier model against the account's model list where the CLI offers one (Codex, Cursor, Antigravity, OpenCode). It cannot guarantee model access or a successful worker session. It also reports:
 
 - the runtime's version, and each host's installed `fleet` skill with its version, flagging copies that differ from the runtime you ran. Copies installed before `fleet version` existed show `version unknown`.
 - where each [companion skill](#companion-skills-optional) is installed: the user-level skill directories, plus `.claude/skills`, `.agents/skills` and `.cursor/skills` in the current directory. Missing companions get an install command and never make `doctor` fail. Skills installed through a plugin aren't detected.
@@ -196,7 +199,7 @@ Codex's list comes from its `codex debug models` catalog and includes each model
 
 ### Configure
 
-Personal overrides live in `~/.config/agent-fleet/config.toml`; start from [config.example.toml](config.example.toml). No cmux workspace is pinned by default. Start the lead in the intended workspace, or pass `workspace=<ref>` explicitly.
+Personal overrides live in `~/.config/agent-fleet/config.toml`; start from [config.example.toml](config.example.toml). `backend` under `[defaults]` picks where workers run (see [below](#where-workers-run-cmux-or-headless)). No cmux workspace is pinned by default. Start the lead in the intended workspace, or pass `workspace=<ref>` explicitly.
 
 ### Updating
 
@@ -235,7 +238,7 @@ Uninstall removes only the Fleet skill it installed. It keeps modified copies, a
 
 ```text
 /fleet [auto | single:<provider> | agents=<provider>[:<model>],...]
-       [workspace=<ref>] [review=off|cross-heavy|cross-all]
+       [backend=cmux|tmux] [workspace=<ref>] [review=off|cross-heavy|cross-all]
        -- <local tickets directory, or tasks in plain words>
 ```
 
@@ -271,9 +274,49 @@ The lead drives Fleet through the `fleet` CLI; you rarely need to, but you can r
 | `fleet status <run>` | Table of workers and their report status |
 | `fleet stop <run> --all` | Quit every worker and confirm it exited; do this before shutting down |
 | `fleet context` | How full the lead's context is |
-| `fleet doctor` | Check cmux, logins, models and installed skills |
+| `fleet doctor` | Check the terminal backend, logins, models and installed skills |
+| `fleet agents [<run>]` | Browse the workers, watch any one live, attach to it (yours; the lead never runs it) |
+| `fleet attach <run> <id>` | Open one worker's terminal (headless runs) |
 
 More: [safe first run](examples/README.md) · [agent workflow](skill/SKILL.md) · [commands](skill/references/commands.md) · [routing](skill/references/routing.md) · [host setup](skill/references/harnesses.md) · [providers](skill/references/providers.md) · [lead context](skill/references/lead-context.md) · [worked examples](skill/references/examples.md)
+
+## Where workers run: cmux or headless
+
+Every run picks a terminal backend at `fleet init` and keeps it. Both run the same interactive worker CLIs with the same plan, ownership, review and verification rules; only where the terminals live differs.
+
+| | cmux | tmux (headless) |
+| --- | --- | --- |
+| Where workers appear | Panes beside the lead in your cmux workspace | Windows of a detached tmux session (one per run); nothing opens on screen |
+| Platforms | macOS | macOS, Linux, SSH sessions, containers |
+| How you look at a worker | It's on screen; `fleet agents` also works | `fleet agents`, `fleet attach`, or plain `tmux` |
+| Limit | 8 panes per workspace, then finished panes are reused | None |
+
+Choose with `backend=cmux|tmux` in your request to the lead, `fleet init <run> --backend …`, or `backend` under `[defaults]` in your config. The default, `auto`, uses cmux when the lead runs inside cmux (or you name a workspace) and headless tmux otherwise, so existing cmux setups behave as before.
+
+### Watching workers with `fleet agents`
+
+Run `fleet agents` in any terminal in the repository (it opens the run changed most recently; name one to pick another). It works like Claude Code's agent list:
+
+```text
+ fleet checkout  ·  tmux session fleet-app-checkout-3fa2  ·  2 running, 3 workers
+
+ ● api-client   codex:gpt-6-sol@high         running     in-progress             12m  Typed API client
+ ○ settings-ui  claude:sonnet@medium         running     needs-verification       9m  Settings page
+ ○ copy         cursor:auto                  closed      verified                31m  Copy updates
+── api-client ─────────────────────────────────────────────────────────────────────
+ …the selected worker's live screen…
+ ↑/↓ select · enter open · a attach · q quit
+```
+
+- **↑/↓** picks a worker and shows its screen live underneath, whichever provider it runs.
+- **enter** shows that screen full size; **esc** goes back.
+- **a** attaches to the worker's own terminal so you can type to it, as if you had started it yourself. Detach with your tmux prefix and `d` (prefix twice if you're already inside tmux) to return to the list.
+
+`fleet agents --list` prints the same rows once, and `fleet attach <run> <id> [--read-only]` opens one worker directly. Headless workers live on Fleet's own tmux server, so you can also use tmux itself: `tmux -L fleet attach`, then your prefix and `w` to jump between every run and worker. Set `tmux_socket = ""` to put them on your usual tmux server instead.
+
+Typing into a worker bypasses the lead. Tell the lead what you said, or ask it to `send` the message for you. The view only reads run state, so it's safe to keep open while the lead works.
+
+A headless worker's window stays open after it exits, so the lead (and you) can still read its last screen; `fleet stop <run> <id> --close` removes it. If the tmux server stops (a reboot, `tmux kill-server`), its workers die without an exit receipt and show as `UNREACHABLE`: confirm they're gone and record it with `fleet recover`, exactly as for a closed cmux pane.
 
 ## Keeping the lead sharp
 
@@ -364,17 +407,18 @@ Window sizes differ by host and setting: Claude Code runs Opus 5.5 with a 1M win
 - **Capacity.** A report does not free a slot; the worker must actually exit, and a failed stop keeps its slot. Stop an implementation worker before capturing its review diff, then stop and verify the reviewer before accepting the work. This works even with a single slot. Dependents stay blocked until `fleet verify` accepts the ticket.
 - **Steering.** If a provider is failing or rate-limited mid-run, `fleet steer provider <run> <name>` (then optionally `fleet steer model <run> <name>`) moves future implementation launches there without editing the frozen plan; `fleet steer reset <run>` goes back to the plan. It stays inside the run's routing and `models_allow`. Open panes and review launches are never steered, so cross-family review still holds.
 - **Usage limits.** A worker that hits its limit shows as stalled. Claude workers can be relaunched with `fleet launch … --resume` after the reset: Fleet records each one's session ID, so the worker continues its own conversation instead of starting over. Otherwise the lead steers to another provider in the run's routing and relaunches fresh.
-- **Taking a break.** `fleet hold [--reason <text>]` blocks new workers from starting in this checkout, for every run. Running workers carry on and can still be verified, and once none is running the lead ends its turn instead of polling; it does not `fleet stop` anything. Only `fleet release` lifts the hold; there is no timer. Ask the lead to hold or release, or run the commands yourself. The lead is told to release only when you ask, but it can technically run the command. A hold does not make a shutdown safe: sleep is fine, but when the machine or cmux shuts down, running workers die without an exit receipt, so after `fleet release` Fleet still lists them as running and refuses to relaunch them. Confirm each one is gone, record it with `fleet recover`, then relaunch, with `--resume` where the adapter supports it (see [example 7](skill/references/examples.md#7-recover-a-worker-whose-exit-cannot-be-confirmed)). To avoid that, run `fleet stop <run> --all` before you shut down.
+- **Taking a break.** `fleet hold [--reason <text>]` blocks new workers from starting in this checkout, for every run. Running workers carry on and can still be verified, and once none is running the lead ends its turn instead of polling; it does not `fleet stop` anything. Only `fleet release` lifts the hold; there is no timer. Ask the lead to hold or release, or run the commands yourself. The lead is told to release only when you ask, but it can technically run the command. A hold does not make a shutdown safe: sleep is fine, but when the machine, cmux or the tmux server shuts down, running workers die without an exit receipt, so after `fleet release` Fleet still lists them as running and refuses to relaunch them. Confirm each one is gone, record it with `fleet recover`, then relaunch, with `--resume` where the adapter supports it (see [example 7](skill/references/examples.md#7-recover-a-worker-whose-exit-cannot-be-confirmed)). To avoid that, run `fleet stop <run> --all` before you shut down.
 - **Isolation is by instruction, not by the OS.** All workers share one checkout. Exact file scope and read-only review are prompt rules plus lead checks. Use one active run per checkout, keep sensitive or high-conflict work out of concurrent waves, inspect scoped diffs, and run checks on the combined tree. The Git check compares the captured HEAD and index; it can't prove that no Git operation happened in between.
 
 ## Compatibility and adapters
 
 | Lead or worker | Preview scope |
 | --- | --- |
-| Local Claude Code, Codex CLI, Cursor CLI | Bundled worker adapters; the lead needs shell, repository and cmux access |
+| Local Claude Code, Codex CLI, Cursor CLI | Bundled worker adapters; the lead needs shell, repository and cmux or tmux access |
 | Antigravity (`agy`), OpenCode | Bundled worker adapters, disabled by default; enable one in your config, then run `fleet doctor` |
 | Codex desktop / ChatGPT with local execution | Usable when the same capabilities and permissions are available |
-| Cloud-only or remote session | Needs an explicit connection to the machine running cmux |
+| Remote machine over SSH, or a container | Use the headless tmux backend on that machine; `fleet agents` there shows the workers |
+| Cloud-only session | Needs an explicit connection to a machine that can run the workers |
 | Other providers or accounts | Configure and test an adapter yourself |
 
 The lead host, worker CLI, provider account and model family are independent choices. For example, a Claude lead can run Codex workers, and Cursor can serve several model families. The bundled model IDs are examples that depend on your account, so check which IDs and effort levels you can actually use before assigning work.

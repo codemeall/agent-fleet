@@ -2,14 +2,14 @@
 
 Every `fleet` command: what it does and when to use it. Commands that take `<run>` act on `.fleet/runs/<run>/` in the current checkout; run them from the repository root. `fleet <command> --help` prints the exact flags. For full sequences, see the [worked examples](examples.md).
 
-The lead runs these commands. The owner may run any of them too, most often `hold`, `release`, `context` and `stop`, once `fleet` is on their PATH.
+The lead runs these commands. The owner may run any of them too, most often `hold`, `release`, `context` and `stop`, once `fleet` is on their PATH. `agents` and `attach` are the owner's alone: the lead never runs them.
 
 ## At a glance
 
 | Command | What it does | Use it when |
 | --- | --- | --- |
 | [`version`](#version) | Prints the runtime version and location | Checking which install is running |
-| [`doctor`](#doctor) | Checks cmux, provider logins, models and installed skills | Before a run, or after changing config or accounts |
+| [`doctor`](#doctor) | Checks the terminal backends (cmux, tmux), provider logins, models and installed skills | Before a run, or after changing config or accounts |
 | [`providers`](#providers) | Prints the merged provider config | You need an adapter's launch, quit or tier details |
 | [`models`](#models) | Lists the models a provider's account offers | Choosing or replacing a model |
 | [`account add`](#account-add) | Adds a second subscription of an existing provider | The owner has another Claude or Codex account |
@@ -18,7 +18,7 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`add`](#add) | Appends tickets or inline tasks to a run, before or after launch | The owner hands you new work mid-conversation or mid-run |
 | [`drop`](#drop) | Retires a pending ticket nobody will finish | The owner abandons work, so it stops holding files and keeping its run open |
 | [`prompt`](#prompt) | Writes a worker or reviewer prompt | Before each launch |
-| [`launch`](#launch) | Starts a worker in a cmux pane | A ticket is ready and its prompt is written |
+| [`launch`](#launch) | Starts a worker in a cmux pane or a headless tmux window | A ticket is ready and its prompt is written |
 | [`peek`](#peek) | Shows the bottom of a worker's screen | After `STALLED`, or when the launch screen shows a prompt |
 | [`send`](#send) | Types a message into a worker's pane | Answering a blocked worker or requesting changes |
 | [`wait`](#wait) | Blocks until something needs the lead | Between actions, while workers run |
@@ -34,6 +34,8 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`steer`](#steer) | Moves future launches to another provider or model | A provider is failing or rate-limited mid-run |
 | [`hold`](#hold) | Blocks new launches in this checkout | The owner wants a break |
 | [`release`](#release) | Lifts a hold | The owner is ready to continue |
+| [`agents`](#agents) | Owner's browser: every worker, its live screen, attach to any one | The owner wants to see what a worker is doing |
+| [`attach`](#attach) | Owner opens one worker's terminal | The owner wants to type into or watch one worker |
 
 **Similar names:** `hold` and `release` pause and continue *launches*. `resume` reloads a *run* into the lead's memory. `launch --resume` continues a stopped *worker's* own CLI session. There is no `pause` command: `hold` is the pause.
 
@@ -55,7 +57,7 @@ Prints the version and the runtime's path. It works even when the config is brok
 fleet doctor [<provider> ...]
 ```
 
-Checks cmux, each provider's executable and login, each tier's model and effort, and which companion skills are installed. Name providers to check only those. It fails when a tier's model is one the account doesn't offer, or when two Claude providers are signed in to the same account. Passing `doctor` doesn't prove a launch will work: `peek` the first worker.
+Checks the configured backend (`defaults.backend`; under `auto`, at least one of cmux and tmux must work), each provider's executable and login, each tier's model and effort, and which companion skills are installed. Name providers to check only those. It fails when a tier's model is one the account doesn't offer, or when two Claude providers are signed in to the same account. Passing `doctor` doesn't prove a launch will work: `peek` the first worker.
 
 **Use:** at the start of every run, and after editing config or adding an account.
 
@@ -94,12 +96,12 @@ Adds a provider that reuses an adapter (`claude`, `codex`) with its own account 
 ### init
 
 ```text
-fleet init <run> [--workspace <ref>] [--routing <mode>] [--review off|cross-heavy|cross-all]
+fleet init <run> [--backend auto|cmux|tmux] [--workspace <ref>] [--routing <mode>] [--review off|cross-heavy|cross-all]
 ```
 
-Creates `.fleet/runs/<run>/`, adds it to `.fleet/.gitignore`, and records the HEAD and index baseline. It validates the cmux workspace (`--workspace`, the config default, or the current one) and stores its UUID, because cmux renumbers refs like `workspace:2` when it restarts. It refuses if the run already exists, or if another run in this checkout still has live workers.
+Creates `.fleet/runs/<run>/`, adds it to `.fleet/.gitignore`, and records the HEAD and index baseline. It picks the run's terminal backend, which the run keeps: `--backend`, else `defaults.backend`, else `auto`, which uses cmux inside cmux or when a workspace is named, and headless tmux otherwise. A tmux run gets its own detached session (`fleet-<checkout>-<run>-<hash>`) on Fleet's tmux server (`tmux -L fleet`; `defaults.tmux_socket` changes it) and init prints the `fleet agents` line to relay to the owner. For a cmux run it validates the workspace (`--workspace`, the config default, or the current one) and stores its UUID, because cmux renumbers refs like `workspace:2` when it restarts. It refuses if the run already exists, or if another run in this checkout still has live workers.
 
-**Use:** once per run. Map the owner's `workspace=`, routing (`auto`, `single:<provider>`, `agents=…`) and `review=` options to these flags. For an existing run, use `resume` instead.
+**Use:** once per run. Map the owner's `backend=`, `workspace=`, routing (`auto`, `single:<provider>`, `agents=…`) and `review=` options to these flags. For an existing run, use `resume` instead.
 
 ### plan
 
@@ -153,9 +155,11 @@ fleet launch <run> <id> <provider> --tier heavy|standard|light|review
 fleet launch <run> --ready [--pane <ref|uuid|index>]
 ```
 
-Starts the worker in its own cmux pane with the prompt. The provider, tier and pins must match the saved plan; a steer (see `steer`) may change the provider and model, and launch prints `steered (<tier>): …`. Launch enforces blockers, file ownership, capacity and any hold.
+Starts the worker in its own cmux pane, or its own window of the run's tmux session, with the prompt. The provider, tier and pins must match the saved plan; a steer (see `steer`) may change the provider and model, and launch prints `steered (<tier>): …`. Launch enforces blockers, file ownership, capacity and any hold.
 
-Each worker gets its own pane. Up to 8 panes in the workspace, launch splits the largest one. At 8 it replaces a pane (never the lead's) that holds only verified workers whose exit is confirmed, closing their surfaces. Failing that, it adds a tab to an idle pane (one with no live worker), so an unverified worker keeps its scrollback. When every other pane has a live worker, it refuses before touching the run.
+Under tmux each worker gets a new window, with no limit; the window stays after the worker exits, so its screen and scrollback stay readable until `stop --close`. Fleet strips the lead's session variables (such as `CLAUDECODE`) from the worker's environment.
+
+Under cmux each worker gets its own pane. Up to 8 panes in the workspace, launch splits the largest one. At 8 it replaces a pane (never the lead's) that holds only verified workers whose exit is confirmed, closing their surfaces. Failing that, it adds a tab to an idle pane (one with no live worker), so an unverified worker keeps its scrollback. When every other pane has a live worker, it refuses before touching the run.
 
 Launch ends by printing the last lines of the worker's screen, 5 seconds in, so a login, trust, model or permission prompt shows without a `peek` (with the owner's `auto_trust` on, launch marks the repo trusted first; see [Folder trust](providers.md#folder-trust)):
 
@@ -169,7 +173,7 @@ screen after 5s:
 
 `--ready` launches every ticket that can start now, heaviest first: never launched, blockers verified, files clear of running work, a complete prompt (written for it when the plan has `context` and `checks`), and room under `max_parallel` and the provider's `max` (the steered provider's, under a steer). It prints `LAUNCHED <id> <provider>:<model>[@<effort>] <tier> <surface>` or `SKIPPED <id>: <reason>` per ticket (`pane limit` when every pane has a live worker), `NONE ready` when nothing started, and no worker screens. If a launch fails after cmux was asked for a pane, it stops there, lists the tickets it did not attempt, and asks you to inspect that worker first. It takes no ticket, provider, pins or `--settle`, and never launches reviewers.
 
-- `--pane` picks the pane to split, replace or add a tab to.
+- `--pane` (cmux only) picks the pane to split, replace or add a tab to.
 - `--family` names the model family when an account-specific model isn't recognized.
 - `--resume` continues the stopped worker's own session (same provider and account, adapters with `resume` such as Claude), for example after a usage limit resets.
 - `--settle` sets the seconds before the screen is printed (default 5, at most 30; 0 skips it).
@@ -242,9 +246,9 @@ Reconciles exit receipts, then lists each worker's provider and model, pane, sta
 fleet stop <run> <id ...> | --all [--close] [--timeout <seconds>]
 ```
 
-Sends each worker its quit keys and waits up to `--timeout` seconds (default 10, at most 60) for a confirmed exit. A failed stop marks the worker `stop-failed` and keeps its slot. `--close` closes the tab, only after a confirmed exit; a tab cmux already closed when the worker exited counts as closed.
+Sends each worker its quit keys and waits up to `--timeout` seconds (default 10, at most 60) for a confirmed exit. A failed stop marks the worker `stop-failed` and keeps its slot. `--close` closes the tab or tmux window, only after a confirmed exit; one already closed counts as closed.
 
-**Use:** before capturing a review diff, before verifying, after a reviewer finishes, and with `--all` before the machine or cmux shuts down.
+**Use:** before capturing a review diff, before verifying, after a reviewer finishes, and with `--all` before the machine, cmux or the tmux server shuts down.
 
 ### diff
 
@@ -351,3 +355,42 @@ fleet release
 Removes the hold so launches can continue.
 
 **Use:** only when the owner asks.
+
+## Owner views
+
+These commands are for the owner, not the lead. They only read run state (no lock, nothing saved), so they can stay open beside a running lead.
+
+### agents
+
+```text
+fleet agents [<run>] [--list]
+```
+
+A worker browser in the spirit of Claude Code's agent list. Without a run it opens the run changed most recently.
+
+```text
+ fleet checkout  ·  tmux session fleet-app-checkout-3fa2  ·  2 running, 3 workers
+
+ ● api-client   codex:gpt-6-sol@high         running     in-progress             12m  Typed API client
+ ○ settings-ui  claude:sonnet@medium         running     needs-verification       9m  Settings page
+ ○ copy         cursor:auto                  closed      verified                31m  Copy updates
+── api-client ─────────────────────────────────────────────────────────────────────
+ …the selected worker's live screen…
+ ↑/↓ select · enter open · a attach · q quit
+```
+
+- `↑`/`↓` (or `j`/`k`) pick a worker; its screen shows live below the list.
+- `enter` opens the screen full size; `esc` goes back.
+- `a` attaches to the worker's own terminal (tmux): type to it like any CLI, then detach with your tmux prefix and `d` to come back (prefix twice when you run `agents` inside tmux). Under cmux the worker is already a tab beside the lead, so `a` names it instead.
+
+`--list` (and any call without a terminal, such as from a script) prints the same rows once, with the command that opens the session.
+
+**Use:** whenever you want to see what a worker is doing, on any backend. Typing into a worker bypasses the lead: tell it what you said, or prefer asking the lead to `send`.
+
+### attach
+
+```text
+fleet attach <run> <id> [--read-only]
+```
+
+Opens one worker's terminal. Under tmux it attaches to the run's session with that worker's window selected (inside your own tmux on the same server it switches to it instead); `--read-only` watches without typing. Under cmux it prints which tab holds the worker. Inside the tmux session, your prefix and `w` lists every session and window to jump between.
