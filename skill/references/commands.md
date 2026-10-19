@@ -12,6 +12,7 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`doctor`](#doctor) | Checks cmux, provider logins, models and installed skills | Before a run, or after changing config or accounts |
 | [`providers`](#providers) | Prints the merged provider config | You need an adapter's launch, quit or tier details |
 | [`models`](#models) | Lists the models a provider's account offers | Choosing or replacing a model |
+| [`provider`](#provider) | Turns a provider on or off in the owner's config | The owner asks to turn one on or off |
 | [`account add`](#account-add) | Adds a second subscription of an existing provider | The owner has another Claude or Codex account |
 | [`init`](#init) | Starts a run and captures the Git baseline | Starting a new run |
 | [`plan`](#plan) | Saves the ticket graph and routing | After the owner approves the plan, before any launch |
@@ -55,7 +56,7 @@ Prints the version and the runtime's path. It works even when the config is brok
 fleet doctor [<provider> ...]
 ```
 
-Checks cmux, each provider's executable and login, each tier's model and effort, and which companion skills are installed. Name providers to check only those. It fails when a tier's model is one the account doesn't offer, or when two Claude providers are signed in to the same account. Passing `doctor` doesn't prove a launch will work: `peek` the first worker.
+Checks cmux, each provider's executable and login, each tier's model and effort, and which companion skills are installed. Name providers to check only those. A provider that is off shows as `off`. It fails when an enabled provider is a placeholder adapter, when a tier's model is one the account doesn't offer, or when two Claude providers are signed in to the same account. Passing `doctor` doesn't prove a launch will work: `peek` the first worker.
 
 **Use:** at the start of every run, and after editing config or adding an account.
 
@@ -78,6 +79,16 @@ fleet models <provider> [<filter>] [--all]
 Lists the model IDs the provider's account offers, narrowed by the owner's `models_allow`. `<filter>` keeps IDs that contain the text; some accounts offer hundreds. `--all` ignores `models_allow`.
 
 **Use:** before choosing or replacing a model. Propose only models from this list, and ask the owner before substituting one.
+
+### provider
+
+```text
+fleet provider enable|disable <name>
+```
+
+Sets `enabled` under `[providers.<name>]` in the owner's config (`~/.config/agent-fleet/config.toml`), creating it if needed and leaving other lines alone. It does nothing when the provider is already in that state, and changes nothing when it cannot make the edit safely. `enable` refuses a placeholder adapter (`grok`, `muse`). It does not sign the CLI in or add the provider to `defaults.prefer`; it prints the next steps. Turning a provider off refuses new plans, launches and steers to it; running workers continue.
+
+**Use:** only when the owner asks to turn that provider on or off. Run `fleet doctor <name>` after enabling. Never use it to route around a failure, limit, denial or login prompt. See [turning providers on and off](providers.md#turning-providers-on-and-off).
 
 ### account add
 

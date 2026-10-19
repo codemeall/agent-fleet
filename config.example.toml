@@ -27,12 +27,16 @@ review = "cross-heavy"
 # effort = "medium"
 # family = "openai"
 
-# Antigravity and OpenCode ship disabled. Turn one on, then run fleet doctor <name>.
+# Turn providers on or off: `fleet provider enable|disable <name>` edits this file for you, then run
+# fleet doctor <name>. Antigravity and OpenCode ship off; add a provider to defaults.prefer above for auto routing.
 # OpenCode's shipped tiers assume OpenRouter; override its tiers and login check for another provider.
+# grok and muse are placeholders and can't be turned on until filled in (see references/providers.md).
 # [providers.agy]
 # enabled = true
 # [providers.opencode]
 # enabled = true
+# [providers.cursor]
+# enabled = false
 
 # Optional second account. Sign it in first (CLAUDE_CONFIG_DIR=~/.claude-co claude).
 # Other accounts: fleet account add <name> --from claude|codex --dir <path>

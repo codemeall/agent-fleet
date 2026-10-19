@@ -4,6 +4,46 @@
 
 All model IDs and efforts are examples tied to accounts and CLI versions. Before routing, authenticate through the owner's normal process. `doctor` checks binary presence and login signals, including the login command's exit status, and checks every tier model against the account's list where the CLI can list models (`models` field: Cursor, Antigravity, OpenCode, and Codex through `codex debug models`, which also lists each model's efforts). For Codex doctor also shows the configured default from `config.toml`; Claude's `opus`/`sonnet` aliases follow the current model. Doctor spends no model call and does not guarantee model access. A passing doctor is a preflight check, not an end-to-end compatibility claim.
 
+## Turning providers on and off
+
+Which providers are on is the owner's decision. `fleet doctor` shows each one as `off`, as a sign-in result, or as `PLACEHOLDER`.
+
+| Shipped | Providers |
+| --- | --- |
+| On | `claude`, `codex`, `cursor` |
+| Off, supported | `agy` (Antigravity), `opencode`, `claude-co` (a second Claude account) |
+| Off, placeholder | `grok`, `muse` ([not supported](#placeholder-adapters)) |
+
+```bash
+fleet provider enable agy       # turn a provider on
+fleet doctor agy                # then check its binary, sign-in and tier models
+fleet provider disable cursor   # turn one off, a shipped one included
+```
+
+`fleet provider enable|disable <name>` sets `enabled` under `[providers.<name>]` in `~/.config/agent-fleet/config.toml` (or `$FLEET_CONFIG`), creating the file or the section if needed and leaving every other line as it was. It does nothing when the provider is already in that state. If it cannot make the edit safely, for example when the config sets the provider through a dotted key, it changes nothing and says which line to set yourself. Editing the file by hand does the same thing:
+
+```toml
+[providers.agy]
+enabled = true
+
+[providers.cursor]
+enabled = false
+```
+
+- **Auto routing** uses enabled, authenticated providers in `defaults.prefer` order. Turning a provider on does not add it there; add its name to `prefer` under `[defaults]` yourself. `single:<name>` and `agents=` routing can name it without that.
+- **Turning one off** stops new plans, launches, steers and review launches that name it. Workers already running on it keep running until they finish or you stop them. To move a live run off a failing provider, steer it ([skill](../SKILL.md#steering-routing)) rather than turning the provider off mid-run.
+- **Sign-in** is separate. Enabling a provider never signs it in: the owner signs the CLI in, then runs `fleet doctor <name>`.
+- **Placeholders** cannot be turned on until they are filled in ([below](#placeholder-adapters)).
+
+### Agent rules
+
+A Fleet lead, or any other agent working in the session, follows these rules:
+
+- Turn a provider on or off only when the owner asks for that provider in the session ("turn on Antigravity", "stop using Cursor"). A routing request such as `single:agy` that names a provider that is off is not that request: tell the owner it is off and ask.
+- Use `fleet provider enable|disable <name>`, never a hand edit of the owner's config, then run `fleet doctor <name>` and report the result. Adding to `defaults.prefer` is also the owner's call: tell them the line, don't write it.
+- Never turn a provider on to get around a failure, a usage limit, a permission denial or a login prompt, and never turn one off to route a run somewhere else. Steer within the run's routing, or ask the owner.
+- Never sign a CLI in, answer its login or trust prompt, or set `placeholder = false`.
+
 ## Folder trust
 
 Claude Code, Codex and Antigravity ask once per folder whether to trust it. With `auto_trust = true` under `[defaults]` in the owner's `~/.config/agent-fleet/config.toml` (off by default), launch marks the repo trusted first, the way each adapter's `trust` field says:
@@ -82,7 +122,7 @@ Cursor can serve several families. The example tiers identify xAI (`grok-…`), 
 
 ## Antigravity
 
-`agy` ships disabled; enable it with `[providers.agy] enabled = true` once `fleet doctor agy` passes. It was checked live with agy 1.3.0: launch with an interactive first prompt (`-i`), follow-up input, `/exit` back to the shell, `doctor` and `fleet models agy`. `/exit` is the verified quit sequence.
+`agy` ships disabled. To use it, install and sign in to `agy`, run `fleet provider enable agy`, then `fleet doctor agy`. It was checked live with agy 1.3.0: launch with an interactive first prompt (`-i`), follow-up input, `/exit` back to the shell, `doctor` and `fleet models agy`. `/exit` is the verified quit sequence.
 
 - It runs in `accept-edits` mode: file edits are approved automatically, shell commands still ask. A worker's checks (even `git status`) wait at a prompt until someone answers it in the pane, so watch `fleet peek` after launch.
 - On first use in a folder it asks whether to trust it. With `auto_trust` on, launch adds the repo to its trusted workspaces first ([Folder trust](#folder-trust)); otherwise the owner answers, once per checkout.
@@ -92,7 +132,7 @@ Cursor can serve several families. The example tiers identify xAI (`grok-…`), 
 
 ## OpenCode
 
-`opencode` ships disabled; enable it with `[providers.opencode] enabled = true`. It was checked live with opencode 1.18.34: launch through the TUI's `--prompt` (submitted at once, the session stays interactive), follow-up input, `/exit` back to the shell, `doctor`, `fleet models opencode`, and a Fleet launch that ended in an in-scope change and a complete report.
+`opencode` ships disabled; turn it on with `fleet provider enable opencode`, then run `fleet doctor opencode`. It was checked live with opencode 1.18.34: launch through the TUI's `--prompt` (submitted at once, the session stays interactive), follow-up input, `/exit` back to the shell, `doctor`, `fleet models opencode`, and a Fleet launch that ended in an in-scope change and a complete report.
 
 - Model IDs are `provider/model`. The shipped tiers and login check assume OpenRouter (`opencode auth login`). `opencode models` lists only providers with credentials, so `login = "opencode models openrouter"` with `login_ok = "openrouter/"` is a real sign-in check; point both at the provider you use.
 - It serves many families, so the adapter is `mixed`: every tier and `models_allow` entry carries its family. The shipped tiers use Zhipu, Alibaba and DeepSeek models, which gives cross-family review options outside Anthropic, OpenAI and Google.
@@ -102,6 +142,23 @@ Cursor can serve several families. The example tiers identify xAI (`grok-…`), 
 
 ## Placeholder adapters
 
-The disabled `grok` and `muse` entries are incomplete placeholders, not supported providers. Verify that a binary with the expected name is actually the intended product; fill in a no-model authentication check, known family/tier metadata and tested launch/shutdown commands before use.
+`grok` and `muse` are placeholders, not supported providers. No Grok or Muse CLI has been checked, so their binary name (`grok`, `muse`), launch flags and `/quit` are guesses, and they have no sign-in check, model list or tiers. They ship with `placeholder = true`:
+
+- `fleet doctor` reports an enabled placeholder as `PLACEHOLDER` and fails.
+- `fleet provider enable`, `fleet plan`, `fleet launch` and `fleet steer provider` refuse it.
+
+**Grok and Muse models work today through Cursor.** The `cursor` adapter, on by default, offers `grok-4.7-high`, `grok-4.7-high-fast` and `muse-spark-1.3-max`. Its heavy and light tiers use Grok, and its review tier uses Muse. `fleet models cursor grok` and `fleet models cursor muse` list what your account offers. Use `agents=cursor:muse-spark-1.3-max` to pin one.
+
+To turn a placeholder into a working adapter, the owner fills it in under `[providers.grok]` (or `muse`) in the user config:
+
+1. Confirm that the installed binary is the intended product, and set `bin`.
+2. Set `launch` from the CLI's help: `{bin}`, `{model}`, `{effort}` if it has an effort flag, and `{prompt}` as an interactive first prompt that leaves the session open.
+3. Set `quit` to the key sequence that returns to the shell, checked in a real pane.
+4. Set `login` and `login_ok` to a command that spends no model call and prints a known string only when signed in.
+5. Set `models` if the CLI can list models; otherwise set `models_allow`.
+6. Add `tiers.heavy`, `tiers.standard`, `tiers.light` and `tiers.review` with models the account offers, plus `efforts` if the CLI takes one and `family` (on each tier for a mixed adapter).
+7. Set `placeholder = false`, then run `fleet provider enable <name>` and `fleet doctor <name>`.
+
+Then test it as below before routing real work to it.
 
 For every new adapter, test a harmless local ticket, multiple waves, a required review at capacity, process exit confirmation and recovery. Keep unavailable adapters out of auto routing. Login expiry needs the owner. On quota exhaustion the lead may resume after the reset or steer within the run's routing (skill step 1); otherwise it needs the owner. Neither is a reason to ignore the worker contract.

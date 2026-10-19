@@ -400,6 +400,101 @@ class Accounts(unittest.TestCase):
         self.assertEqual(out.getvalue().splitlines()[-1], f"fleet {fleet.VERSION}")
 
 
+class ProviderToggle(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "config.toml"
+        self.old = fleet.USER_CONFIG
+        fleet.USER_CONFIG = self.path
+
+    def tearDown(self):
+        fleet.USER_CONFIG = self.old
+        self.tmp.cleanup()
+
+    def run_cmd(self, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = fleet.main(["provider", *args])
+        return code, out.getvalue() + err.getvalue()
+
+    def enabled(self, name):
+        return fleet.load_config(self.path)["providers"][name].get("enabled", True)
+
+    def test_enable_creates_the_config_and_disable_flips_it_back(self):
+        code, out = self.run_cmd("enable", "agy")
+        self.assertEqual(code, 0)
+        self.assertIn("next: fleet doctor agy", out)
+        self.assertIn("add 'agy' to defaults.prefer", out)
+        self.assertTrue(self.enabled("agy"))
+        self.assertEqual(self.run_cmd("disable", "agy")[0], 0)
+        self.assertFalse(self.enabled("agy"))
+        self.assertEqual(self.path.read_text().count("[providers.agy]"), 1)
+
+    def test_edits_keep_every_other_line(self):
+        text = ('# mine\n[defaults]\nmax_parallel = 2\n[providers.cursor]\nmax = 1  # one is enough\n'
+                '[providers.cursor.tiers.heavy]\nmodel = "grok-4.7-high"\n'
+                '[providers."claude-co"]\nenabled = false  # signed in on Monday\n')
+        self.path.write_text(text)
+        self.assertEqual(self.run_cmd("disable", "cursor")[0], 0)
+        self.assertEqual(self.run_cmd("enable", "claude-co")[0], 0)
+        self.assertEqual(self.path.read_text(), text.replace("max = 1  #", "enabled = false\nmax = 1  #")
+                         .replace("enabled = false  # signed", "enabled = true  # signed"))
+        self.assertFalse(self.enabled("cursor"))
+        self.assertTrue(self.enabled("claude-co"))
+        cfg = fleet.load_config(self.path)
+        self.assertEqual(cfg["providers"]["cursor"]["max"], 1)
+
+    def test_no_change_when_already_in_that_state(self):
+        code, out = self.run_cmd("enable", "codex")
+        self.assertEqual(code, 0)
+        self.assertIn("already on", out)
+        self.assertFalse(self.path.exists())
+
+    def test_refuses_placeholders_unknown_names_and_unsafe_edits(self):
+        self.path.write_text("[providers]\nagy.max = 1\n")
+        before = self.path.read_text()
+        for args in (("enable", "grok"), ("enable", "muse"), ("enable", "nope"), ("enable", "agy")):
+            with self.subTest(args=args):
+                self.assertEqual(self.run_cmd(*args)[0], 1)
+        self.assertIn("placeholder", self.run_cmd("enable", "grok")[1])
+        self.assertIn("yourself", self.run_cmd("enable", "agy")[1])
+        self.assertEqual(self.path.read_text(), before)
+
+    def test_filled_in_placeholder_can_be_enabled(self):
+        self.path.write_text('[providers.grok]\nplaceholder = false\nlogin = "grok whoami"\n')
+        self.assertEqual(self.run_cmd("enable", "grok")[0], 0)
+        self.assertTrue(self.enabled("grok"))
+
+
+class Placeholders(unittest.TestCase):
+    def test_plan_launch_and_steer_refuse_placeholder_and_disabled_providers(self):
+        cfg = {"providers": {"on": {}, "off": {"enabled": False}, "stub": {"placeholder": True}}}
+        self.assertEqual(fleet.usable_provider(cfg, "on"), {})
+        with self.assertRaisesRegex(fleet.FleetError, "turned off.*fleet provider enable off"):
+            fleet.usable_provider(cfg, "off")
+        with self.assertRaisesRegex(fleet.FleetError, "placeholder"):
+            fleet.usable_provider(cfg, "stub")
+
+    def test_shipped_grok_and_muse_are_disabled_placeholders(self):
+        cfg = fleet.load_config(Path("/nonexistent/config.toml"))
+        for name in ("grok", "muse"):
+            p = cfg["providers"][name]
+            self.assertEqual((p["enabled"], p["placeholder"]), (False, True))
+
+    def test_doctor_fails_an_enabled_placeholder(self):
+        cfg = {"providers": {"stub": {"bin": "sh", "placeholder": True}}}
+        orig = fleet.cmux
+        fleet.cmux = lambda *a, **k: ""
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = fleet.cmd_doctor(type("A", (), {"providers": ["stub"]})(), cfg)
+        finally:
+            fleet.cmux = orig
+        self.assertEqual(code, 1)
+        self.assertIn("stub          PLACEHOLDER", out.getvalue())
+
+
 class Models(unittest.TestCase):
     def test_listing_formats(self):
         text = ("Available models\n\nauto - Auto (default)\ngrok-4.7-high - Grok 4.7  High\n"
