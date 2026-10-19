@@ -86,7 +86,7 @@ Lists the model IDs the provider's account offers, narrowed by the owner's `mode
 fleet provider enable|disable <name>
 ```
 
-Sets `enabled` under `[providers.<name>]` in the owner's config (`~/.config/agent-fleet/config.toml`), creating it if needed and leaving other lines alone. It does nothing when the provider is already in that state, and changes nothing when it cannot make the edit safely. `enable` refuses a placeholder adapter (`grok`, `muse`). It does not sign the CLI in or add the provider to `defaults.prefer`; it prints the next steps. Turning a provider off refuses new plans, launches and steers to it; running workers continue.
+Sets `enabled` under `[providers.<name>]` in the owner's config (`~/.config/agent-fleet/config.toml`, or `$FLEET_CONFIG`), creating it if needed and leaving other lines, comments and line endings alone. It does nothing when the provider is already in that state, and changes nothing when it cannot make the edit safely; then the owner edits the file by hand, never the lead. `enable` refuses a placeholder adapter (`grok`, `muse`). It does not sign the CLI in or add the provider to `defaults.prefer`; it prints the next steps. Turning a provider off refuses new plans, launches and steers to it; running workers continue.
 
 **Use:** only when the owner asks to turn that provider on or off. Run `fleet doctor <name>` after enabling. Never use it to route around a failure, limit, denial or login prompt. See [turning providers on and off](providers.md#turning-providers-on-and-off).
 

@@ -9,7 +9,7 @@ disable-model-invocation: true
 
 You are the lead. Workers are local interactive CLIs in cmux panes sharing one checkout. You own planning, routing, decisions, review and final verification. Workers implement one ticket at a time. The owner controls commits and publishing.
 
-Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute path and invoke `python3 <absolute-skill-path>/bin/fleet`. Never guess a checkout path. The [command reference](references/commands.md) lists every command and when to use it; `fleet <command> --help` gives exact flags.
+Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute path and invoke `python3 <absolute-skill-path>/bin/fleet`. Never guess a checkout path. The [command reference](references/commands.md) lists each command and when to use it; `fleet <command> --help` gives exact flags.
 
 ```text
 /fleet [auto | single:<provider> | agents=<provider>[:<model>],...]
@@ -17,7 +17,7 @@ Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute pat
        -- <local tickets directory, or tasks in plain words>
 ```
 
-These are conversational options for you to translate into CLI flags, not an autonomous scheduler. `/fleet` without tickets can also add another subscription, such as a second Claude or Codex account ([provider notes](references/providers.md#extra-subscriptions)). `fleet doctor` shows each provider's tiers and caps; `fleet providers` prints the merged config when you need adapter details. Read [harness requirements](references/harnesses.md), [routing](references/routing.md), and [provider notes](references/providers.md) as needed. [Worked examples](references/examples.md) show each step's commands.
+These are conversational options for you to translate into CLI flags, not an autonomous scheduler. `/fleet` without tickets can also add another subscription, such as a second Claude or Codex account ([provider notes](references/providers.md#extra-subscriptions)). `fleet doctor` shows each provider's tiers and caps; `fleet providers` prints the merged config only when you need adapter details. Read [harness requirements](references/harnesses.md), [routing](references/routing.md), and [provider notes](references/providers.md) as needed. [Worked examples](references/examples.md) show the commands.
 
 No ticket folder, or new work mid-run: follow [delegating mid-conversation](references/delegation.md) (inline `task`, read-only `kind: investigate`, `fleet add`, `fleet launch --ready`).
 
@@ -26,7 +26,7 @@ Companion skills are optional; `fleet doctor` lists them and [host setup](refere
 ## 1. Establish or resume the run
 
 - Read repository instructions, `.fleet/rules.md`, the agreed spec and the full tickets. Export remote issue content to local files first; a URL is not a `--ticket` input. Preserve original IDs and source links, using safe slug IDs for Fleet (`settings-copy`, not a path or URL).
-- Verify the active machine's absolute repository path. Run `fleet doctor` from it. For another subscription use `fleet account add <name> --from <adapter> --dir <path>`; turn a provider on or off only when the owner asks: `fleet provider enable|disable <name>` ([rules](references/providers.md#agent-rules)). The owner signs in; never sign in for them. Route only to adapters whose executable and authentication checks pass, and verify the selected model/effort is available. Doctor fails on a tier model the account doesn't offer; `fleet models <provider> [filter]` lists the models you may choose, narrowed by the owner's `models_allow` (pass a filter: some accounts offer hundreds); only propose models from it, and propose a replacement to the owner rather than silently substituting one. Doctor does not prove launch readiness.
+- Verify the active machine's absolute repository path. Run `fleet doctor` from it. If the owner wants another subscription, use `fleet account add <name> --from <adapter> --dir <path>`; turn a provider on or off only when the owner asks: `fleet provider enable|disable <name>` ([rules](references/providers.md#agent-rules)). Never sign in for the owner. Route only to adapters whose executable and authentication checks pass, and verify the selected model/effort is available. Doctor fails on a tier model the account doesn't offer; `fleet models <provider> [filter]` lists the models you may choose, narrowed by the owner's `models_allow` (pass a filter: some accounts offer hundreds); only propose models from it, and propose a replacement to the owner rather than silently substituting one. Doctor does not prove launch readiness.
 - If the named run exists, use `fleet resume <run>` (one line per ticket; `--json` for full records), then inspect the reports, decisions, any `notes.md` and reconciled process states. Do not initialize a replacement or relaunch a worker whose exit is unconfirmed.
 - Otherwise use `fleet init <run> [--workspace <ref>] [--routing <mode>] [--review <mode>]`. Map conversational `workspace=`, routing and `review=` directly to these flags. Init validates the selected cmux workspace and stores its UUID, because cmux renumbers refs like `workspace:2` when it restarts; never fall back to an unrelated workspace.
 

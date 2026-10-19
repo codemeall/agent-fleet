@@ -457,8 +457,32 @@ class ProviderToggle(unittest.TestCase):
             with self.subTest(args=args):
                 self.assertEqual(self.run_cmd(*args)[0], 1)
         self.assertIn("placeholder", self.run_cmd("enable", "grok")[1])
-        self.assertIn("yourself", self.run_cmd("enable", "agy")[1])
+        self.assertIn("the owner sets its enabled = true there by hand", self.run_cmd("enable", "agy")[1])
         self.assertEqual(self.path.read_text(), before)
+
+    def test_new_file_has_no_leading_blank_line(self):
+        self.assertEqual(self.run_cmd("enable", "agy")[0], 0)
+        self.assertEqual(self.path.read_text(), "[providers.agy]\nenabled = true\n")
+
+    def test_keeps_crlf_line_endings(self):
+        self.path.write_bytes(b"[defaults]\r\nmax_parallel = 2\r\n[providers.agy]\r\nenabled = false # later\r\n")
+        self.assertEqual(self.run_cmd("enable", "agy")[0], 0)
+        self.assertEqual(self.run_cmd("disable", "cursor")[0], 0)
+        self.assertEqual(self.path.read_bytes(),
+                         b"[defaults]\r\nmax_parallel = 2\r\n[providers.agy]\r\nenabled = true # later\r\n"
+                         b"\r\n[providers.cursor]\r\nenabled = false\r\n")
+
+    def test_writes_through_a_symlink_and_keeps_permissions(self):
+        real = Path(self.tmp.name) / "dotfiles" / "fleet.toml"
+        real.parent.mkdir()
+        real.write_text("[defaults]\nmax_parallel = 2\n")
+        real.chmod(0o600)
+        self.path.symlink_to(real)
+        self.assertEqual(self.run_cmd("enable", "agy")[0], 0)
+        self.assertTrue(self.path.is_symlink())
+        self.assertEqual(real.stat().st_mode & 0o777, 0o600)
+        self.assertTrue(fleet.load_config(real)["providers"]["agy"]["enabled"])
+        self.assertEqual(sorted(p.name for p in real.parent.iterdir()), ["fleet.toml"])
 
     def test_filled_in_placeholder_can_be_enabled(self):
         self.path.write_text('[providers.grok]\nplaceholder = false\nlogin = "grok whoami"\n')
@@ -474,6 +498,28 @@ class Placeholders(unittest.TestCase):
             fleet.usable_provider(cfg, "off")
         with self.assertRaisesRegex(fleet.FleetError, "placeholder"):
             fleet.usable_provider(cfg, "stub")
+
+    def test_init_refuses_routing_to_an_off_or_placeholder_provider(self):
+        cfg = fleet.load_config(Path("/nonexistent/config.toml"))
+        with mock.patch.object(fleet, "repo_root", return_value=Path("/nonexistent")), \
+                mock.patch.object(fleet, "ensure_other_runs_idle"), mock.patch.object(fleet, "run_dir") as run_dir:
+            run_dir.return_value = Path("/nonexistent/run")
+            for routing, why in (("single:grok", "placeholder"), ("agents=codex,agy", "turned off")):
+                with self.subTest(routing=routing):
+                    args = type("A", (), {"run": "r", "routing": routing, "review": None, "workspace": None})()
+                    with self.assertRaisesRegex(fleet.FleetError, why):
+                        fleet.cmd_init(args, cfg)
+
+    def test_models_names_a_placeholder(self):
+        cfg = fleet.load_config(Path("/nonexistent/config.toml"))
+        with self.assertRaisesRegex(fleet.FleetError, "placeholder"):
+            fleet.cmd_models(type("A", (), {"provider": "muse", "all": False, "filter": None})(), cfg)
+
+    def test_config_names_the_flag_that_is_not_a_boolean(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
+            fh.write('[providers.agy]\nenabled = "yes"\n')
+        with self.assertRaisesRegex(fleet.FleetError, r"^agy\.enabled must be true or false$"):
+            fleet.load_config(Path(fh.name))
 
     def test_shipped_grok_and_muse_are_disabled_placeholders(self):
         cfg = fleet.load_config(Path("/nonexistent/config.toml"))

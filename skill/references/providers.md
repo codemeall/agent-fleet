@@ -20,7 +20,7 @@ fleet doctor agy                # then check its binary, sign-in and tier models
 fleet provider disable cursor   # turn one off, a shipped one included
 ```
 
-`fleet provider enable|disable <name>` sets `enabled` under `[providers.<name>]` in `~/.config/agent-fleet/config.toml` (or `$FLEET_CONFIG`), creating the file or the section if needed and leaving every other line as it was. It does nothing when the provider is already in that state. If it cannot make the edit safely, for example when the config sets the provider through a dotted key, it changes nothing and says which line to set yourself. Editing the file by hand does the same thing:
+`fleet provider enable|disable <name>` sets `enabled` under `[providers.<name>]` in `~/.config/agent-fleet/config.toml` (or `$FLEET_CONFIG`), creating the file or the section if needed. Every other line stays as it was, including comments (a comment on the `enabled` line is kept as written) and line endings; a symlinked config is written through to its target with its permissions. It does nothing when the provider is already in that state. If it cannot make the edit safely, for example when the config sets the provider through a dotted key or an inline table, it changes nothing and says so; the owner then edits that line by hand. A non-boolean value such as `enabled = "yes"` makes every Fleet command fail until the owner fixes it by hand. Editing the file by hand does the same thing as the command:
 
 ```toml
 [providers.agy]
@@ -30,8 +30,8 @@ enabled = true
 enabled = false
 ```
 
-- **Auto routing** uses enabled, authenticated providers in `defaults.prefer` order. Turning a provider on does not add it there; add its name to `prefer` under `[defaults]` yourself. `single:<name>` and `agents=` routing can name it without that.
-- **Turning one off** stops new plans, launches, steers and review launches that name it. Workers already running on it keep running until they finish or you stop them. To move a live run off a failing provider, steer it ([skill](../SKILL.md#steering-routing)) rather than turning the provider off mid-run.
+- **Auto routing** uses enabled, authenticated providers in `defaults.prefer` order. Turning a provider on does not add it there; add its name to `prefer` under `[defaults]` yourself. `single:<name>` and `agents=` routing can name it without that; `fleet init` refuses such routing when a named provider is off or a placeholder.
+- **Turning one off** stops new plans, launches, steers and review launches that name it. Workers already running on it keep running until they finish or you stop them. To move a live run off a failing provider, steer it ([skill](../SKILL.md#steering-routing)) rather than turning the provider off mid-run. A run steered to a provider that is then turned off cannot launch until `fleet steer reset <run>` or a steer elsewhere.
 - **Sign-in** is separate. Enabling a provider never signs it in: the owner signs the CLI in, then runs `fleet doctor <name>`.
 - **Placeholders** cannot be turned on until they are filled in ([below](#placeholder-adapters)).
 
@@ -40,7 +40,7 @@ enabled = false
 A Fleet lead, or any other agent working in the session, follows these rules:
 
 - Turn a provider on or off only when the owner asks for that provider in the session ("turn on Antigravity", "stop using Cursor"). A routing request such as `single:agy` that names a provider that is off is not that request: tell the owner it is off and ask.
-- Use `fleet provider enable|disable <name>`, never a hand edit of the owner's config, then run `fleet doctor <name>` and report the result. Adding to `defaults.prefer` is also the owner's call: tell them the line, don't write it.
+- Use `fleet provider enable|disable <name>`, never a hand edit of the owner's config, then run `fleet doctor <name>` and report the result. If the command refuses, show the owner its message; don't edit the file. Adding to `defaults.prefer` is also the owner's call: tell them the line, don't write it.
 - Never turn a provider on to get around a failure, a usage limit, a permission denial or a login prompt, and never turn one off to route a run somewhere else. Steer within the run's routing, or ask the owner.
 - Never sign a CLI in, answer its login or trust prompt, or set `placeholder = false`.
 
@@ -80,7 +80,7 @@ Codex's list comes from `codex debug models`, a debug command that refreshes its
 
 The default `claude` adapter uses the normal account and interactive permission controls. `opus` and `sonnet` are example aliases. Effort support depends on the installed CLI and model. Do not respond to a permission denial by switching account or bypassing the host's controls.
 
-`claude-co` is a disabled example of a second account using `CLAUDE_CONFIG_DIR=~/.claude-co`. Enable it only after the owner has signed that account in. It must receive a self-contained prompt; do not assume the same plugins exist under both configurations. Both accounts use Anthropic-family models, so switching between them does not satisfy cross-family review.
+`claude-co` is a disabled example of a second account using `CLAUDE_CONFIG_DIR=~/.claude-co`. Turn it on with `fleet provider enable claude-co` only after the owner has signed that account in. It must receive a self-contained prompt; do not assume the same plugins exist under both configurations. Both accounts use Anthropic-family models, so switching between them does not satisfy cross-family review.
 
 Claude workers start with `--session-id` set to a UUID Fleet records, so `fleet launch --resume` can continue the same conversation with `--resume` after a usage limit resets. A session stays with the account that ran it. Other adapters can opt in through the `session` and `resume` fields in `providers.toml`.
 
