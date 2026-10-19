@@ -1,7 +1,7 @@
 {
   "name": "@codemeall/agent-fleet",
-  "version": "0.1.0-preview.21",
-  "description": "Coordinate coding-agent CLIs in cmux with a portable Fleet skill.",
+  "version": "0.1.0-preview.22",
+  "description": "Coordinate coding-agent CLIs in cmux or headless tmux with a portable Fleet skill.",
   "license": "MIT",
   "author": "codemeall",
   "repository": {
@@ -54,6 +54,7 @@
   },
   "keywords": [
     "cmux",
+    "tmux",
     "agents",
     "skills",
     "claude-code",

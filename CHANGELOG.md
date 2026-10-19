@@ -12,6 +12,18 @@ Turn providers on and off with a command, and placeholder adapters can no longer
 - The placeholder notes say Grok and Muse models work today through the Cursor adapter, and list the fields to fill in to make a working adapter.
 - README and `config.example.toml` show the command, turning off a shipped provider and the `defaults.prefer` step.
 
+## 0.1.0-preview.22
+
+Fleet is no longer tied to cmux: workers can run headless in tmux, and the owner can browse and open any worker.
+
+- Terminal backends. `fleet init <run> --backend cmux|tmux` (or `backend` under `[defaults]`, or `backend=` in the request to the lead) picks where a run's workers live, and the run keeps it. The default, `auto`, uses cmux inside cmux or when a workspace is named, so every setup that worked before still uses cmux; elsewhere it runs workers headless in tmux. Runs created before this change stay on cmux.
+- The tmux backend runs each worker in its own window of a detached session per run (`fleet-<checkout>-<run>-<hash>`) on Fleet's own tmux server (`tmux -L fleet`; `tmux_socket = ""` uses your default server). It works on macOS and Linux, over SSH and in containers, with no pane limit. A worker's window stays after it exits so its last screen stays readable; `stop --close` removes it. Window IDs are checked against the server that created them, so a restarted tmux server never has Fleet type into someone else's window; its lost workers show as `UNREACHABLE` and are recovered like a closed cmux pane.
+- Workers no longer inherit the lead's session variables (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`, cmux and tmux markers) under tmux, so a Claude Code worker starts even when the lead is Claude Code.
+- `fleet agents [<run>]` is the owner's worker browser, like Claude Code's agent list: arrow keys pick a worker and show its screen live, enter opens it full size, `a` attaches to it. `--list` prints the rows once. It reads run state only, so it can stay open beside the lead.
+- `fleet attach <run> <id> [--read-only]` opens one headless worker's terminal (under cmux it names the worker's tab).
+- `fleet doctor` reports cmux and tmux separately and fails only when your configured backend (under `auto`, both) is unavailable. `status` and `resume` name a tmux run's session instead of a workspace, and `resume --json` includes `backend`.
+- CI installs tmux so the headless backend's live tests run on Linux and macOS.
+
 ## 0.1.0-preview.21
 
 Workers in a shared checkout handle other workers' edits and the lead's local-server checks.

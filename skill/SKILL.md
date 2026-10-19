@@ -1,19 +1,19 @@
 ---
 name: fleet
-description: Plan, launch, resume and verify a local fleet of coding-agent CLIs in visible cmux panes for approved tickets, with saved dependencies and explicit file ownership.
-argument-hint: "[auto|single:<provider>|agents=...] [workspace=<ref>] [review=<mode>] -- <tickets dir or tasks>"
+description: Plan, launch, resume and verify a local fleet of coding-agent CLIs in cmux panes or headless tmux for approved tickets, with saved dependencies and explicit file ownership.
+argument-hint: "[auto|single:<provider>|agents=...] [backend=cmux|tmux] [workspace=<ref>] [review=<mode>] -- <tickets dir or tasks>"
 disable-model-invocation: true
 ---
 
 # Fleet
 
-You are the lead. Workers are local interactive CLIs in cmux panes sharing one checkout. You own planning, routing, decisions, review and final verification. Workers implement one ticket at a time. The owner controls commits and publishing.
+You are the lead. Workers are local interactive CLIs in cmux panes or headless tmux windows, sharing one checkout. You own planning, routing, decisions, review and final verification. Workers implement one ticket at a time. The owner controls commits and publishing.
 
 Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute path and invoke `python3 <absolute-skill-path>/bin/fleet`. Never guess a checkout path. The [command reference](references/commands.md) lists each command and when to use it; `fleet <command> --help` gives exact flags.
 
 ```text
 /fleet [auto | single:<provider> | agents=<provider>[:<model>],...]
-       [workspace=<ref>] [review=off|cross-heavy|cross-all]
+       [backend=cmux|tmux] [workspace=<ref>] [review=off|cross-heavy|cross-all]
        -- <local tickets directory, or tasks in plain words>
 ```
 
@@ -21,14 +21,14 @@ These are conversational options for you to translate into CLI flags, not an aut
 
 No ticket folder, or new work mid-run: follow [delegating mid-conversation](references/delegation.md) (inline `task`, read-only `kind: investigate`, `fleet add`, `fleet launch --ready`).
 
-Companion skills are optional; `fleet doctor` lists them and [host setup](references/harnesses.md) says where each fits. Run `grill-with-docs`/`grill-me`, `to-spec` and `to-tickets` only when the owner asks. `feature-docs` is step 6. The `cmux` skill may inspect panes (to find a `workspace=` ref) under the focus rule; `fleet` still launches and stops workers. Workers never need them.
+Companion skills are optional; `fleet doctor` lists them and [host setup](references/harnesses.md) says where each fits. Run `grill-with-docs`/`grill-me`, `to-spec` and `to-tickets` only when the owner asks. `feature-docs` is step 6. The `cmux` skill may inspect panes (to find a `workspace=` ref); `fleet` still launches and stops workers. Workers never need them.
 
 ## 1. Establish or resume the run
 
 - Read repository instructions, `.fleet/rules.md`, the agreed spec and the full tickets. Export remote issue content to local files first; a URL is not a `--ticket` input. Preserve original IDs and source links, using safe slug IDs for Fleet (`settings-copy`, not a path or URL).
-- Verify the active machine's absolute repository path. Run `fleet doctor` from it. If the owner wants another subscription, use `fleet account add <name> --from <adapter> --dir <path>`; turn a provider on or off only when the owner asks: `fleet provider enable|disable <name>` ([rules](references/providers.md#agent-rules)). Never sign in for the owner. Route only to adapters whose executable and authentication checks pass, and verify the selected model/effort is available. Doctor fails on a tier model the account doesn't offer; `fleet models <provider> [filter]` lists the models you may choose, narrowed by the owner's `models_allow` (pass a filter: some accounts offer hundreds); only propose models from it, and propose a replacement to the owner rather than silently substituting one. Doctor does not prove launch readiness.
+- Verify the active machine's absolute repository path. Run `fleet doctor` from it. If the owner wants another subscription, use `fleet account add <name> --from <adapter> --dir <path>`; turn a provider on or off only when the owner asks: `fleet provider enable|disable <name>` ([rules](references/providers.md#agent-rules)). Never sign in for the owner. Route only to adapters whose executable and authentication checks pass, and verify the selected model/effort is available. Doctor fails on a tier model the account doesn't offer; `fleet models <provider> [filter]` lists the models you may choose, narrowed by the owner's `models_allow`; only propose models from it, and propose a replacement to the owner rather than silently substituting one.
 - If the named run exists, use `fleet resume <run>` (one line per ticket; `--json` for full records), then inspect the reports, decisions, any `notes.md` and reconciled process states. Do not initialize a replacement or relaunch a worker whose exit is unconfirmed.
-- Otherwise use `fleet init <run> [--workspace <ref>] [--routing <mode>] [--review <mode>]`. Map conversational `workspace=`, routing and `review=` directly to these flags. Init validates the selected cmux workspace and stores its UUID, because cmux renumbers refs like `workspace:2` when it restarts; never fall back to an unrelated workspace.
+- Otherwise use `fleet init <run> [--backend cmux|tmux] [--workspace <ref>] [--routing <mode>] [--review <mode>]`, mapping `backend=`, `workspace=`, routing and `review=` to these flags. By default init uses cmux inside cmux, else headless tmux; relay its `fleet agents` line. Init validates a cmux workspace and stores its UUID (cmux renumbers refs on restart); never fall back to an unrelated workspace.
 
 ### Steering routing
 
@@ -70,7 +70,7 @@ Give each ticket `context` (agreed spec and testing decisions, actual glossary/A
 - Resolve the actual glossary/ADR paths from project configuration. Prefer `GLOSSARY.md` and optional `GLOSSARY-MAP.md`, with `CONTEXT.md` for older repositories. Carry upstream `to-spec` testing and design decisions forward. Do not blindly invoke upstream `/implement`: it includes commits that Fleet forbids.
 - `fleet launch <run> <id> <provider> --tier <tier> [--model <model>] [--effort <effort>] [--family <family>]` must match the saved assignment. The CLI enforces blockers, active file ownership and capacity, and gives each worker its own pane ([placement](references/commands.md#launch)), never yours. When every other pane has a live worker, launch refuses before touching the run; stop a worker first. `--pane <ref|uuid|index>` picks the pane.
 - `fleet hold [--reason <text>]` blocks new launches in this checkout, for every run, while running workers continue; `fleet release` lifts it. Use either only when the owner asks. When launch refuses because of a hold, do not retry: verify running workers as usual, tell the owner, and end your turn; running workers carry on, so do not `fleet stop` them.
-- Launch ends by printing the worker's screen a few seconds in: read it for a login, trust, model or permission prompt; never answer one. Never assume creating a pane means work started, but do not peek to confirm it: `fleet wait` reports a new worker whose screen stays unchanged for a minute as `STALLED`. Use `fleet peek <run> <id>` when the launch screen or a wake line calls for it. Peek shows 20 lines; pass `--lines` when a dialog or error is cut off.
+- Launch ends by printing the worker's screen a few seconds in: read it for a login, trust, model or permission prompt; never answer one. Never assume a new pane means work started, but do not peek to confirm it: `fleet wait` reports a new worker whose screen stays unchanged for a minute as `STALLED`. Use `fleet peek <run> <id>` when the launch screen or a wake line calls for it.
 
 ## 4. Watch and resolve blockers
 
@@ -80,7 +80,7 @@ Every wait is a full turn over your whole context, so wait long and rarely. Use 
 - `REPORT <id> [blocked]`: clarify an authorized task decision with `fleet send <run> <id> <answer>` and save the decision in `.fleet/runs/<run>/notes.md` (the saved plan is frozen after launch).
 - `EXITED <id>`: the process ended before handing back; run `fleet status`, read its report, then repair or relaunch within its assignment.
 - `STALLED <id>`: its screen has not changed for `--stall` seconds (default 180; 60 in a worker's first minutes), including after you answered it; `fleet peek` it for a prompt, error or usage limit.
-- `UNREACHABLE <id>`: cmux cannot read its pane; the pane may be closed. A missing pane is not exit evidence (step 6).
+- `UNREACHABLE <id>`: its pane or window can't be read; it may be closed. A missing pane is not exit evidence (step 6).
 - `HOLD`: launches are on hold and no worker is running. Handle any `PENDING <id>` lines, tell the owner, and end your turn; do not wait again until they release.
 - `TIMEOUT`: nothing new. Handle any `PENDING <id>` lines it prints (reports still waiting on you), otherwise wait again; do not peek or check status by reflex.
 
@@ -121,6 +121,6 @@ The spec and tickets under `.scratch/` never reach Git; the feature is that `.sc
 ## Shared-checkout rules
 
 - Preserve the worker preamble and exact scope. Scope additions need a conflict check and, after launch, a follow-up run before editing.
-- Use Fleet or non-focusing cmux actions. Do not take the owner's focus.
+- Use Fleet or non-focusing cmux actions. Do not take the owner's focus; `fleet agents` and `fleet attach` are the owner's.
 - Run builds that would disturb a live dev server in an appropriate isolated copy; never run them over shared build output without checking repository instructions.
 - No worker commits, stages, pushes, deploys, installs packages, migrates data or accesses secrets. Network-dependent work must be handled separately under explicit owner authorization; changing providers does not remove these rules.

@@ -1,6 +1,6 @@
 # Lead host requirements
 
-The lead needs this skill, a local shell, access to the intended Git checkout, and permission to reach the cmux socket. Run `fleet doctor` in that same environment; a terminal outside the host is not proof that the host's sandbox can reach cmux.
+The lead needs this skill, a local shell, access to the intended Git checkout, and a terminal backend for workers: permission to reach the cmux socket, or `tmux` on its PATH for headless workers (any OS Fleet runs on, including Linux, SSH sessions and containers). Run `fleet doctor` in that same environment; a terminal outside the host is not proof that the host's sandbox can reach cmux or start tmux.
 
 | Host | Standalone invocation | User installation |
 | --- | --- | --- |
@@ -15,8 +15,8 @@ Optional companion skills for the lead: `cmux` from `manaflow-ai/cmux`, `grill-w
 
 ## Permission and connectivity checks
 
-1. Confirm Python 3.11+, Git, cmux and selected worker CLIs are available in the lead's shell.
-2. Confirm cmux is running and the intended workspace exists. Inside cmux the current workspace can be used; otherwise supply `fleet init <run> --workspace <ref>` explicitly.
+1. Confirm Python 3.11+, Git, cmux or tmux, and selected worker CLIs are available in the lead's shell.
+2. For cmux, confirm it is running and the intended workspace exists. Inside cmux the current workspace can be used; otherwise supply `fleet init <run> --workspace <ref>` explicitly. For headless workers, `fleet init <run> --backend tmux` (the default outside cmux) needs only tmux; Fleet starts its own tmux server, and the owner watches workers with `fleet agents`.
 3. Run `fleet doctor`; diagnose its actual socket, executable or authentication error.
 4. If the host blocks a required operation, use its normal approval mechanism or have the owner configure a narrow allowance. Consult documentation for that installed host version. Do not disable the sandbox, switch permission modes or route to another harness to evade a rejection.
 5. Launch one small, scoped ticket and inspect it with `fleet peek` before starting a larger wave. Trust (unless the owner set `auto_trust`), authentication and model selection may still need owner input.

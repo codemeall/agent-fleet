@@ -1,7 +1,7 @@
 {
   "name": "agent-fleet",
-  "version": "0.1.0-preview.21",
-  "description": "Lead coding-agent CLIs in cmux from a portable Fleet skill.",
+  "version": "0.1.0-preview.22",
+  "description": "Lead coding-agent CLIs in cmux or headless tmux from a portable Fleet skill.",
   "author": {
     "name": "codemeall"
   },
@@ -11,7 +11,7 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Agent Fleet",
-    "shortDescription": "Coordinate coding agents in cmux.",
+    "shortDescription": "Coordinate coding agents in cmux or tmux.",
     "longDescription": "Plan, route, launch and verify coding-agent workers with a portable local Fleet skill.",
     "developerName": "codemeall",
     "category": "Productivity",

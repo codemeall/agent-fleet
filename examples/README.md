@@ -10,7 +10,7 @@ For this example the agreed spec is: “Explain Fleet's lead/worker relationship
 
 Copy `tickets/`, `plan.json` and `rules.md` into your chosen repository's `examples/`, `examples/plan.json` and `.fleet/rules.md` locations respectively, preserving any existing rules by merging deliberately. The plan's ticket paths assume `examples/tickets/`. Do not overwrite project instructions. Choose available models in the plan before launch; the checked-in example uses Codex light-tier defaults only and explicitly turns cross-family review off for these prose tickets.
 
-From the repository in the intended cmux workspace:
+From the repository, in the intended cmux workspace (or any terminal, for headless tmux workers; add `--backend tmux` to `init` to choose it explicitly):
 
 ```sh
 fleet doctor
@@ -28,7 +28,7 @@ fleet launch docs-demo glossary codex --tier light
 fleet wait docs-demo --timeout 540   # your host's longest command timeout, at most 600
 ```
 
-With capacity one, launch only the first; stop and verify it before launching the second. If this shell cannot find `fleet`, use the absolute installed skill's `bin/fleet` path throughout.
+To watch the workers yourself, run `fleet agents docs-demo` in another terminal: pick one with the arrow keys to see its screen live, press `a` to attach to a headless one. With capacity one, launch only the first; stop and verify it before launching the second. If this shell cannot find `fleet`, use the absolute installed skill's `bin/fleet` path throughout.
 
 ## Verify and continue
 
