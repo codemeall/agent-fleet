@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.22
 
 Fleet is no longer tied to cmux: workers can run headless in tmux, and the owner can browse and open any worker.
 
