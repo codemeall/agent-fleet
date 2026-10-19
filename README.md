@@ -11,10 +11,14 @@ The lead turns approved tickets into a saved execution plan, picks a worker mode
   - [Companion skills (optional)](#companion-skills-optional)
 - [Usage](#usage)
 - [Where workers run: cmux or headless](#where-workers-run-cmux-or-headless)
+  - [Running workers in cmux](#running-workers-in-cmux)
+  - [Running workers headless in tmux](#running-workers-headless-in-tmux)
+  - [Watching workers with `fleet agents`](#watching-workers-with-fleet-agents)
 - [Keeping the lead sharp](#keeping-the-lead-sharp)
 - [State, continuation and safety](#state-continuation-and-safety)
 - [Compatibility and adapters](#compatibility-and-adapters)
 - [Development](#development)
+  - [Terminal backends](#terminal-backends)
 
 ## Quick start
 
@@ -293,6 +297,82 @@ Every run picks a terminal backend at `fleet init` and keeps it. Both run the sa
 
 Choose with `backend=cmux|tmux` in your request to the lead, `fleet init <run> --backend …`, or `backend` under `[defaults]` in your config. The default, `auto`, uses cmux when the lead runs inside cmux (or you name a workspace) and headless tmux otherwise, so existing cmux setups behave as before.
 
+| How you choose | Example | Applies to |
+| --- | --- | --- |
+| In your request to the lead | `/fleet backend=tmux -- .scratch/settings/issues` | That run |
+| On the command line | `fleet init settings --backend tmux` | That run |
+| In your config | `backend = "tmux"` under `[defaults]` | Every new run |
+| Nothing | `auto`: cmux inside cmux or with a `workspace=`, otherwise tmux | Every new run |
+
+A run never changes backend after `init`. To move work to the other backend, finish or stop the run and start a new one. `fleet resume <run>` and `fleet status <run>` show which one a run uses (`workspace …` for cmux, `tmux session …` for tmux).
+
+### Running workers in cmux
+
+Use cmux when you're on macOS and want to see every worker on screen beside the lead.
+
+1. Install and start [cmux](https://github.com/manaflow-ai/cmux), and open a workspace for the repository.
+2. Start your agent host (Claude Code, Codex, Cursor) **inside that workspace**, in the repository.
+3. Run `fleet doctor`; the `cmux` line must say `ready`.
+4. Ask the lead to run your tickets, for example:
+   > Use `/fleet` with auto routing for the approved tickets in `.scratch/settings/issues`.
+
+   To be explicit, add `backend=cmux`. To target a workspace other than the current one, add `workspace=workspace:3` (the `cmux` companion skill helps find the ref).
+5. Each worker opens in its own pane, labelled `<ticket> · <provider>:<model>@<effort>`. Up to 8 panes, launch splits the largest one; past that it reuses panes of verified workers or adds tabs. Click a pane to watch it, or run `fleet agents` in another pane for the list view.
+
+Don't type into a worker's pane while the lead is driving it; ask the lead to `send` a message instead.
+
+### Running workers headless in tmux
+
+Use tmux when you're not on macOS, work over SSH or in a container, don't want panes opening around the lead, or run more than 8 workers.
+
+1. Install tmux 3.0 or newer:
+   ```sh
+   brew install tmux          # macOS
+   sudo apt install tmux      # Debian/Ubuntu
+   sudo dnf install tmux      # Fedora
+   ```
+2. Start your agent host in the repository, in any terminal. You don't need to be inside tmux.
+3. Run `fleet doctor`; the `tmux` line must show a version. A failing `cmux` line is fine for tmux runs.
+4. Ask the lead, adding `backend=tmux` (or rely on `auto` when you're outside cmux):
+   > Use `/fleet` with auto routing and `backend=tmux` for the approved tickets in `.scratch/settings/issues`.
+
+   `fleet init` prints a line like `backend: tmux (headless): workers start in session fleet-app-settings-3fa2; the owner watches them with fleet agents settings`, which the lead passes on to you.
+5. Nothing opens on screen. Each worker gets its own window in that session, named after its ticket and model. Open a second terminal in the repository and run `fleet agents` to watch them (see [below](#watching-workers-with-fleet-agents)).
+6. When the run closes, the lead stops the workers. A finished worker's window stays (with its last screen) until `fleet stop <run> <id> --close`, or until you end the session yourself with `tmux -L fleet kill-session -t <session>`.
+
+To make headless the default everywhere, put this in `~/.config/agent-fleet/config.toml`:
+
+```toml
+[defaults]
+backend = "tmux"
+# tmux_socket = ""   # optional: use your normal tmux server instead of Fleet's own
+```
+
+**On a remote machine.** SSH in, start the lead there (for example `claude` in the repository) and ask for `backend=tmux`. Workers keep running if your SSH connection drops, because tmux owns them. The lead doesn't, so run the lead itself inside tmux or `screen` too if it must survive a disconnect. Reconnect and run `fleet agents` to look in.
+
+**Plain tmux works too.** Fleet keeps its sessions on a separate tmux server named `fleet`, so they never mix with your own sessions:
+
+| To | Run |
+| --- | --- |
+| List Fleet's sessions | `tmux -L fleet ls` |
+| Open a run's session | `tmux -L fleet attach -t <session>` |
+| Jump between workers inside it | your prefix (`Ctrl-b` by default), then `w` |
+| Leave without stopping anything | your prefix, then `d` |
+| Watch without being able to type | `fleet attach <run> <id> --read-only` |
+
+With `tmux_socket = ""`, drop the `-L fleet`: workers then appear in your normal `tmux ls`, and `fleet attach` from inside tmux switches straight to the worker instead of opening tmux inside tmux.
+
+**If something looks wrong:**
+
+| Symptom | Cause and fix |
+| --- | --- |
+| `init` says `no terminal backend` | Neither cmux nor tmux is available. Install tmux, or start the lead inside cmux. |
+| `init` says `no cmux workspace` | The run is set to cmux but the lead isn't inside a cmux workspace. Pass `backend=tmux`, or start the lead inside cmux. |
+| `--pane applies to cmux runs` | `--pane` places cmux panes; tmux workers always get their own window. Drop it. |
+| `UNREACHABLE <id>` or `tmux window @3 is gone` | The window was closed or the tmux server stopped (reboot, `kill-server`). The worker is gone without an exit receipt: confirm it, then `fleet recover`, as for a lost cmux pane. Fleet never types into a window that a restarted server reused. |
+| A Claude Code worker quits at once under a Claude Code lead | Shouldn't happen: Fleet removes the lead's `CLAUDECODE` and session variables from tmux workers. Check `fleet peek` and report it. |
+| Detach keys don't work inside `fleet agents` | You're already inside tmux, so press your prefix twice, then `d`. |
+
 ### Watching workers with `fleet agents`
 
 Run `fleet agents` in any terminal in the repository (it opens the run changed most recently; name one to pick another). It works like Claude Code's agent list:
@@ -470,5 +550,87 @@ The lead carries `skill/SKILL.md` on every turn of a run, so a test holds it to 
 The Codex bundle expresses explicit invocation through `agents/openai.yaml`. Add it through a configured Codex plugin marketplace, because `codex plugin add` takes a marketplace selector rather than a local path. Codex marketplace discovery still needs live validation, so the portable skill install is the common path for all three hosts.
 
 **Releasing:** bump the version in `package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` and `plugin-manifests/codex.json`. Run the checks above and `npm pack`, then inspect the tarball. Once npm publishing is set up, publish with `npm publish --access public --tag preview`. Setup, build and tests never publish anything.
+
+### Terminal backends
+
+Everything that touches a worker's terminal goes through one small layer in `skill/bin/fleet` (the `terminal backends` section). Command code never calls cmux or tmux directly: it calls `terminal(state)`, which returns the backend the run was created with.
+
+```text
+fleet launch / peek / send / wait / stop / agents / attach
+                    │
+             terminal(state)      state["backend"]: "cmux" | "tmux" (missing means cmux, for older runs)
+              ┌─────┴──────┐
+            Cmux          Tmux
+      cmux CLI socket   tmux -L <tmux_socket>, one detached session per run
+```
+
+**What a run records.** `fleet init` calls `pick_backend()` and saves `backend` in `run.json`, plus `workspace` (the cmux workspace UUID, or the tmux session name from `tmux_session_name()`) and, for tmux, `tmux_socket`. Each worker records `surface`, what people see (`surface:4`, or a window id like `@3`), and `surface_id`, what Fleet addresses (the cmux surface UUID, or `<server pid>/<window id>` for tmux). Both are stable on purpose: cmux refs and tmux window ids are reused after a restart.
+
+**The interface.** A backend is a class built from the run state, with these methods:
+
+| Method | Called by | Must |
+| --- | --- | --- |
+| `check(cfg)` (static) | `doctor`, `init` | Return a one-line status, or raise `FleetError` when unusable |
+| `where()` | `status`, `resume`, `agents` | Say where the run's workers live |
+| `place(state, want)` | `launch`, before any side effect | Decide where the worker goes, or refuse (raise) without changing anything. `want` is `--pane` |
+| `open(state, place, repo, wrapped, label)` | `launch` | Start the shell command `wrapped` in `repo`; return `(surface, surface_id, why_no_id)`. Raise `FleetError("uncertain launch …")` when it can't tell whether the terminal exists |
+| `retire(state, place)` | `launch`, after `open` | Close terminals the placement replaced; return whether state changed |
+| `read(w, lines)` | `peek`, `wait`, `launch --settle`, `agents` | Return the screen plus about `lines` lines of scrollback |
+| `send(w, items)` | `send`, `stop` | Type each item: `enter`, `ctrl+c`, `escape` and `tab` are keys, anything else is literal text |
+| `close(w)` | `stop --close` | Close the terminal; one that's already closed counts as success |
+| `attach_argv(w, read_only)` | `attach`, `agents` | The command that opens the worker for the owner, or `None` when there's nothing to attach to |
+| `locate(w)` | `attach`, `agents --list` | A hint telling a person where to find the worker |
+
+Every method that addresses a worker must raise rather than reach a terminal that might belong to someone else. `wait` turns a failed `read` into `UNREACHABLE`; `stop` turns a failed `send` into `stop-failed`, which keeps the worker's slot.
+
+**What the layer doesn't own.** Exit tracking doesn't depend on the backend: `wrapped` is `fleet _run <receipt> <token> <command>`, and that wrapper writes the started and exit receipts the lead trusts. A backend only has to run the command in `repo` and keep its screen readable. Folder trust, prompts, file ownership, capacity and verification never touch it.
+
+**Adding a backend** (for example zellij or WezTerm):
+
+1. Write a class with the methods above, next to `Cmux` and `Tmux`.
+2. Add its name to `BACKENDS`, return it from `terminal()`, and from `pick_backend()` if `auto` should ever choose it.
+3. Give it a branch in `cmd_init` for what it must store (a session or workspace name, a socket), and add it to the loop in `cmd_doctor`.
+4. If the multiplexer passes the caller's environment to new terminals, strip the lead's variables (`LEAD_ENV`) from workers, as `Tmux.open` does.
+5. Add unit tests against a fake CLI, and a live test class that skips when the binary is missing (see below).
+6. Document it here, in `config.example.toml`, `skill/references/commands.md` (`init`, `launch`, `agents`) and `CHANGELOG.md`. Touch `skill/SKILL.md` only if the lead must act differently, and stay within its byte budget.
+
+**Tests.**
+
+- `tests/test_runtime.py` runs the commands against a fake `cmux` (`fake_cmux`), so cmux behaviour is tested without cmux installed.
+- `tests/test_backends.py` covers backend choice, config validation, `attach` and `doctor`, plus live tmux runs: it starts a real tmux server on a private socket and drives a stand-in agent (`FAKE_AGENT`: a few lines of Python that echo input, write the report on `report` and exit on `/quit`) through launch, peek, send, wait, stop and close, and through a server crash. The live class skips when tmux isn't installed; CI installs tmux, so it always runs there.
+
+Run only the backend tests with `python3 -m unittest tests.test_backends -v`.
+
+**Trying it by hand.** The same stand-in agent works for manual runs. Save `FAKE_AGENT` from `tests/test_backends.py` as an executable script (with a `#!/usr/bin/env python3` line), point a scratch config at it, and drive a throwaway Git repository with a one-ticket `plan.json` in the [plan format](skill/SKILL.md#2-save-a-complete-plan) whose ticket uses `"provider": "fake"`:
+
+```toml
+# /tmp/fleet-dev.toml
+[defaults]
+backend = "tmux"
+tmux_socket = "fleetdev"      # keeps experiments off Fleet's real tmux server
+review = "off"
+
+[providers.fake]
+enabled = true
+bin = "/path/to/fake-agent"
+launch = "{bin} --model {model} {prompt}"
+quit = ["/quit", "enter"]
+family = "test"
+
+[providers.fake.tiers.standard]
+model = "fake-1"
+family = "test"
+```
+
+```sh
+export FLEET_CONFIG=/tmp/fleet-dev.toml
+fleet init dev && fleet plan dev --file plan.json && fleet launch dev --ready
+fleet agents dev                          # the browser: a attaches, q quits
+fleet send dev 01 report && fleet wait dev --timeout 10
+fleet stop dev --all --close
+tmux -L fleetdev kill-server              # clean up, if closing the last window has not ended it already
+```
+
+To see what the browser draws without a second terminal, run it in a detached tmux pane and capture it: `tmux -L view new-session -d -x 130 -y 30 'fleet agents dev'`, then `tmux -L view capture-pane -p`.
 
 See [CHANGELOG.md](CHANGELOG.md) for changes. The review that motivated this preview is kept in [REVIEW.md](https://github.com/codemeall/agent-fleet/blob/main/REVIEW.md) as a historical assessment.
