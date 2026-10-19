@@ -9,7 +9,7 @@ disable-model-invocation: true
 
 You are the lead. Workers are local interactive CLIs in cmux panes or headless tmux windows, sharing one checkout. You own planning, routing, decisions, review and final verification. Workers implement one ticket at a time. The owner controls commits and publishing.
 
-Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute path and invoke `python3 <absolute-skill-path>/bin/fleet`. Never guess a checkout path. The [command reference](references/commands.md) lists every command with when to use it; read `fleet <command> --help` when a flag is unclear.
+Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute path and invoke `python3 <absolute-skill-path>/bin/fleet`. Never guess a checkout path. The [command reference](references/commands.md) lists each command and when to use it; `fleet <command> --help` gives exact flags.
 
 ```text
 /fleet [auto | single:<provider> | agents=<provider>[:<model>],...]
@@ -17,7 +17,7 @@ Use `fleet` on PATH; if unavailable, resolve this installed skill's absolute pat
        -- <local tickets directory, or tasks in plain words>
 ```
 
-These are conversational options for you to translate into CLI flags, not an autonomous scheduler. `/fleet` without tickets can also add another subscription (for example a second Claude or Codex account); see [provider notes](references/providers.md#extra-subscriptions). `fleet doctor` shows each provider's tiers and caps; `fleet providers` prints the full merged config only when you need adapter details. Read [harness requirements](references/harnesses.md), [routing](references/routing.md), and [provider notes](references/providers.md) as needed. [Worked examples](references/examples.md) show the command sequences for each step.
+These are conversational options for you to translate into CLI flags, not an autonomous scheduler. `/fleet` without tickets can also add another subscription, such as a second Claude or Codex account ([provider notes](references/providers.md#extra-subscriptions)). `fleet doctor` shows each provider's tiers and caps; `fleet providers` prints the merged config only when you need adapter details. Read [harness requirements](references/harnesses.md), [routing](references/routing.md), and [provider notes](references/providers.md) as needed. [Worked examples](references/examples.md) show the commands.
 
 No ticket folder, or new work mid-run: follow [delegating mid-conversation](references/delegation.md) (inline `task`, read-only `kind: investigate`, `fleet add`, `fleet launch --ready`).
 
@@ -26,7 +26,7 @@ Companion skills are optional; `fleet doctor` lists them and [host setup](refere
 ## 1. Establish or resume the run
 
 - Read repository instructions, `.fleet/rules.md`, the agreed spec and the full tickets. Export remote issue content to local files first; a URL is not a `--ticket` input. Preserve original IDs and source links, using safe slug IDs for Fleet (`settings-copy`, not a path or URL).
-- Verify the active machine's absolute repository path. Run `fleet doctor` from it. If the owner wants another subscription in the fleet, use `fleet account add <name> --from <adapter> --dir <path>` and let the owner sign it in; never sign in for them. Route only to adapters whose executable and authentication checks pass, and verify the selected model/effort is available. Doctor fails on a tier model the account doesn't offer; `fleet models <provider> [filter]` lists the models you may choose, narrowed by the owner's `models_allow`; only propose models from it, and propose a replacement to the owner rather than silently substituting one.
+- Verify the active machine's absolute repository path. Run `fleet doctor` from it. If the owner wants another subscription, use `fleet account add <name> --from <adapter> --dir <path>`; turn a provider on or off only when the owner asks: `fleet provider enable|disable <name>` ([rules](references/providers.md#agent-rules)). Never sign in for the owner. Route only to adapters whose executable and authentication checks pass, and verify the selected model/effort is available. Doctor fails on a tier model the account doesn't offer; `fleet models <provider> [filter]` lists the models you may choose, narrowed by the owner's `models_allow`; only propose models from it, and propose a replacement to the owner rather than silently substituting one.
 - If the named run exists, use `fleet resume <run>` (one line per ticket; `--json` for full records), then inspect the reports, decisions, any `notes.md` and reconciled process states. Do not initialize a replacement or relaunch a worker whose exit is unconfirmed.
 - Otherwise use `fleet init <run> [--backend cmux|tmux] [--workspace <ref>] [--routing <mode>] [--review <mode>]`, mapping `backend=`, `workspace=`, routing and `review=` to these flags. By default init uses cmux inside cmux, else headless tmux; relay its `fleet agents` line. Init validates a cmux workspace and stores its UUID (cmux renumbers refs on restart); never fall back to an unrelated workspace.
 
@@ -35,7 +35,7 @@ Companion skills are optional; `fleet doctor` lists them and [host setup](refere
 When a provider is failing, rate-limited or a poor fit mid-run, steer future implementation launches instead of rewriting the plan:
 
 - `fleet steer provider <run> <name>` moves future implementation launches to that provider, at the tier's model and effort (or the model pinned by `agents=`). It must be inside the run's routing.
-- `fleet steer model <run> <name>` then picks that provider's model; it must pass `models_allow`. It replaces every tier's model, light tickets included, so prefer steering the provider alone, which keeps its tier models.
+- `fleet steer model <run> <name>` then picks that provider's model; it must pass `models_allow`. It replaces every tier's model, light tickets included, so prefer steering the provider alone.
 - `fleet steer reset <run>` returns to the plan's routing.
 
 Keep passing the plan's provider and tier to `fleet launch`; it prints `steered (<tier>): ...` and records the worker's actual provider, model and family. Open panes and review launches are never steered, so cross-family review is checked against the family the writer actually ran on. `fleet resume` shows an active steer.
@@ -84,7 +84,7 @@ Every wait is a full turn over your whole context, so wait long and rarely. Use 
 - `HOLD`: launches are on hold and no worker is running. Handle any `PENDING <id>` lines, tell the owner, and end your turn; do not wait again until they release.
 - `TIMEOUT`: nothing new. Handle any `PENDING <id>` lines it prints (reports still waiting on you), otherwise wait again; do not peek or check status by reflex.
 
-Run one wait at a time, and end a background wait before handing the run to another session: a wait consumes the events it prints. Tell the owner about meaningful changes, not each wait.
+Run one wait at a time: a wait consumes the events it prints, so end a background wait before any handoff. Tell the owner about meaningful changes, not each wait.
 
 The owner decides when to reset you; never hand off or delay a wave because of your size alone. Include your `fleet context` reading when you report a wave's outcome. When the owner asks for a handoff or to prepare for compaction, finish the current step, end any background wait and run `fleet handoff <run> [--compact] --note …`, then relay its owner steps and end your turn. After a compaction (a `LEAD compacted …` line, or the owner tells you), run `fleet resume` before acting. Follow [lead context](references/lead-context.md).
 

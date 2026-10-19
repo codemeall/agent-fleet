@@ -133,7 +133,7 @@ Do not require every worker account to install the entire upstream collection. P
 | Codex desktop / local ChatGPT execution | Assess capabilities: local shell, repository access, and cmux socket access. Current docs omit this path. |
 | Cursor CLI / local IDE lead | Skill format and launch flags are plausible; shell quoting fails for current parameterized model syntax. Remote/cloud sessions must not be assumed to reach local cmux. |
 | ChatGPT or another cloud-only session without local execution | Can read instructions, but cannot directly run this local cmux workflow. Would require an explicitly provided local execution connection. |
-| Antigravity, Grok, Muse, arbitrary providers | Adapter candidates, not verified support. Grok/Muse are disabled placeholders; no live Antigravity test was performed. |
+| Antigravity, Grok, Muse, arbitrary providers | Adapter candidates, not verified support. Grok/Muse are disabled placeholders; no live Antigravity test was performed. (Since this review, the `agy` adapter was checked live with agy 1.3.0; Grok and Muse are still placeholders. See the changelog.) |
 
 The blanket statement that ChatGPT web/desktop cannot use the skill is outdated. Current documentation distinguishes skill availability across ChatGPT/Codex and local versus packaged distribution. Execution still requires Fleet's local capabilities. [OpenAI skills documentation](https://learn.chatgpt.com/docs/build-skills)
 

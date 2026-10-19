@@ -281,6 +281,7 @@ The lead drives Fleet through the `fleet` CLI; you rarely need to, but you can r
 | `fleet doctor` | Check the terminal backend, logins, models and installed skills |
 | `fleet agents [<run>]` | Browse the workers, watch any one live, attach to it (yours; the lead never runs it) |
 | `fleet attach <run> <id>` | Open one worker's terminal (headless runs) |
+| `fleet provider enable\|disable <name>` | Turn a provider on or off in your config |
 
 More: [safe first run](examples/README.md) · [agent workflow](skill/SKILL.md) · [commands](skill/references/commands.md) · [routing](skill/references/routing.md) · [host setup](skill/references/harnesses.md) · [providers](skill/references/providers.md) · [lead context](skill/references/lead-context.md) · [worked examples](skill/references/examples.md)
 
@@ -495,7 +496,8 @@ Window sizes differ by host and setting: Claude Code runs Opus 5.5 with a 1M win
 | Lead or worker | Preview scope |
 | --- | --- |
 | Local Claude Code, Codex CLI, Cursor CLI | Bundled worker adapters; the lead needs shell, repository and cmux or tmux access |
-| Antigravity (`agy`), OpenCode | Bundled worker adapters, disabled by default; enable one in your config, then run `fleet doctor` |
+| Antigravity (`agy`), OpenCode | Bundled worker adapters, disabled by default; `fleet provider enable agy`, then `fleet doctor agy` |
+| Grok, Muse | Not supported as their own CLIs (disabled placeholders). Their models work through Cursor: `grok-4.7-high`, `muse-spark-1.3-max` |
 | Codex desktop / ChatGPT with local execution | Usable when the same capabilities and permissions are available |
 | Remote machine over SSH, or a container | Use the headless tmux backend on that machine; `fleet agents` there shows the workers |
 | Cloud-only session | Needs an explicit connection to a machine that can run the workers |
@@ -503,17 +505,25 @@ Window sizes differ by host and setting: Claude Code runs Opus 5.5 with a 1M win
 
 The lead host, worker CLI, provider account and model family are independent choices. For example, a Claude lead can run Codex workers, and Cursor can serve several model families. The bundled model IDs are examples that depend on your account, so check which IDs and effort levels you can actually use before assigning work.
 
-[providers.toml](skill/providers.toml) holds launch templates, login checks, shutdown keys and tiers. The `claude-co` example, Antigravity, OpenCode and the placeholder adapters ship disabled. To use Antigravity or OpenCode:
+[providers.toml](skill/providers.toml) holds launch templates, login checks, shutdown keys and tiers. Claude Code, Codex and Cursor ship on. The `claude-co` example, Antigravity and OpenCode ship off. The `grok` and `muse` placeholders ship off and can't be turned on until someone fills in and tests their adapter.
+
+Turn a provider on or off with one command. It edits `~/.config/agent-fleet/config.toml` for you:
+
+```bash
+fleet provider enable agy        # Antigravity: install and sign in to agy first
+fleet provider enable opencode   # its shipped tiers assume OpenRouter; see the provider notes
+fleet provider disable cursor    # shipped providers can be turned off too
+fleet doctor                     # shows each provider as off, signed in, or failing
+```
+
+Or set it by hand in that file:
 
 ```toml
 [providers.agy]
 enabled = true
-
-[providers.opencode]
-enabled = true        # the shipped tiers assume OpenRouter; see the provider notes
 ```
 
-Add them to `defaults.prefer` for auto routing. See the [provider notes](skill/references/providers.md#antigravity) for what each one asks before it acts.
+Add a provider's name to `defaults.prefer` to include it in auto routing. Turning one off stops new launches to it; running workers finish. If you use Fleet through an AI agent, it turns providers on or off only when you ask, and never signs a CLI in for you. See [turning providers on and off](skill/references/providers.md#turning-providers-on-and-off) for the full rules, and the [provider notes](skill/references/providers.md#antigravity) for what each CLI asks before it acts.
 
 ### More than one subscription
 
@@ -525,7 +535,7 @@ fleet account add claude-co --from claude --dir ~/.claude-co --max 2
 fleet doctor claude claude-co
 ```
 
-For Codex, use `--from codex --dir ~/.codex-2` and sign in with `CODEX_HOME=~/.codex-2 codex login`. The bundled `claude-co` example uses `~/.claude-co` and only needs enabling: add `[providers.claude-co]` with `enabled = true` to your config. Put the new name in `defaults.prefer` to use it in auto routing. `doctor` fails if two Claude providers turn out to be signed in to the same account; Codex doesn't report an identity, so its accounts are told apart only by directory. A second Claude account is still Anthropic, so it can't be the cross-family reviewer. Before relying on a new adapter, test authentication, model selection, the full launch → report → confirmed exit → verify loop, crash recovery, and a full-capacity review cycle. Passing `doctor` alone doesn't certify an adapter. See [provider notes](skill/references/providers.md).
+For Codex, use `--from codex --dir ~/.codex-2` and sign in with `CODEX_HOME=~/.codex-2 codex login`. The bundled `claude-co` example uses `~/.claude-co` and only needs turning on: `fleet provider enable claude-co`. Put the new name in `defaults.prefer` to use it in auto routing. `doctor` fails if two Claude providers turn out to be signed in to the same account; Codex doesn't report an identity, so its accounts are told apart only by directory. A second Claude account is still Anthropic, so it can't be the cross-family reviewer. Before relying on a new adapter, test authentication, model selection, the full launch → report → confirmed exit → verify loop, crash recovery, and a full-capacity review cycle. Passing `doctor` alone doesn't certify an adapter. See [provider notes](skill/references/providers.md).
 
 ## Development
 

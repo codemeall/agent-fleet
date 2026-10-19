@@ -126,6 +126,9 @@ def load_config(user_path: Path | None = None) -> dict:
             raise FleetError(f"{name}.models_allow must be a list of model IDs or a table of model ID = family")
         if not (isinstance(adapter.get("efforts", []), list) and all(isinstance(e, str) for e in adapter.get("efforts", []))):
             raise FleetError(f"{name}.efforts must be a list of effort levels")
+        for flag in ("enabled", "placeholder"):
+            if not isinstance(adapter.get(flag, flag == "enabled"), bool):
+                raise FleetError(f"{name}.{flag} must be true or false")
         if adapter.get("trust") not in (None, *TRUST_METHODS):
             raise FleetError(f"{name}.trust must be one of {', '.join(TRUST_METHODS)}")
     cfg["lead_context"] = lead_context_config(cfg.get("lead_context", {}))
@@ -192,6 +195,17 @@ def provider(cfg: dict, name: str) -> dict:
     p = cfg.get("providers", {}).get(name)
     if p is None:
         raise FleetError(f"unknown provider '{name}'. Known: {', '.join(cfg.get('providers', {}))}")
+    return p
+
+
+def usable_provider(cfg: dict, name: str) -> dict:
+    """A provider that plans, launches and steers may use: turned on and not a placeholder."""
+    p = provider(cfg, name)
+    if p.get("placeholder"):
+        raise FleetError(f"provider '{name}' is a placeholder adapter, not a supported provider; "
+                         "see references/providers.md#placeholder-adapters")
+    if not p.get("enabled", True):
+        raise FleetError(f"provider '{name}' is turned off in config; the owner turns it on (fleet provider enable {name})")
     return p
 
 
@@ -1049,6 +1063,8 @@ def cmd_init(a, cfg):
     d = run_dir(repo, a.run)
     if (d / "run.json").exists():
         raise FleetError(f"run already exists; use fleet resume {a.run}")
+    for name in routing_pool(a.routing or cfg["defaults"]["routing"], cfg) or {}:
+        usable_provider(cfg, name)  # an explicit choice that is off or a placeholder needs the owner first
     backend = pick_backend(a.backend, cfg, a.workspace or cfg["defaults"]["workspace"])
     extra = {"backend": backend}
     if backend == "cmux":
@@ -1098,9 +1114,10 @@ def validate_ticket(repo: Path, d: Path, state: dict, cfg: dict, pool: dict | No
     if t.get("tier", "standard") not in ("heavy", "standard", "light"):
         raise FleetError(f"invalid tier for {i}")
     t["tier"] = t.get("tier", "standard")
-    pcfg = provider(cfg, t["provider"])
-    if not pcfg.get("enabled", True):
-        raise FleetError(f"disabled provider for {i}")
+    try:
+        pcfg = usable_provider(cfg, t["provider"])
+    except FleetError as e:
+        raise FleetError(f"{i}: {e}")
     if pool is not None:
         if t["provider"] not in pool:
             raise FleetError(f"{i}: provider outside selected routing pool")
@@ -1383,9 +1400,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     if state["prompts"].get(a.id, {}).get("role") == "implementation":  # reviews keep their cross-family route
         apply_steer(a, load_live_state(repo, a.run))
     steered = (a.provider, a.model) != planned
-    pcfg = provider(cfg, a.provider)
-    if not pcfg.get("enabled", True):
-        raise FleetError(f"provider '{a.provider}' is turned off in config")
+    pcfg = usable_provider(cfg, a.provider)
     prompt_path = contained(run_dir(repo, a.run), run_dir(repo, a.run) / "prompts" / f"{a.id}.md")
     if not prompt_path.exists() or a.id not in state["prompts"]:
         raise FleetError("write the prompt first with fleet prompt")
@@ -2413,9 +2428,7 @@ def cmd_steer(a, cfg):
     live = load_live_state(repo, a.run)
     pool = routing_pool(state["options"]["routing"], cfg)
     if a.steer_cmd == "provider":
-        pcfg = provider(cfg, a.name)
-        if not pcfg.get("enabled", True):
-            raise FleetError(f"provider '{a.name}' is turned off in config")
+        usable_provider(cfg, a.name)
         if pool is not None and a.name not in pool:
             raise FleetError(f"provider '{a.name}' is outside this run's routing {state['options']['routing']}")
         live = {"provider": a.name}  # a new provider drops any model steered for the old one
@@ -2481,6 +2494,10 @@ def cmd_doctor(a, cfg):
         p = provider(cfg, name)
         if not p.get("enabled", True):
             print(f"{name:<13} off")
+            continue
+        if p.get("placeholder"):
+            ok = False
+            print(f"{name:<13} PLACEHOLDER: not a supported adapter; see references/providers.md#placeholder-adapters")
             continue
         binary = first_binary(p["bin"])
         if not shutil.which(binary):
@@ -2690,6 +2707,9 @@ def model_problems(p: dict) -> tuple[list[str], str]:
 
 def cmd_models(a, cfg):
     p = provider(cfg, a.provider)
+    if p.get("placeholder"):
+        raise FleetError(f"'{a.provider}' is a placeholder adapter, not a supported provider; "
+                         "see references/providers.md#placeholder-adapters")
     offered, stale = (available_models(p), []) if a.all else usable_models(p)
     if offered is None:
         hint = configured_model(p)
@@ -2748,7 +2768,7 @@ def cmd_account_add(a, cfg):
     home = Path(a.dir).expanduser()
     if not home.is_absolute():
         raise FleetError("--dir must be an absolute path or start with ~")
-    text = USER_CONFIG.read_text() if USER_CONFIG.exists() else ""
+    text = read_user_config()
     if re.search(rf"^\s*\[\s*providers\.{re.escape(a.name)}[\].]", text, re.M):
         raise FleetError(f"{USER_CONFIG} already configures '{a.name}'")
     block = (f"\n# Added by `fleet account add`: a second {a.base} account.\n"
@@ -2760,18 +2780,101 @@ def cmd_account_add(a, cfg):
              f"max = {a.max}\n")
     new = text + ("" if not text or text.endswith("\n") else "\n") + block
     tomllib.loads(new)
-    USER_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    temp = USER_CONFIG.with_name(USER_CONFIG.name + "." + uuid.uuid4().hex + ".tmp")
-    try:
-        temp.write_text(new)
-        temp.replace(USER_CONFIG)
-    finally:
-        temp.unlink(missing_ok=True)
+    write_user_config(new)
     print(f"added provider '{a.name}' ({a.base} with {var}={home}) to {USER_CONFIG}")
     print(f"next: sign that account in yourself:  {var}={shlex.quote(str(home))} {first_binary(base['bin'])}")
     print(f"then: fleet doctor {a.name}")
     if a.name not in cfg["defaults"]["prefer"]:
         print(f"auto routing: add '{a.name}' to defaults.prefer in {USER_CONFIG} to include it")
+
+
+def read_user_config() -> str:
+    """The user config text exactly as stored, line endings included; empty when there is none."""
+    if not USER_CONFIG.exists():
+        return ""
+    with open(USER_CONFIG, encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
+def write_user_config(text: str, check=None) -> None:
+    """Replace the user config atomically. A symlinked config is written through to its target, and the file keeps
+    its permissions. `check(path)` may refuse the new text before anything is replaced."""
+    target = USER_CONFIG.resolve() if USER_CONFIG.is_symlink() else USER_CONFIG
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_name(target.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        with open(temp, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        if target.exists():
+            os.chmod(temp, target.stat().st_mode & 0o7777)
+        if check:
+            check(temp)
+        temp.replace(target)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+PROVIDER_HEADER_RE = r'^[ \t]*\[[ \t]*providers[ \t]*\.[ \t]*(?:"{0}"|{0})[ \t]*\][ \t]*(?:#.*)?$'
+
+
+def set_enabled(text: str, name: str, on: bool) -> str:
+    """The user config text with `enabled` set for one provider. Other lines, comments and line endings stay as
+    they were."""
+    value = "true" if on else "false"
+    eol = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines(keepends=True)
+    header = re.compile(PROVIDER_HEADER_RE.format(re.escape(name)))
+    start = next((i for i, line in enumerate(lines) if header.match(line.rstrip("\r\n"))), None)
+    if start is None:
+        sep = "" if not text or text.endswith("\n") else eol
+        gap = eol if text.strip() else ""
+        return text + sep + f"{gap}[providers.{name}]{eol}enabled = {value}{eol}"
+    end = next((i for i in range(start + 1, len(lines)) if re.match(r"^[ \t]*\[", lines[i])), len(lines))
+    for i in range(start + 1, end):
+        body = lines[i].rstrip("\r\n")
+        m = re.fullmatch(r"([ \t]*)enabled[ \t]*=[ \t]*(?:true|false)([ \t]*#.*)?[ \t]*", body)
+        if m:
+            lines[i] = f"{m.group(1)}enabled = {value}{m.group(2) or ''}" + lines[i][len(body):]
+            return "".join(lines)
+    if not lines[start].endswith("\n"):
+        lines[start] += eol
+    lines.insert(start + 1, f"enabled = {value}{eol}")
+    return "".join(lines)
+
+
+def cmd_provider(a, cfg):
+    on = a.action == "enable"
+    p = provider(cfg, a.name)
+    if on and p.get("placeholder"):
+        raise FleetError(f"'{a.name}' is a placeholder adapter, not a supported provider. The owner fills in its "
+                         f"adapter in {USER_CONFIG} and sets placeholder = false before it can be turned on; see "
+                         "references/providers.md#placeholder-adapters")
+    if p.get("enabled", True) == on:
+        print(f"'{a.name}' is already {'on' if on else 'off'}; nothing changed")
+        return 0
+
+    def check(path: Path) -> None:
+        try:
+            changed = load_config(path)["providers"][a.name].get("enabled", True) == on
+        except (tomllib.TOMLDecodeError, FleetError):
+            changed = False
+        if not changed:
+            raise FleetError(f"could not change '{a.name}' safely, so nothing changed. {USER_CONFIG} sets it in a "
+                             "form this command does not edit (a dotted key, an inline table or an unusual layout); "
+                             f"the owner sets its enabled = {'true' if on else 'false'} there by hand")
+
+    write_user_config(set_enabled(read_user_config(), a.name, on), check)
+    print(f"turned {'on' if on else 'off'} '{a.name}' in {USER_CONFIG}")
+    if on:
+        print(f"next: fleet doctor {a.name}  (the owner signs the CLI in if its login check fails)")
+        if a.name not in cfg["defaults"]["prefer"]:
+            print(f"auto routing: add '{a.name}' to defaults.prefer in {USER_CONFIG} to include it")
+    else:
+        print("running workers keep running; new plans, launches and steers to it are refused"
+              " (a run steered to it needs fleet steer reset <run> or a steer elsewhere)")
+        if not any(q.get("enabled", True) and not q.get("placeholder")
+                   for n, q in cfg["providers"].items() if n != a.name):
+            print("note: no other provider is on, so nothing can launch")
 
 
 def cmd_providers(a, cfg):
@@ -2811,6 +2914,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--max", type=int, default=1, choices=range(1, 7), metavar="N", help="parallel workers (default 1)")
     s.add_argument("--disabled", action="store_true", help="add it turned off")
     s.set_defaults(fn=cmd_account_add)
+
+    s = sub.add_parser("provider", help="turn a provider on or off in the user config")
+    s.add_argument("action", choices=["enable", "disable"])
+    s.add_argument("name", help="provider name, e.g. agy")
+    s.set_defaults(fn=cmd_provider)
 
     s = sub.add_parser("init", help="start a run: dirs + git baseline")
     s.add_argument("run")

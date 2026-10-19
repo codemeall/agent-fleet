@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+Turn providers on and off with a command, and placeholder adapters can no longer pass for working ones.
+
+- `fleet provider enable|disable <name>` sets `enabled` for one provider in the user config, creating the file or section if needed and leaving every other line, comment and line ending alone. It prints the next steps (`fleet doctor`, `defaults.prefer`) and changes nothing when it cannot make the edit safely.
+- Writing the user config (`provider`, `account add`) goes through a symlink to its target and keeps the file's permissions; it used to replace a symlinked config with a plain 644 file.
+- `fleet init` refuses `single:`/`agents=` routing that names a provider that is off or a placeholder, instead of failing later at `plan`. `fleet models` names a placeholder, and a non-boolean `enabled` or `placeholder` in config is an error that names the field.
+- A new adapter field, `placeholder`, marks an adapter nobody has checked. The shipped `grok` and `muse` entries set it: doctor reports an enabled placeholder as `PLACEHOLDER` and fails (it used to pass as "installed (no login check defined)"), and `provider enable`, plan, launch and `steer provider` refuse it.
+- Provider notes have a "Turning providers on and off" section: what ships on and off, the command and hand-edit forms, what turning one off does to a live run, and when an AI agent may change it (only when the owner asks, with the command, never to route around a failure or sign-in). The skill points to it.
+- The placeholder notes say Grok and Muse models work today through the Cursor adapter, and list the fields to fill in to make a working adapter.
+- README and `config.example.toml` show the command, turning off a shipped provider and the `defaults.prefer` step.
+
 ## 0.1.0-preview.22
 
 Fleet is no longer tied to cmux: workers can run headless in tmux, and the owner can browse and open any worker.
