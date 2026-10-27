@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.23
 
 Turn providers on and off with a command, placeholder adapters can no longer pass for working ones, and shipped model lists match what the CLIs offer today: Cursor and OpenCode offer every model they list.
 
