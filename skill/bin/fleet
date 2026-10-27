@@ -124,6 +124,10 @@ def load_config(user_path: Path | None = None) -> dict:
         if not (isinstance(allow, dict) and all(isinstance(v, str) for v in allow.values())
                 or isinstance(allow, list) and all(isinstance(v, str) for v in allow)):
             raise FleetError(f"{name}.models_allow must be a list of model IDs or a table of model ID = family")
+        for key, what in (("model_families", "model ID"), ("family_prefixes", "model ID prefix")):
+            table = adapter.get(key, {})
+            if not (isinstance(table, dict) and all(isinstance(v, str) for v in table.values())):
+                raise FleetError(f"{name}.{key} must be a table of {what} = family; quote IDs that contain dots")
         if not (isinstance(adapter.get("efforts", []), list) and all(isinstance(e, str) for e in adapter.get("efforts", []))):
             raise FleetError(f"{name}.efforts must be a list of effort levels")
         for flag in ("enabled", "placeholder"):
@@ -778,10 +782,25 @@ def allowed_models(pcfg: dict) -> dict[str, str | None] | None:
 
 
 def check_allowed(pcfg: dict, name: str, model: str) -> None:
+    """Refuse a model outside models_allow, or, with no list, one the account's live list does not offer.
+    Tier models and parameterized IDs (`model[key=value,...]`, which no list names) pass unchecked;
+    doctor checks tier models, and a listing that fails only warns."""
     allow = allowed_models(pcfg)
-    if allow is not None and model not in allow:
-        raise FleetError(f"{name} model '{model}' is not in {name}.models_allow; "
-                         "add it to your config or choose from `fleet models " + name + "`")
+    if allow is not None:
+        if model not in allow:
+            raise FleetError(f"{name} model '{model}' is not in {name}.models_allow; "
+                             "add it to your config or choose from `fleet models " + name + "`")
+        return
+    if not pcfg.get("models") or "[" in model or any(t.get("model") == model for t in pcfg.get("tiers", {}).values()):
+        return
+    try:
+        live = available_models(pcfg)
+    except (FleetError, subprocess.TimeoutExpired) as e:
+        print(f"could not check {name} model '{model}' against the account's list: {str(e).strip()[:200]}",
+              file=sys.stderr)
+        return
+    if live is not None and model not in live:
+        raise FleetError(f"{name} does not offer model '{model}'; choose one from `fleet models {name}`")
 
 
 def check_effort(pcfg: dict, name: str, effort: str | None) -> None:
@@ -790,15 +809,31 @@ def check_effort(pcfg: dict, name: str, effort: str | None) -> None:
         raise FleetError(f"{name} effort '{effort}' is not one of {', '.join(levels)} ({name}.efforts)")
 
 
-def model_family(pcfg: dict, tier: str, model: str, explicit: str | None = None) -> str | None:
-    if explicit:
-        return explicit
+def prefix_family(pcfg: dict, model: str) -> str | None:
+    """The family of the longest family_prefixes entry the model ID starts with."""
+    prefixes = pcfg.get("family_prefixes", {})
+    best = max((p for p in prefixes if model.startswith(p)), key=len, default=None)
+    return prefixes[best] if best else None
+
+
+def known_family(pcfg: dict, model: str, tier: str | None = None) -> str | None:
+    """A model's family from config: an exact entry, then a tier running it (this tier first), then prefixes."""
     mapped = pcfg.get("model_families", {}).get(model) or (allowed_models(pcfg) or {}).get(model)
     if mapped:
         return mapped
-    t = pcfg.get("tiers", {}).get(tier, {})
-    if t.get("model") == model and t.get("family"):
-        return t["family"]
+    tiers = pcfg.get("tiers", {})
+    for t in ([tiers[tier]] if tier in tiers else []) + list(tiers.values()):
+        if t.get("model") == model and t.get("family"):
+            return t["family"]
+    return prefix_family(pcfg, model)
+
+
+def model_family(pcfg: dict, tier: str, model: str, explicit: str | None = None) -> str | None:
+    if explicit:
+        return explicit
+    known = known_family(pcfg, model, tier)
+    if known:
+        return known
     family = pcfg.get("family")
     return family if family and family not in ("mixed", "unknown") else None
 
@@ -1452,7 +1487,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
             check_pool(routing_pool(state["options"]["routing"], cfg), a.provider, model, "steered launch")
             if t["review_required"] and not family:
                 raise FleetError(f"{a.provider}:{model} has no known family, so this ticket's cross-family review "
-                                 f"could never launch; set it in {a.provider}.model_families")
+                                 f"could never launch; set it in {a.provider}.model_families or family_prefixes")
             print(f"steered ({t['tier']}): {t['provider']}:{t['model']} -> {a.provider}:{model} (fleet steer reset to undo)",
                   file=sys.stderr)
         elif (a.provider, a.tier, model, effort) != (t["provider"], t["tier"], t["model"], t["effort"]):
@@ -2592,16 +2627,22 @@ def parse_models(text: str) -> dict[str, set[str] | None]:
     return out
 
 
-_LISTINGS: dict[tuple, subprocess.CompletedProcess] = {}
+_LISTINGS: dict[tuple, subprocess.CompletedProcess | subprocess.TimeoutExpired] = {}
 
 
 def model_listing(p: dict) -> subprocess.CompletedProcess:
-    """Runs the adapter's model-list command once per command and account."""
+    """Runs the adapter's model-list command once per command and account; a timeout is remembered too,
+    so a hanging CLI costs one wait per process, not one per ticket."""
     sets, unsets = account_env(p)
     key = (p["models"], tuple(sorted(sets.items())), tuple(unsets))
     if key not in _LISTINGS:
-        _LISTINGS[key] = subprocess.run(p["models"], shell=True, capture_output=True, text=True,
-                                        timeout=60, env=child_env(p))
+        try:
+            _LISTINGS[key] = subprocess.run(p["models"], shell=True, capture_output=True, text=True,
+                                            timeout=60, env=child_env(p))
+        except subprocess.TimeoutExpired as e:
+            _LISTINGS[key] = e
+    if isinstance(_LISTINGS[key], subprocess.TimeoutExpired):
+        raise _LISTINGS[key]
     return _LISTINGS[key]
 
 
@@ -2723,13 +2764,12 @@ def cmd_models(a, cfg):
     for t, v in p.get("tiers", {}).items():
         tiers.setdefault(v.get("model"), []).append(t)
     default = configured_model(p)
-    families = allowed_models(p) or {}
     retiring = retirements(p)
     for model, efforts in offered.items():
         if a.filter and a.filter.lower() not in model.lower():
             continue
         rank = lambda e: (EFFORT_ORDER.index(e) if e in EFFORT_ORDER else len(EFFORT_ORDER), e)
-        family = p.get("model_families", {}).get(model) or families.get(model)
+        family = known_family(p, model)
         notes = [f"family: {family}"] if family else []
         notes += [f"efforts: {', '.join(sorted(efforts, key=rank))}"] if efforts else []
         notes += [f"tiers.{t}" for t in tiers.get(model, [])] + (["CLI default"] if model == default else [])

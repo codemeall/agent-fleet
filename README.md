@@ -191,7 +191,7 @@ family = "xai"
 To limit which models the lead may choose, set `models_allow`. Plans outside it are refused; tier models always count as allowed, so the override above needs no list edit:
 
 ```toml
-[providers.cursor.models_allow]     # replaces the shipped starter set
+[providers.cursor.models_allow]     # Cursor ships none, so this limits it to these
 "grok-4.7-high" = "xai"
 "kimi-k3-high" = "moonshot"
 
@@ -199,7 +199,7 @@ To limit which models the lead may choose, set `models_allow`. Plans outside it 
 models_allow = ["opus", "sonnet", "fable"]
 ```
 
-Codex's list comes from its `codex debug models` catalog and includes each model's effort levels. Claude's `opus` and `sonnet` aliases already follow the current model. Launch one small ticket first (the [documentation-only example](examples/README.md) is a safe choice).
+Codex's list comes from its `codex debug models` catalog and includes each model's effort levels. Claude's `opus`, `sonnet` and `fable` aliases already follow the current model. Launch one small ticket first (the [documentation-only example](examples/README.md) is a safe choice).
 
 ### Configure
 

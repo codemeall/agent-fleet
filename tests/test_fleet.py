@@ -51,8 +51,8 @@ class ProviderConfig(unittest.TestCase):
                          f"env CLAUDE_CONFIG_DIR={home} claude --model opus --effort high go")
         self.assertTrue(fleet.build_launch(p["claude"], "opus", "high", "go")
                         .startswith("env -u CLAUDE_CONFIG_DIR claude --model opus"))
-        self.assertEqual(fleet.build_launch(p["agy"], "gemini-3.1-pro-high", "high", "go"),
-                         "agy --model gemini-3.1-pro-high --effort high --mode accept-edits -i go")
+        self.assertEqual(fleet.build_launch(p["agy"], "gemini-3.8-flash-high", "xhigh", "go"),
+                         "agy --model gemini-3.8-flash-high --effort xhigh --mode accept-edits -i go")
         self.assertEqual(fleet.build_launch(p["opencode"], "openrouter/z-ai/glm-5.3", None, "go"),
                          "opencode --model openrouter/z-ai/glm-5.3 --prompt go")
 
@@ -70,7 +70,15 @@ class ProviderConfig(unittest.TestCase):
                     self.assertNotIn("{", fleet.build_launch(p, model, effort, "Read /x/p.md"))
         agy = self.cfg["providers"]["agy"]
         self.assertEqual(fleet.model_family(agy, "standard", "claude-opus-4-6-thinking"), "anthropic")
-        self.assertEqual(fleet.model_family(agy, "standard", "gemini-3.7-flash-high"), "google")
+        self.assertEqual(fleet.model_family(agy, "standard", "gemini-3.8-flash-low"), "google")
+        self.assertEqual(fleet.model_family(agy, "heavy", "gemini-3.1-pro-high"), "google")   # still listed by agy 1.3.0
+        self.assertEqual(fleet.model_family(agy, "review", "gpt-oss-120b-medium"), "openai")
+        fleet.check_effort(agy, "agy", "xhigh")
+
+    def test_claude_allows_its_aliases_and_pinned_ids(self):
+        claude = self.cfg["providers"]["claude"]
+        for model in ("fable", "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-5-5"):
+            fleet.check_allowed(claude, "claude", model)
 
     def test_claude_names_its_session_and_can_resume_it(self):
         p, sid = self.cfg["providers"], "0b6c4a52-7c1e-4f0e-9d2a-3f1e2d4c5b6a"
@@ -681,6 +689,63 @@ class AllowList(unittest.TestCase):
             fleet.check_allowed(p, "cursor", "other")
         fleet.check_allowed({}, "codex", "anything")
         self.assertEqual(fleet.model_family(p, "heavy", "kimi"), "moonshot")
+
+    def test_family_prefixes_label_every_listed_model_longest_match_first(self):
+        p = {"family": "mixed", "family_prefixes": {"meta/": "meta", "meta/x-": "other", "grok-": "xai"},
+             "model_families": {"grok-odd": "fork"}}
+        self.assertEqual(fleet.model_family(p, "heavy", "meta/x-1"), "other")       # longest prefix wins
+        self.assertEqual(fleet.model_family(p, "heavy", "meta/y"), "meta")
+        self.assertEqual(fleet.model_family(p, "heavy", "grok-odd"), "fork")        # an exact entry beats a prefix
+        self.assertIsNone(fleet.model_family(p, "heavy", "auto"))
+        with self.assertRaises(fleet.FleetError):
+            self.config('[providers.cursor]\nfamily_prefixes = ["claude-"]\n')
+        with self.assertRaisesRegex(fleet.FleetError, "quote IDs that contain dots"):
+            self.config('[providers.agy]\nmodel_families = { gemini-3.1-pro-high = "google" }\n')
+
+    def test_a_tier_family_counts_at_every_tier_and_beats_a_prefix(self):
+        # No prefix covers `auto`, so only the heavy tier names its family; the review tier must still find it.
+        cfg = self.config('[providers.cursor.tiers.heavy]\nmodel = "auto"\nfamily = "cursor"\n'
+                          '[providers.cursor.tiers.light]\nmodel = "gpt-5.6-luna-high"\nfamily = "custom"\n')
+        cursor = cfg["providers"]["cursor"]
+        self.assertEqual(fleet.model_family(cursor, "review", "auto"), "cursor")
+        self.assertEqual(fleet.known_family(cursor, "auto"), "cursor")             # what `fleet models` shows
+        self.assertEqual(fleet.model_family(cursor, "heavy", "gpt-5.6-luna-high"), "custom")
+
+    def test_without_an_allow_list_a_live_list_refuses_models_it_does_not_offer(self):
+        p = {"models": "printf 'listed - A\\nother - B\\n'", "tiers": {"heavy": {"model": "tier-only"}}}
+        fleet.check_allowed(p, "cursor", "listed")
+        fleet.check_allowed(p, "cursor", "tier-only")                                # doctor checks tier models
+        with self.assertRaisesRegex(fleet.FleetError, "does not offer model 'typo'"):
+            fleet.check_allowed(p, "cursor", "typo")
+        fleet.check_allowed(p, "cursor", "listed[context=1m,effort=high]")          # parameterized IDs pass
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            fleet.check_allowed({"models": "exit 3"}, "cursor", "anything")          # a failed listing only warns
+        self.assertIn("could not check cursor model 'anything'", err.getvalue())
+
+    def test_a_listing_that_times_out_is_tried_once_per_process(self):
+        slow = {"models": "a-listing-that-hangs"}
+        timeout = fleet.subprocess.TimeoutExpired("a-listing-that-hangs", 60)
+        with mock.patch.object(fleet.subprocess, "run", side_effect=timeout) as run, \
+                contextlib.redirect_stderr(io.StringIO()):
+            for model in ("one", "two", "three"):
+                fleet.check_allowed(slow, "codex", model)
+        self.assertEqual(run.call_count, 1)
+
+    def test_shipped_family_prefixes_label_cursor_and_opencode_ids(self):
+        cfg = fleet.load_config(Path("/nonexistent/config.toml"))
+        cursor, opencode = cfg["providers"]["cursor"], cfg["providers"]["opencode"]
+        self.assertIsNone(fleet.allowed_models(cursor))
+        self.assertIsNone(fleet.allowed_models(opencode))
+        for model, family in {"claude-fable-5-1-high": "anthropic", "claude-sonnet-5-5-max": "anthropic",
+                              "gemini-3.8-flash-high": "google", "gpt-5.6-sol-xhigh": "openai",
+                              "cursor-grok-4.6-high": "xai", "composer-2.5-fast": "cursor", "auto": None}.items():
+            self.assertEqual(fleet.model_family(cursor, "heavy", model), family, model)
+        for model, family in {"openrouter/meta-llama/llama-4-scout": "meta", "openrouter/meta/muse-spark-1.3": "meta",
+                              "openrouter/~anthropic/claude-fable-latest": "anthropic",
+                              "huggingface/Qwen/Qwen3-Coder": "alibaba", "openrouter/nvidia/nemotron-3-super": None,
+                              "openrouter/bytedance/ui-tars-1.5-7b": None, "openrouter/openrouter/auto": None}.items():
+            self.assertEqual(fleet.model_family(opencode, "heavy", model), family, model)
 
 
 class Efforts(unittest.TestCase):

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Turn providers on and off with a command, and placeholder adapters can no longer pass for working ones.
+Turn providers on and off with a command, placeholder adapters can no longer pass for working ones, and shipped model lists match what the CLIs offer today: Cursor and OpenCode offer every model they list.
 
 - `fleet provider enable|disable <name>` sets `enabled` for one provider in the user config, creating the file or section if needed and leaving every other line, comment and line ending alone. It prints the next steps (`fleet doctor`, `defaults.prefer`) and changes nothing when it cannot make the edit safely.
 - Writing the user config (`provider`, `account add`) goes through a symlink to its target and keeps the file's permissions; it used to replace a symlinked config with a plain 644 file.
@@ -11,6 +11,11 @@ Turn providers on and off with a command, and placeholder adapters can no longer
 - Provider notes have a "Turning providers on and off" section: what ships on and off, the command and hand-edit forms, what turning one off does to a live run, and when an AI agent may change it (only when the owner asks, with the command, never to route around a failure or sign-in). The skill points to it.
 - The placeholder notes say Grok and Muse models work today through the Cursor adapter, and list the fields to fill in to make a working adapter.
 - README and `config.example.toml` show the command, turning off a shipped provider and the `defaults.prefer` step.
+- Cursor and OpenCode no longer ship a starter `models_allow`: the lead may choose any model the account lists (270 in Cursor on the account it was checked with, including Gemini 3.8 Flash, Opus and Sonnet 5.5 and Fable 5.1). A user's own `models_allow` still narrows them.
+- Without a `models_allow`, `fleet plan`, `steer model` and review launches check a model against the account's live list, so a mistyped ID is refused at plan time instead of failing in the worker's pane. This covers Codex and Antigravity too. Tier models are left to doctor, parameterized IDs pass unchecked, and a listing that fails only warns; a listing that times out is not retried within the same command.
+- New adapter field `family_prefixes` (model ID prefix = family) names a model's family from its ID, so models a CLI adds later still take part in cross-family review. The longest prefix wins; an exact `model_families` or `models_allow` entry, or a tier that runs the model with its own `family`, beats it. Cursor ships prefixes for every vendor it lists (on the account it was checked with, only `auto` was left without one); OpenCode ships one per lab serving its own models and none for resellers or fine-tune houses.
+- Claude's `models_allow` adds the `fable` alias and the full IDs `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-fable-5-1` and `claude-haiku-5-5`, so a plan can pin an exact version. The CLI cannot list models, so only a launch proves your plan offers one.
+- The `agy` adapter follows agy 1.3.1 and later (checked on 1.4.8): they no longer offer Gemini 3.1 Pro, so the heavy and review tiers move to `gemini-3.8-flash-high` (on those versions, enabling agy failed `fleet doctor` before). `efforts` adds `xhigh`, and `family_prefixes` (`gemini-`, `claude-`, `gpt-oss-`) replaces the per-model `model_families`, so models an older or newer agy lists keep their family.
 
 ## 0.1.0-preview.22
 
