@@ -4,7 +4,7 @@ Run a fleet of coding-agent CLIs (Claude Code, Codex, Cursor) led by the agent y
 
 The lead turns approved tickets into a saved execution plan, picks a worker model and effort for each ticket, watches progress, and verifies every result before dependents start. Workers share one Git checkout with explicit file ownership. **You keep control of commits and publishing.**
 
-> **Preview `0.1.0-preview.22`.** Bundled adapters exist for Claude Code, Codex and Cursor, plus Antigravity and OpenCode (disabled by default). Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
+> **Preview `0.1.0-preview.23`.** Bundled adapters exist for Claude Code, Codex and Cursor, plus Antigravity and OpenCode (disabled by default). Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
 
 - [Quick start](#quick-start)
 - [Installation](#installation)
@@ -191,7 +191,7 @@ family = "xai"
 To limit which models the lead may choose, set `models_allow`. Plans outside it are refused; tier models always count as allowed, so the override above needs no list edit:
 
 ```toml
-[providers.cursor.models_allow]     # replaces the shipped starter set
+[providers.cursor.models_allow]     # Cursor ships none, so this limits it to these
 "grok-4.7-high" = "xai"
 "kimi-k3-high" = "moonshot"
 
@@ -199,7 +199,7 @@ To limit which models the lead may choose, set `models_allow`. Plans outside it 
 models_allow = ["opus", "sonnet", "fable"]
 ```
 
-Codex's list comes from its `codex debug models` catalog and includes each model's effort levels. Claude's `opus` and `sonnet` aliases already follow the current model. Launch one small ticket first (the [documentation-only example](examples/README.md) is a safe choice).
+Codex's list comes from its `codex debug models` catalog and includes each model's effort levels. Claude's `opus`, `sonnet` and `fable` aliases already follow the current model. Launch one small ticket first (the [documentation-only example](examples/README.md) is a safe choice).
 
 ### Configure
 

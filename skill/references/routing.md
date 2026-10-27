@@ -22,7 +22,7 @@ Take consequential work first, balance ready providers without exceeding global 
 
 `cross-heavy` (default) requires a different-family reviewer for each heavy implementation ticket. `cross-all` requires one for every ticket; `off` means lead verification alone. Record the chosen mode at run creation.
 
-Family follows the resolved model, not the CLI. Use exact model-family mappings or matching tier metadata; a known single-family adapter can supply its family as a fallback. Mixed adapters require known model metadata. Use an explicit, accurate `family` in the plan or `--family` where necessary. Never invent a family solely to pass the gate.
+Family follows the resolved model, not the CLI. Use exact model-family mappings, matching tier metadata or the adapter's vendor prefixes (`family_prefixes`); a known single-family adapter can supply its family as a fallback. Mixed adapters require known model metadata. Use an explicit, accurate `family` in the plan or `--family` where necessary. Never invent a family solely to pass the gate.
 
 If the allowed pool cannot provide a known different-family reviewer, tell the owner before implementation. Expand the pool under their routing instruction or obtain an explicit change to `review=off`; never silently downgrade the review policy. In particular, a second Claude account remains Anthropic, while two Cursor models may belong to different families.
 

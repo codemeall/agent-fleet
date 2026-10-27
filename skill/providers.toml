@@ -13,6 +13,7 @@
 #   review launches outside it are refused. Tier models always count as allowed.
 #   A user's models_allow replaces the shipped one.
 # model_families: model ID = family for a mixed adapter, without narrowing what the lead may choose.
+# family_prefixes: model ID prefix = family, for IDs no exact entry or tier names; the longest match wins.
 # efforts: effort levels the CLI accepts, for a CLI that cannot report them per model.
 #   Tier efforts, plans and review launches outside it are refused.
 # tiers: model + effort per ticket weight (see references/routing.md).
@@ -45,7 +46,9 @@ login_ok = '"loggedIn": true'
 account_env = "CLAUDE_CONFIG_DIR"
 trust = "claude-config"
 model_note = "aliases follow the current model"
-models_allow = ["opus", "sonnet"]
+# The CLI cannot list models, so this is the list. Aliases (from `claude --help`) follow the newest model;
+# full IDs pin one. Only a launch proves the account offers a model.
+models_allow = ["opus", "sonnet", "fable", "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-5-5"]
 efforts = ["low", "medium", "high", "xhigh", "max"]    # from `claude --help`; per-model support is checked only at launch
 family = "anthropic"
 plugins = true
@@ -94,8 +97,8 @@ login = "cursor-agent status"
 login_ok = "Logged in"
 models = "cursor-agent --list-models"
 family = "mixed"
-# Starter set; `fleet models cursor --all` lists the rest. Families feed cross-family review.
-models_allow = { "grok-4.7-high" = "xai", "grok-4.7-high-fast" = "xai", "kimi-k3-high" = "moonshot", "muse-spark-1.3-max" = "meta", "composer-2.5" = "cursor", "gpt-5.3-codex-high" = "openai", "claude-opus-5-thinking-high" = "anthropic", "gemini-3.7-flash-high" = "google" }
+# No models_allow: the lead may choose any model `cursor-agent --list-models` offers.
+# family_prefixes below gives each a family for cross-family review; `auto` has none.
 plugins = false
 max = 2
 tiers.heavy = { model = "grok-4.7-high", family = "xai" }
@@ -103,7 +106,20 @@ tiers.standard = { model = "kimi-k3-high", family = "moonshot" }
 tiers.light = { model = "grok-4.7-high-fast", family = "xai" }
 tiers.review = { model = "muse-spark-1.3-max", family = "meta" }
 
+[providers.cursor.family_prefixes]
+"claude-" = "anthropic"
+"gpt-" = "openai"
+"gemini-" = "google"
+"grok-" = "xai"
+"cursor-grok-" = "xai"
+"kimi-" = "moonshot"
+"muse-" = "meta"
+"composer-" = "cursor"
+"glm-" = "zhipu"
+"deepseek-" = "deepseek"
+
 # Antigravity: checked live with agy 1.3.0 (launch, follow-up, /exit). Disabled until the owner turns it on.
+# Models and efforts below are from `agy models` and `agy --help` on 1.3.1 and 1.4.8 (same lists); neither was launched.
 [providers.agy]
 enabled = false
 bin = "agy"
@@ -113,16 +129,17 @@ quit = ["/exit", "enter"]
 login = "agy models"
 login_ok = "gemini"
 models = "agy models"
-efforts = ["low", "medium", "high", "max"]   # from `agy --help`; the model ID also names a thinking level
+efforts = ["low", "medium", "high", "xhigh", "max"]   # from `agy --help`; the model ID also names a thinking level
 family = "mixed"
-# Families for every model `agy models` lists (agy 1.3.0); add new IDs here or pass --family.
-model_families = { "gemini-3.8-flash-high" = "google", "gemini-3.8-flash-medium" = "google", "gemini-3.8-flash-low" = "google", "gemini-3.7-flash-high" = "google", "gemini-3.7-flash-medium" = "google", "gemini-3.7-flash-low" = "google", "gemini-3.6-flash-high" = "google", "gemini-3.6-flash-medium" = "google", "gemini-3.6-flash-low" = "google", "gemini-3.1-pro-high" = "google", "gemini-3.1-pro-low" = "google", "claude-sonnet-4-6" = "anthropic", "claude-opus-4-6-thinking" = "anthropic", "gpt-oss-120b-medium" = "openai" }
+# Families by name, so models older or newer agy versions list keep one (Gemini 3.1 Pro on 1.3.0, say).
+family_prefixes = { "gemini-" = "google", "claude-" = "anthropic", "gpt-oss-" = "openai" }
 plugins = false
 max = 1
-tiers.heavy = { model = "gemini-3.1-pro-high", effort = "high", family = "google" }
+# agy 1.3.1 and later offer no Gemini Pro, so heavy and review use Flash at its highest thinking level.
+tiers.heavy = { model = "gemini-3.8-flash-high", effort = "high", family = "google" }
 tiers.standard = { model = "gemini-3.8-flash-high", effort = "high", family = "google" }
 tiers.light = { model = "gemini-3.8-flash-medium", effort = "medium", family = "google" }
-tiers.review = { model = "gemini-3.1-pro-high", effort = "high", family = "google" }
+tiers.review = { model = "gemini-3.8-flash-high", effort = "high", family = "google" }
 
 # OpenCode: checked live with opencode 1.18.34 (launch, follow-up, /exit). Disabled until the owner turns it on.
 # Model IDs are provider/model; the shipped tiers assume OpenRouter (`opencode auth login`).
@@ -136,14 +153,59 @@ login = "opencode models openrouter"   # lists only providers with credentials; 
 login_ok = "openrouter/"
 models = "opencode models"
 family = "mixed"
-# Starter set; `fleet models opencode --all` lists every model your configured providers offer.
-models_allow = { "openrouter/z-ai/glm-5.3" = "zhipu", "openrouter/qwen/qwen3.7-plus" = "alibaba", "openrouter/deepseek/deepseek-v4-pro" = "deepseek", "openrouter/deepseek/deepseek-v4-flash" = "deepseek", "openrouter/moonshotai/kimi-k2.7-code" = "moonshot", "openrouter/minimax/minimax-m3" = "minimax" }
+# No models_allow: the lead may choose any model `opencode models` lists for your configured providers.
+# family_prefixes below covers labs serving their own models; resellers and fine-tune houses
+# (nvidia, perplexity, openrouter/openrouter, most of opencode/) have none, so pass --family for those.
 plugins = false
 max = 1
 tiers.heavy = { model = "openrouter/z-ai/glm-5.3", family = "zhipu" }
 tiers.standard = { model = "openrouter/qwen/qwen3.7-plus", family = "alibaba" }
 tiers.light = { model = "openrouter/deepseek/deepseek-v4-flash", family = "deepseek" }
 tiers.review = { model = "openrouter/deepseek/deepseek-v4-pro", family = "deepseek" }
+
+[providers.opencode.family_prefixes]
+"openrouter/anthropic/" = "anthropic"
+"openrouter/~anthropic/" = "anthropic"
+"openrouter/openai/" = "openai"
+"openrouter/~openai/" = "openai"
+"huggingface/openai/" = "openai"
+"openrouter/google/" = "google"
+"openrouter/~google/" = "google"
+"huggingface/google/" = "google"
+"openrouter/x-ai/" = "xai"
+"openrouter/~x-ai/" = "xai"
+"openrouter/qwen/" = "alibaba"
+"huggingface/Qwen/" = "alibaba"
+"openrouter/z-ai/" = "zhipu"
+"openrouter/~z-ai/" = "zhipu"
+"huggingface/zai-org/" = "zhipu"
+"opencode/glm-" = "zhipu"
+"openrouter/deepseek/" = "deepseek"
+"openrouter/~deepseek/" = "deepseek"
+"huggingface/deepseek-ai/" = "deepseek"
+"opencode/deepseek-" = "deepseek"
+"openrouter/moonshotai/" = "moonshot"
+"openrouter/~moonshotai/" = "moonshot"
+"huggingface/moonshotai/" = "moonshot"
+"openrouter/minimax/" = "minimax"
+"huggingface/MiniMaxAI/" = "minimax"
+"openrouter/meta-llama/" = "meta"
+"openrouter/meta/" = "meta"
+"huggingface/meta-llama/" = "meta"
+"meta/" = "meta"
+"openrouter/mistralai/" = "mistral"
+"openrouter/cohere/" = "cohere"
+"openrouter/amazon/" = "amazon"
+"openrouter/microsoft/" = "microsoft"
+"openrouter/ibm-granite/" = "ibm"
+"openrouter/tencent/" = "tencent"
+"huggingface/tencent/" = "tencent"
+"openrouter/xiaomi/" = "xiaomi"
+"huggingface/XiaomiMiMo/" = "xiaomi"
+"opencode/mimo-" = "xiaomi"
+"openrouter/bytedance-seed/" = "bytedance"
+"openrouter/stepfun/" = "stepfun"
+"huggingface/stepfun-ai/" = "stepfun"
 
 # Placeholders, not supported providers: no Grok or Muse CLI has been checked, so the binary name, flags,
 # login check, model list and tiers below are unknown or guesses. Grok and Muse models work today through

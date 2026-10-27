@@ -62,23 +62,25 @@ Tier models are pinned on purpose: plans record the exact model and cross-family
 
 ## Allowed models
 
-`models_allow` is the owner's list of models the lead may choose, either a list (`["opus", "sonnet"]`) or a table of model ID = family. With a live list (Codex, Cursor, Antigravity, OpenCode) it narrows that list; without one (Claude) it is the list. Tier models always count as allowed, so overriding a tier needs no list edit; the list governs per-ticket pins and review models. `fleet plan` and review launches refuse models outside it, and its families feed cross-family review. Doctor fails when a tier model is outside it and warns when an allowed model is no longer offered. A user's `models_allow` replaces the shipped one; an adapter that `extends` another inherits it. `fleet models <provider> --all` shows the account's full list.
+`models_allow` is the owner's list of models the lead may choose, either a list (`["opus", "sonnet"]`) or a table of model ID = family. With a live list (Codex, Cursor, Antigravity, OpenCode) it narrows that list; without one (Claude) it is the list. Tier models always count as allowed, so overriding a tier needs no list edit; the list governs per-ticket pins and review models. `fleet plan` and review launches refuse models outside it, and its families feed cross-family review. With no list, plan, steer and review launches refuse a model the account's live list does not offer; tier models are left to doctor, parameterized IDs (`model[key=value,…]`) pass unchecked, and a listing that fails or times out only warns (once per command). Doctor fails when a tier model is outside it and warns when an allowed model is no longer offered. A user's `models_allow` replaces the shipped one; an adapter that `extends` another inherits it. `fleet models <provider> --all` shows the account's full list.
 
 | Provider | Shipped `models_allow` |
 | --- | --- |
-| Claude | `opus`, `sonnet` (the CLI cannot list models; add `fable` or full IDs such as `claude-opus-5-5` if your plan offers them) |
-| Cursor, OpenCode | A starter set with families; the account offers far more |
+| Claude | Aliases `opus`, `sonnet`, `fable` and full IDs `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-fable-5-1`, `claude-haiku-5-5` (the CLI cannot list models, so only a launch proves your plan offers one) |
+| Cursor, OpenCode | None: every model the account lists, with families from `family_prefixes` |
 | Codex, Antigravity | None: the live list is used as is |
 
-`model_families` (model ID = family) names the family of models in a mixed adapter without narrowing what the lead may choose. Antigravity ships one for every model it lists, so its Claude and GPT-OSS models count as Anthropic and OpenAI in cross-family review.
+`model_families` (model ID = family) names the family of models in a mixed adapter without narrowing what the lead may choose.
 
-`efforts` lists the effort levels a CLI accepts when it cannot report them per model. Claude ships `low, medium, high, xhigh, max` from `claude --help`; that is CLI-wide, so whether a given model accepts a level is only proven at launch. Tier efforts, plans and review launches outside the list are refused. Antigravity ships `low, medium, high, max` from `agy --help`. Codex reports efforts per model in its catalog; Cursor encodes effort in the model ID; OpenCode's interactive TUI has no effort flag, so its tiers carry none.
+`family_prefixes` (model ID prefix = family) labels models by name, so a model the CLI adds later gets a family without a config edit. The longest matching prefix wins; an exact `model_families` or `models_allow` entry, or a tier that runs the model with its own `family`, beats it. Cursor ships prefixes for every vendor it lists (`claude-` = Anthropic, `gpt-` = OpenAI, `gemini-` = Google, `grok-` = xAI, and so on); on the account it was checked with, only `auto` was left without one. Antigravity ships `gemini-`, `claude-` and `gpt-oss-`, so its Claude and GPT-OSS models count as Anthropic and OpenAI. OpenCode ships one per lab that serves its own models (`openrouter/anthropic/`, `huggingface/Qwen/`, …). Resellers and fine-tune houses (`openrouter/nvidia/`, `openrouter/perplexity/`, `openrouter/bytedance/`, most of `opencode/`) have none, because their models are built on other labs' models; pass an accurate `--family` or add an exact entry for one of those.
+
+`efforts` lists the effort levels a CLI accepts when it cannot report them per model. Claude ships `low, medium, high, xhigh, max` from `claude --help`; that is CLI-wide, so whether a given model accepts a level is only proven at launch. Tier efforts, plans and review launches outside the list are refused. Antigravity ships `low, medium, high, xhigh, max` from `agy --help` (1.3.1 and 1.4.8). Codex reports efforts per model in its catalog; Cursor encodes effort in the model ID; OpenCode's interactive TUI has no effort flag, so its tiers carry none.
 
 Codex's list comes from `codex debug models`, a debug command that refreshes its catalog over the network and may change between Codex versions. If it fails, doctor reports "model list failed" without failing. When the catalog marks a tier model for retirement, doctor warns (`RETIRING: gpt-5.5 retires 2026-10-14, switch to gpt-5.6-sol`) without failing, and `fleet models codex` shows the date and replacement.
 
 ## Claude Code
 
-The default `claude` adapter uses the normal account and interactive permission controls. `opus` and `sonnet` are example aliases. Effort support depends on the installed CLI and model. Do not respond to a permission denial by switching account or bypassing the host's controls.
+The default `claude` adapter uses the normal account and interactive permission controls. `opus`, `sonnet` and `fable` are aliases for the newest model of each line; pin a full ID such as `claude-opus-5-5` when the plan must record an exact version. Effort support depends on the installed CLI and model. Do not respond to a permission denial by switching account or bypassing the host's controls.
 
 `claude-co` is a disabled example of a second account using `CLAUDE_CONFIG_DIR=~/.claude-co`. Turn it on with `fleet provider enable claude-co` only after the owner has signed that account in. It must receive a self-contained prompt; do not assume the same plugins exist under both configurations. Both accounts use Anthropic-family models, so switching between them does not satisfy cross-family review.
 
@@ -118,16 +120,16 @@ Use model IDs and effort levels supported by the authenticated account. The ship
 
 The default launches `cursor-agent` with the chosen model and repository trust, retaining interactive permission handling; it does not use `--force`. `--trust` is in the shipped launch line, so Cursor is trusted with or without `auto_trust`. A trusted workspace is not permission for an arbitrary command. Inspect trust or command prompts as part of launch verification.
 
-Cursor can serve several families. The example tiers identify xAI (`grok-…`), Moonshot (`kimi-…`) and Meta (`muse-…`) separately. Use `cursor-agent --list-models` to confirm your account's exact IDs; parameterized IDs must remain a single argument. A model override needs accurate family metadata, especially for cross-family review. A different CLI name alone is not evidence of a different family.
+Cursor can serve several families. The example tiers identify xAI (`grok-…`), Moonshot (`kimi-…`) and Meta (`muse-…`) separately. The lead may choose any model `cursor-agent --list-models` offers (`fleet models cursor gemini` filters them); `family_prefixes` names each one's family. Parameterized IDs must remain a single argument. A model whose name hides its base model needs an exact family entry, especially for cross-family review. A different CLI name alone is not evidence of a different family.
 
 ## Antigravity
 
-`agy` ships disabled. To use it, install and sign in to `agy`, run `fleet provider enable agy`, then `fleet doctor agy`. It was checked live with agy 1.3.0: launch with an interactive first prompt (`-i`), follow-up input, `/exit` back to the shell, `doctor` and `fleet models agy`. `/exit` is the verified quit sequence.
+`agy` ships disabled. To use it, install and sign in to `agy`, run `fleet provider enable agy`, then `fleet doctor agy`. It was checked live with agy 1.3.0: launch with an interactive first prompt (`-i`), follow-up input, `/exit` back to the shell, `doctor` and `fleet models agy`. `/exit` is the verified quit sequence. Its models and efforts were refreshed from `agy models` and `agy --help` on 1.3.1 and 1.4.8: neither offers Gemini Pro, so every tier uses Gemini 3.8 Flash (heavy and review at `gemini-3.8-flash-high`).
 
 - It runs in `accept-edits` mode: file edits are approved automatically, shell commands still ask. A worker's checks (even `git status`) wait at a prompt until someone answers it in the pane, so watch `fleet peek` after launch.
 - On first use in a folder it asks whether to trust it. With `auto_trust` on, launch adds the repo to its trusted workspaces first ([Folder trust](#folder-trust)); otherwise the owner answers, once per checkout.
 - The model ID names a thinking level (`gemini-3.8-flash-medium`) and `--effort` sets reasoning effort; tiers set both.
-- Its account also offers Claude and GPT-OSS models. `model_families` labels every listed model (Gemini as Google), so an Antigravity Claude model cannot review a Claude writer. A model agy adds later needs an entry there, or `--family`, before it can take part in cross-family review.
+- Its account also offers Claude and GPT-OSS models. `family_prefixes` labels them by name (`gemini-` as Google, `claude-` as Anthropic, `gpt-oss-` as OpenAI), so an Antigravity Claude model cannot review a Claude writer, and a model agy adds later under those names needs no config edit.
 - It cannot name a session at launch (only resume one with `--conversation`), so `fleet launch --resume` does not apply.
 
 ## OpenCode
@@ -135,7 +137,7 @@ Cursor can serve several families. The example tiers identify xAI (`grok-…`), 
 `opencode` ships disabled; turn it on with `fleet provider enable opencode`, then run `fleet doctor opencode`. It was checked live with opencode 1.18.34: launch through the TUI's `--prompt` (submitted at once, the session stays interactive), follow-up input, `/exit` back to the shell, `doctor`, `fleet models opencode`, and a Fleet launch that ended in an in-scope change and a complete report.
 
 - Model IDs are `provider/model`. The shipped tiers and login check assume OpenRouter (`opencode auth login`). `opencode models` lists only providers with credentials, so `login = "opencode models openrouter"` with `login_ok = "openrouter/"` is a real sign-in check; point both at the provider you use.
-- It serves many families, so the adapter is `mixed`: every tier and `models_allow` entry carries its family. The shipped tiers use Zhipu, Alibaba and DeepSeek models, which gives cross-family review options outside Anthropic, OpenAI and Google.
+- It serves many families, so the adapter is `mixed`: every tier carries its family, and `family_prefixes` names the rest by vendor path. Every model `opencode models` lists may be chosen. The shipped tiers use Zhipu, Alibaba and DeepSeek models, which gives cross-family review options outside Anthropic, OpenAI and Google.
 - Effort: the TUI takes no `--variant` (only `opencode run` does), so tiers carry no effort.
 - Permissions: OpenCode's default build agent allows every tool without asking, except paths outside the workspace and repeated identical calls (`opencode debug agent build` shows the resolved rules). Fleet's worker contract is the only limit unless your `opencode.json` sets `permission`; tighten it there, not in the adapter.
 - Its sessions get IDs OpenCode picks, so `fleet launch --resume` does not apply.
