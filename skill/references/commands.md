@@ -21,7 +21,7 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`prompt`](#prompt) | Writes a worker or reviewer prompt | Before each launch |
 | [`launch`](#launch) | Starts a worker in a cmux pane or a headless tmux window | A ticket is ready and its prompt is written |
 | [`peek`](#peek) | Shows the bottom of a worker's screen | After `STALLED`, or when the launch screen shows a prompt |
-| [`send`](#send) | Types a message into a worker's pane | Answering a blocked worker or requesting changes |
+| [`send`](#send) | Saves a message in the ticket's inbox and points the worker to it | Answering a blocked worker or requesting changes |
 | [`wait`](#wait) | Blocks until something needs the lead | Between actions, while workers run |
 | [`status`](#status) | Lists workers and report statuses | You need a snapshot after `EXITED` or a recovery |
 | [`stop`](#stop) | Quits workers and confirms they exited | Before review or verification, or before shutdown |
@@ -204,12 +204,24 @@ Prints the last 20 lines of the worker's screen, or `N`.
 ### send
 
 ```text
-fleet send <run> <id> <text ...>
+fleet send <run> <id> (<text ...> | --file <path|->) [--changes] [--key <k>]
 ```
 
-Types the text into the worker's pane and presses Enter. `wait` then expects a response, so a silent worker shows as `STALLED`.
+Appends the message as `## Message N (<time>)` to the ticket's inbox, `.fleet/runs/<run>/inbox/<id>.md`, then types one line into the worker's pane and presses Enter:
 
-**Use:** answering a `blocked` report, or sending a bounded fix list after setting the report to `Status: changes-requested`. Save decisions to `notes.md`. Never use it to accept a trust, permission or login prompt for the owner. Trust prompts go away only when the owner sets `auto_trust` ([Folder trust](providers.md#folder-trust)).
+```text
+Lead message 2: read "## Message 2" in /repo/.fleet/runs/settings/inbox/api-client.md, then continue.
+```
+
+So a message can span lines and still arrive as one input, and every message stays on record. Numbers continue across relaunches of the same ticket. Every worker, investigator and reviewer prompt, and the `launch --resume` line, names the inbox and tells the worker to read it when it starts. `wait` then expects a response, so a silent worker shows as `STALLED`.
+
+- `--file` reads the message from a file, or from stdin with `-`. Give text or `--file`, not both.
+- `--changes` requests changes: the report must say `needs-verification`, and send sets it to `Status: changes-requested` before the message goes out, so `wait` ignores it until the worker hands back again.
+- `--key` names the message, so a retry is safe: a key already used for this ticket sends nothing and prints which message it was.
+- With no running worker for the ticket, the message is only saved; the worker reads it when launched.
+- If typing the pointer fails, the message is still saved and send exits 1 saying so. Don't resend it: the worker reads it when it next checks its inbox. `fleet peek` shows the pane.
+
+**Use:** answering a `blocked` report, or sending a bounded fix list with `--changes`. Save decisions to `notes.md`. Never use it to accept a trust, permission or login prompt for the owner. Trust prompts go away only when the owner sets `auto_trust` ([Folder trust](providers.md#folder-trust)).
 
 ## Watching
 
