@@ -239,8 +239,7 @@ fleet wait settings --timeout 540        # in the background; keep talking with 
 `REPORT why-slow [needs-verification]` names `src/cache.py:88` rebuilding the index on every call:
 
 ```sh
-fleet stop settings why-slow
-fleet verify settings why-slow --evidence .fleet/runs/settings/evidence/why-slow.md   # no combined-tree checks
+fleet accept settings why-slow --evidence .fleet/runs/settings/evidence/why-slow.md   # stops it, then verifies; no combined-tree checks
 ```
 
 Propose `cache-fix → implement · claude · standard · src/cache.py · checks: pytest -q tests/test_perf.py`; on "yes", `fleet add` it with the finding in `context`, then `fleet launch settings --ready`.
