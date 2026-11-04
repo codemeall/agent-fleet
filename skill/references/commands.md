@@ -24,6 +24,8 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`send`](#send) | Types a message into a worker's pane | Answering a blocked worker or requesting changes |
 | [`wait`](#wait) | Blocks until something needs the lead | Between actions, while workers run |
 | [`status`](#status) | Lists workers and report statuses | You need a snapshot after `EXITED` or a recovery |
+| [`review`](#review) | Stops the writer, saves its diff and launches a reviewer from another family | A writer hands back on a ticket that needs review |
+| [`accept`](#accept) | Stops the ticket's workers, verifies the reviewer then the writer, and lists what that unblocks | Your checks and any review are done and the evidence is written |
 | [`stop`](#stop) | Quits workers and confirms they exited | Before review or verification, or before shutdown |
 | [`gate`](#gate) | Runs a ticket's planned check commands and the scope check, and writes the results as evidence | Before verifying a ticket whose `checks` include commands |
 | [`diff`](#diff) | Captures a ticket's changes since launch | Before a cross-family review |
@@ -200,7 +202,7 @@ screen after 5s:
 - `--resume` continues the stopped worker's own session (same provider and account, adapters with `resume` such as Claude), for example after a usage limit resets.
 - `--settle` sets the seconds before the screen is printed (default 5, at most 30; 0 skips it).
 
-**Use:** for each ready ticket, and with `--tier review` for each reviewer. Read the printed screen; `wait` covers a prompt that appears later.
+**Use:** for each ready ticket, and with `--tier review` for a reviewer you launch yourself ([`review`](#review) launches one for you). Read the printed screen; `wait` covers a prompt that appears later.
 
 ### peek
 
@@ -263,6 +265,69 @@ Reconciles exit receipts, then lists each worker's provider and model, pane, sta
 
 ## Review and acceptance
 
+`review` and `accept` are the usual path. Each runs the commands after them (`stop`, `diff`, `prompt`, `launch`, `gate`, `verify`) in order, so every check those make still applies; use the commands one at a time when you need a step in between, such as reading the reviewer prompt before launch ([example 4](examples.md#4-cross-family-review-with-a-fix-round)).
+
+### review
+
+```text
+fleet review <run> <id> [--provider <p> [--model <m>] [--effort <e>] [--family <f>]] [--as <reviewer-id>]
+             [--pane <ref|uuid|index>] [--settle <seconds>] [--unowned-ok <reason>]
+```
+
+Starts a cross-family review of a ticket in one call:
+
+1. `stop` the writer and confirm its exit (a writer already stopped is left as it is);
+2. `diff` into `.fleet/runs/<run>/evidence/<id>.diff`, so [the scope check](#the-scope-check) and the diff's other refusals apply; `--unowned-ok` is passed to it;
+3. `prompt --review-of` for the reviewer, `review-<id>` unless `--as` names it; a new round replaces the last round's prompt, never a running reviewer's;
+4. `launch --tier review`, which prints the reviewer's first screen as `launch` does.
+
+Without `--provider` it chooses the reviewer: the first provider, in the routing pool's order (for `single:` and `agents=` routing), else in `defaults.prefer` order and then any other provider that is on, that is usable, has a review-tier model that `models_allow` (or the account's list) allows, has a known family other than the one the writer actually ran on (a steer may have moved it), fits the routing (an `agents=` pinned model becomes the reviewer's model), and has room under `max_parallel` and its own `max`. The writer's slot counts as free. `--model`, `--effort` and `--family` need `--provider`.
+
+Before stopping anything it refuses an investigate ticket (it has no diff; use `accept`), a ticket not launched, dropped or verified, a reviewer of this ticket that is still running, a default reviewer ID over the 64-character limit (pass `--as`), a hold, and a ticket no provider can review. That last refusal gives each candidate's reason:
+
+```text
+fleet: no provider can review api-client now; its writer ran codex:gpt-6-sol (family openai):
+  claude: at capacity (claude.max 2)
+  codex: same family as the writer (openai)
+```
+
+A failed stop refuses with the writer still holding its slot. A refusal from `diff`, `prompt` or `launch` after the stop says the writer is stopped; resolve it and run `review` again. On success it prints:
+
+```text
+api-client: exited (surface:7)
+DIFF .fleet/runs/settings/evidence/api-client.diff (2 files)
+REVIEW review-api-client claude:opus@high family=anthropic on surface:9
+screen after 5s:
+  …
+```
+
+A ticket whose review is not required may still be reviewed.
+
+**Use:** when a writer hands back on a ticket the saved review mode requires a review for, once you have read its report and run its checks. Then `wait` for the reviewer's report.
+
+### accept
+
+```text
+fleet accept <run> <id> --evidence <file> [--evidence <file> ...] [--review-evidence <file> ...]
+             [--gate] [--unowned-ok <reason>] [--launch-ready]
+```
+
+Accepts a ticket, and its review, in one call:
+
+1. Stops the ticket's latest reviewer and its writer if either is still running, confirming each exit.
+2. With `--gate`, runs [`gate`](#gate). A failure verifies nothing; a pass puts its evidence file first in the writer's evidence.
+3. Verifies the latest reviewer, unless it is verified already, with `--review-evidence` (default: the `--evidence` files).
+4. Verifies the writer with the `--evidence` files.
+5. Prints `UNBLOCKED <ids>`: tickets never launched that wait on this one and whose blockers are now all verified, or `UNBLOCKED none`. With `--launch-ready` it then runs `launch --ready` and prints its lines.
+
+An investigate ticket, or one whose review is not required, is accepted without a reviewer. If you reviewed it anyway, that reviewer is verified first, and one that has not handed back blocks `accept` (use `verify` to accept without it).
+
+Before stopping anything, and again before the first verify, it checks what `verify` and the gate would refuse for both workers and names every problem in one refusal: a missing or stale required review, a report not at `Status: needs-verification`, a missing or empty evidence file, `--gate` on a ticket with no runnable checks, and files outside every ticket's scope. `--unowned-ok` records the owner's reason for those before the gate runs, so the gate's own scope check passes too. If `verify` still refuses the writer after the reviewer was verified, `accept` says the reviewer's verification is recorded and the writer's is not; resolve it and run `accept` again with the same evidence, which skips the verified reviewer.
+
+It holds the run's lock throughout, gate included. To send a failing check back to a writer that is still running, run `gate` on its own first: after `accept --gate` fails, the writer is stopped and needs a relaunch to fix it.
+
+**Use:** once the reviewer's report is in (or the writer's, when no review is required) and your evidence is written. Only then update the source ticket.
+
 ### stop
 
 ```text
@@ -298,7 +363,7 @@ fleet diff <run> <id> [--output <file>] [--unowned-ok <reason>]
 
 Prints or saves the ticket's changes since launch, including new files. The writer must be stopped and no live worker may own its files. It refuses, like `verify`, while [files outside every ticket's scope](#the-scope-check) have changed since the writer launched.
 
-**Use:** to capture the diff for `prompt --review-of`.
+**Use:** to capture the diff for `prompt --review-of`; [`review`](#review) runs it for you.
 
 ### verify
 
@@ -308,7 +373,7 @@ fleet verify <run> <id> --evidence <file> [--evidence <file> ...] [--unowned-ok 
 
 Accepts a ticket or a review. Repeat `--evidence` to record several files, such as a `gate` file and your own notes; they are read in order, each must be non-empty, and they are recorded together. The worker must have exited, its report must say `Status: needs-verification`, and for a writer, any required review must be verified and match the current diff. No file outside every ticket's scope may have changed since the worker launched ([the scope check](#the-scope-check)). It sets the report to `verified`, appends the evidence, records `verified_at` on the worker (shown by `resume --json`), and unblocks dependents.
 
-**Use:** after running the ticket's checks yourself. Verify the reviewer first, then the writer, each with its own evidence file. Only then update the source ticket.
+**Use:** after running the ticket's checks yourself. Verify the reviewer first, then the writer, each with its own evidence file; [`accept`](#accept) does both. Only then update the source ticket.
 
 ### recover
 
@@ -332,12 +397,12 @@ Compares the current HEAD and index with the baseline from `init`. Exits 1 and l
 
 ### The scope check
 
-A worker's diff covers only its own files, so Fleet also compares the whole checkout. At each launch it records HEAD and a fingerprint (mode and Git blob ID) of every changed or untracked file; nothing is written to `.git`. `diff` and `verify` then refuse while any file changed since that worker launched, unless a ticket owns it:
+A worker's diff covers only its own files, so Fleet also compares the whole checkout. At each launch it records HEAD and a fingerprint (mode and Git blob ID) of every changed or untracked file; nothing is written to `.git`. `diff` and `verify` (and so `review` and `accept`) then refuse while any file changed since that worker launched, unless a ticket owns it:
 
 - a ticket owns its files from its first launch until it is verified or dropped, so work running alongside is never blamed on this worker;
-- never counted: `.fleet/`, gitignored files, the run's ticket files, files the lead handed Fleet (`plan`/`add --file`, `diff --output`, `--evidence`, `prompt --diff`; a `gate --output` inside the checkout counts once `verify` takes it as `--evidence`), and the owner's `scope_ignore` list under `[defaults]` (default `[".scratch/", "node_modules/"]`; `name/` is a directory at any depth, `a/b/` is anchored at the root, anything else an exact path; your list replaces the default).
+- never counted: `.fleet/`, gitignored files, the run's ticket files, files the lead handed Fleet (`plan`/`add --file`, `diff --output`, `--evidence` and `--review-evidence`, `prompt --diff`; a `gate --output` inside the checkout counts once `verify` takes it as `--evidence`), and the owner's `scope_ignore` list under `[defaults]` (default `[".scratch/", "node_modules/"]`; `name/` is a directory at any depth, `a/b/` is anchored at the root, anything else an exact path; your list replaces the default).
 
-Reviewers and investigators own no files, so any change during their run counts. The refusal lists each file as `changed`, `created`, `deleted` or `mode changed`. Ways out, each recorded in the run's decisions: the owner reverts the file; `fleet grant` adds it to the ticket, so it enters the ticket's diff and review; `fleet drop` retires the ticket; or, for the owner's own edits only, `--unowned-ok "<owner's words>"` on `diff` or `verify` accepts that exact content (a later change to the file counts again). `stop` lists such files as soon as a worker exits, and `wait` adds a `SCOPE` line to a wake it is already making. Workers launched by an earlier Fleet have no snapshot; their check is skipped with a note.
+Reviewers and investigators own no files, so any change during their run counts. The refusal lists each file as `changed`, `created`, `deleted` or `mode changed`. Ways out, each recorded in the run's decisions: the owner reverts the file; `fleet grant` adds it to the ticket, so it enters the ticket's diff and review; `fleet drop` retires the ticket; or, for the owner's own edits only, `--unowned-ok "<owner's words>"` on `diff`, `verify`, `review` or `accept` accepts that exact content (a later change to the file counts again). `stop` lists such files as soon as a worker exits, and `wait` adds a `SCOPE` line to a wake it is already making. Workers launched by an earlier Fleet have no snapshot; their check is skipped with a note.
 
 ## Continuity
 

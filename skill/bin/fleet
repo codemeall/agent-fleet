@@ -2976,6 +2976,286 @@ def cmd_verify(a, cfg):
         print(f"{a.id}: verified; update the source ticket only after implementation acceptance")
 
 
+# ---------- review and accept ----------
+# Both run the existing commands in order rather than reimplementing them, so stop, diff, prompt, launch, gate and
+# verify each stay the single source of their own preconditions. What these add is the sequence, the reviewer's
+# choice and one refusal, before anything changes, for every problem that can be seen in advance.
+
+STOP_WAIT_S = 10  # fleet stop's default wait for a confirmed exit
+
+
+def sub_args(a, **fields) -> argparse.Namespace:
+    """Arguments for an existing command called inside this one; the top-level command holds the lock."""
+    return argparse.Namespace(run=a.run, **fields)
+
+
+def own_ticket(a, state: dict, verb: str) -> dict:
+    """Ticket `a.id`, launched and still open. A reviewer's ID is pointed at the ticket it reviews."""
+    t = state["tickets"].get(a.id)
+    if t is None:
+        meta = state["workers"].get(a.id) or state["prompts"].get(a.id) or {}
+        if meta.get("review_of"):
+            raise FleetError(f"{a.id} is a reviewer; name the ticket it reviews: fleet {verb} {a.run} {meta['review_of']}")
+        raise FleetError(f"no ticket '{a.id}' in this run")
+    if t["status"] == "dropped":
+        raise FleetError(f"{a.id} was dropped; there is nothing to {verb}")
+    if t["status"] == "verified":
+        raise FleetError(f"{a.id} is already verified; new work on it needs a new ticket (fleet add)")
+    if state["workers"].get(a.id, {}).get("role") != "implementation":
+        raise FleetError(f"{a.id} has not launched yet; there is nothing to {verb} until its worker hands back")
+    return t
+
+
+def stop_live(a, cfg, state: dict, ids: list[str], unchanged: str) -> None:
+    """Stop those of `ids` still running, through fleet stop, and refuse unless every exit is confirmed."""
+    live = [i for i in ids if state["workers"].get(i, {}).get("state") in ACTIVE_STATES]
+    if live and cmd_stop(sub_args(a, ids=live, all=False, close=False, timeout=STOP_WAIT_S), cfg):
+        raise FleetError(f"stop failed, so {unchanged}. A failed stop keeps the worker's slot: see why with fleet "
+                         f"peek {a.run} <id> ({', '.join(live)}); if it must go, confirm its exit and use fleet recover "
+                         "(examples.md 7)")
+
+
+def latest_reviewer(state: dict, i: str) -> dict | None:
+    """The reviewer of ticket `i` launched last: each new round replaces the previous one's verdict."""
+    reviews = [w for w in state["workers"].values() if w.get("review_of") == i]
+    return max(reviews, key=lambda w: w.get("launched_at", 0), default=None)
+
+
+def review_candidates(cfg: dict, pool: dict | None) -> list[str]:
+    """Providers to try as reviewer, in order: the routing pool's own, else defaults.prefer and then every other
+    provider that is turned on."""
+    if pool is not None:
+        return list(pool)
+    names = [n for n in cfg["defaults"]["prefer"] if n in cfg["providers"]]
+    return names + [n for n, p in cfg["providers"].items()
+                    if n not in names and p.get("enabled", True) and not p.get("placeholder")]
+
+
+def review_route(cfg: dict, state: dict, pool: dict | None, name: str, writer_family: str, running: list[dict],
+                 model: str | None = None, effort: str | None = None,
+                 family: str | None = None) -> tuple[str | None, dict]:
+    """Why provider `name` cannot review now (None when it can) and the route it would take. These are launch's
+    own checks, so the route picked here is one launch accepts; a pool's pinned model is the reviewer's model."""
+    try:
+        pcfg = usable_provider(cfg, name)
+        if pool is not None and name not in pool:
+            return f"outside the run's routing {state['options']['routing']}", {}
+        model, effort = resolve_model(pcfg, "review", model or (pool or {}).get(name), effort)
+        check_allowed(pcfg, name, model)
+        check_effort(pcfg, name, effort)
+        check_pool(pool, name, model, "reviewer")
+    except FleetError as e:
+        return str(e), {}
+    family = model_family(pcfg, "review", model, family)
+    route = {"provider": name, "model": model, "effort": effort}
+    if not family:
+        return f"{model} has no known family ({name}.model_families or family_prefixes)", route
+    if family == writer_family:
+        return f"same family as the writer ({family})", route
+    if len(running) >= state["options"]["max_parallel"]:
+        return f"no free slot (max_parallel {state['options']['max_parallel']})", route
+    if sum(w["provider"] == name for w in running) >= pcfg.get("max", 2):
+        return f"at capacity ({name}.max {pcfg.get('max', 2)})", route
+    return None, route
+
+
+def pick_reviewer(a, cfg, state: dict, writer: dict) -> dict:
+    """--provider's route, checked now rather than after the writer stops, or the first candidate that fits.
+    The writer is about to stop, so its slot counts as free."""
+    if not writer.get("family"):
+        raise FleetError(f"{a.id} ran {writer['provider']}:{writer['model']}, whose family is unknown, so no "
+                         "reviewer can be shown to differ from it; tell the owner (references/routing.md)")
+    pool = routing_pool(state["options"]["routing"], cfg)
+    running = [w for w in active(state) if w["id"] != a.id]
+    if a.provider:
+        why, route = review_route(cfg, state, pool, a.provider, writer["family"], running, a.model, a.effort, a.family)
+        if why:
+            raise FleetError(f"{a.provider} cannot review {a.id}: {why}")
+        return route
+    reasons = []
+    for name in review_candidates(cfg, pool):
+        why, route = review_route(cfg, state, pool, name, writer["family"], running)
+        if not why:
+            return route
+        reasons.append(f"  {name}: {why}")
+    raise FleetError(f"no provider can review {a.id} now; its writer ran {writer['provider']}:{writer['model']} "
+                     f"(family {writer['family']}):\n" + "\n".join(reasons or ["  no provider is turned on"]) +
+                     "\nIf capacity is the only reason, stop a finished worker and retry. Otherwise tell the owner: a "
+                     "different-family reviewer needs another provider or a wider routing (references/routing.md); "
+                     "never set a family just to pass")
+
+
+def review_id(a, state: dict) -> str:
+    """The reviewer's ID, refused before anything stops when it is too long, a ticket's, another ticket's
+    reviewer's, or a reviewer still running."""
+    rid = a.reviewer or f"review-{a.id}"
+    if not a.reviewer and not ID_RE.fullmatch(rid):
+        raise FleetError(f"{rid} is longer than the 64-character ID limit; name the reviewer with --as <reviewer-id>")
+    valid_id(rid)
+    if rid in state["tickets"]:
+        raise FleetError(f"{rid} is a ticket's ID; name the reviewer with --as <reviewer-id>")
+    meta = state["workers"].get(rid) or state["prompts"].get(rid)
+    if meta and meta.get("review_of") != a.id:
+        raise FleetError(f"{rid} already reviews {meta.get('review_of')}; name this reviewer with --as <reviewer-id>")
+    for w in active(state):
+        if w.get("review_of") == a.id:
+            raise FleetError(f"reviewer {w['id']} may still be running; read its report, or fleet stop {a.run} "
+                             f"{w['id']}, before a new round")
+    return rid
+
+
+def cmd_review(a, cfg):
+    """Stop the writer, save its diff, write the reviewer prompt and launch a reviewer from another family: the
+    long form's stop, diff, prompt and launch, each still enforcing its own preconditions."""
+    if not a.provider and (a.model or a.effort or a.family):
+        raise FleetError("--model, --effort and --family describe one provider's reviewer; pass --provider with them")
+    repo = repo_root()
+    if hold := load_hold(repo):  # launch would refuse it after the writer had already stopped
+        raise hold_refusal(hold)
+    ensure_other_runs_idle(repo, a.run)
+    state = load_run(repo, a.run)
+    reconcile(repo, state)
+    t = own_ticket(a, state, "review")
+    if t.get("kind") == "investigate":
+        raise FleetError(f"{a.id} is an investigate ticket: it has no diff to review; accept it with fleet accept")
+    writer = state["workers"][a.id]
+    rid = review_id(a, state)
+    route = pick_reviewer(a, cfg, state, writer)
+    if writer["state"] in ACTIVE_STATES:
+        stop_live(a, cfg, state, [a.id], f"no review of {a.id} started")
+    else:
+        print(f"{a.id}: {writer['state']} ({writer['surface']}), already stopped")
+    d = run_dir(repo, a.run)
+    (d / "evidence").mkdir(exist_ok=True)
+    diff = d / "evidence" / f"{a.id}.diff"
+    try:
+        cmd_diff(sub_args(a, id=a.id, output=str(diff), unowned_ok=a.unowned_ok), cfg)
+        count = sum(line.startswith("diff --fleet ") for line in diff.read_text().splitlines())
+        print(f"DIFF {diff.relative_to(repo.resolve())} ({count} file{'' if count == 1 else 's'})")
+        cmd_prompt(sub_args(a, id=rid, ticket=None, review_of=a.id, diff=str(diff), force=True, quiet=True), cfg)
+        one = sub_args(a, id=rid, provider=route["provider"], tier="review", model=route["model"],
+                       effort=route["effort"], family=a.family, pane=a.pane, resume=False,
+                       settle=LAUNCH_SETTLE_S if a.settle is None else a.settle)
+        _, w = launch_one(one, cfg)
+    except (FleetError, OSError, subprocess.TimeoutExpired) as e:
+        raise FleetError(f"{str(e).strip()}\n{a.id} is stopped and no reviewer is running; resolve that, then run "
+                         f"fleet review {a.run} {a.id} again") from None
+    if getattr(one, "unlocked", None):  # the start screen prints once main releases the lock
+        a.unlocked = one.unlocked
+    effort = f"@{w['effort']}" if w.get("effort") else ""
+    print(f"REVIEW {rid} {w['provider']}:{w['model']}{effort} family={w['family']} on {w['surface']}")
+
+
+def note_evidence(repo: Path, state: dict, a) -> None:
+    """The lead's evidence files, as verify will note them, so the scope check never counts them as changes."""
+    for f in a.evidence + (a.review_evidence or []):
+        note_lead_file(repo, state, f)
+
+
+def accept_problems(repo: Path, state: dict, a, review: dict | None, rid: str | None) -> list[str]:
+    """What fleet verify (or the gate) would refuse, for the reviewer and the writer together, so one refusal
+    names every problem before either is verified."""
+    t = state["tickets"][a.id]
+    note_evidence(repo, state, a)  # in memory, as gate does; verify saves them
+    out = []
+    if t["review_required"] and not review:
+        out.append(f"{a.id} needs a cross-family review first: fleet review {a.run} {a.id}")
+    if review and (rid or t["review_required"]) and \
+            digest(scoped_diff(repo, state, a.id).encode()) != review.get("diff_sha"):
+        out.append(f"{review['id']} reviewed an earlier diff of {a.id}; run fleet review {a.run} {a.id} again")
+    reports = run_dir(repo, a.run) / "reports"
+    for wid in filter(None, (rid, a.id)):
+        f = reports / f"{wid}.md"
+        status = parse_status(f.read_text()) if f.exists() else None
+        if status != "needs-verification":
+            said = f"Status: {status}" if status else "no status line" if f.exists() else "nothing (no report yet)"
+            out.append(f"{wid}'s report says {said}; it must say Status: needs-verification")
+    if a.review_evidence and not rid:
+        out.append(f"--review-evidence: no reviewer of {a.id} awaits verification; drop it")
+    for flag, files in (("--evidence", a.evidence), ("--review-evidence", a.review_evidence if rid else None)):
+        try:
+            read_evidence_files(files or [])
+        except (FleetError, OSError) as e:
+            out.append(f"{flag}: {e}")
+    if a.gate and not t.get("commands"):
+        out.append(f"{a.id} has no runnable checks to gate; drop --gate and record your checks in --evidence")
+    if a.unowned_ok is not None and not a.unowned_ok.strip():
+        out.append("--unowned-ok needs the owner's reason")
+    if a.unowned_ok is None:
+        unowned = {}
+        for wid in filter(None, (rid, a.id)):
+            for path, kind, fp in unowned_for(repo, state, wid) or []:
+                unowned.setdefault(path, (path, kind, fp))
+        if unowned:
+            out.append("files outside every ticket's scope changed since launch:\n"
+                       f"{unowned_text(list(unowned.values()))}\n  {UNOWNED_WAYS_OUT}")
+    return out
+
+
+def refuse_problems(a, problems: list[str], unchanged: str) -> None:
+    if problems:
+        raise FleetError(f"{a.id} not accepted; {unchanged}:\n" + "\n".join(f"- {p}" for p in problems))
+
+
+def unblocked_by(state: dict, i: str) -> list[str]:
+    """Never-launched pending tickets that waited on `i` and now have every blocker verified."""
+    tickets = state["tickets"]
+    return [j for j, t in tickets.items() if t["status"] == "pending" and j not in state["workers"]
+            and i in t["blockers"] and all(tickets[b]["status"] == "verified" for b in t["blockers"])]
+
+
+def cmd_accept(a, cfg):
+    """Stop the ticket's reviewer and writer, run its gate when asked, then verify the reviewer and the writer
+    through fleet verify. Every problem that can be seen in advance is refused before the first verify, so a
+    refusal leaves nothing half-accepted."""
+    repo = repo_root()
+    state = load_run(repo, a.run)
+    reconcile(repo, state)
+    own_ticket(a, state, "accept")
+    review = latest_reviewer(state, a.id)
+    rid = review["id"] if review and not review.get("verified") else None  # a verified one needs nothing more
+    refuse_problems(a, accept_problems(repo, state, a, review, rid), "nothing was stopped or verified")
+    stop_live(a, cfg, state, [x for x in (rid, a.id) if x], "nothing was verified")
+    # Saved before the gate, whose own scope check would otherwise count the lead's files and the owner's edits.
+    state = load_run(repo, a.run)
+    note_evidence(repo, state, a)
+    if a.unowned_ok is not None:
+        for wid in filter(None, (rid, a.id)):
+            guard_unowned(repo, state, wid, a.unowned_ok)
+    save_run(repo, a.run, state)
+    evidence = list(a.evidence)
+    if a.gate:
+        gate_file = run_dir(repo, a.run) / "evidence" / f"{a.id}.gate.md"
+        if cmd_gate(sub_args(a, id=a.id, output=None), cfg):
+            raise FleetError(f"{a.id}'s gate failed (above), so nothing was verified; its evidence is in {gate_file}. "
+                             "Its workers are stopped: repair it within its assignment (examples.md 6), then accept "
+                             "again, after a new review when one is required")
+        evidence.insert(0, str(gate_file))
+    state = load_run(repo, a.run)
+    refuse_problems(a, accept_problems(repo, state, a, review, rid), "its workers are stopped; nothing was verified")
+    if rid:
+        try:
+            cmd_verify(sub_args(a, id=rid, evidence=a.review_evidence or a.evidence, unowned_ok=None), cfg)
+        except FleetError as e:
+            raise FleetError(f"{rid}: {e}; nothing was verified") from None
+    try:
+        cmd_verify(sub_args(a, id=a.id, evidence=evidence, unowned_ok=None), cfg)
+    except FleetError as e:
+        if not rid:
+            raise FleetError(f"{a.id}: {e}; nothing was verified") from None
+        raise FleetError(f"{rid} is verified and recorded, but {a.id} is not: {e}. Resolve that, then run fleet "
+                         f"accept {a.run} {a.id} again with the same evidence; it skips the verified reviewer, "
+                         "unless the writer's files changed, which needs a new review") from None
+    ready = unblocked_by(load_run(repo, a.run), a.id)
+    print(f"UNBLOCKED {' '.join(ready) or 'none'}")
+    if a.launch_ready:
+        try:
+            launch_ready(sub_args(a, id=None, provider=None, tier=None, model=None, effort=None, family=None,
+                                  pane=None, settle=None, resume=False, ready=True), cfg)
+        except FleetError as e:
+            raise FleetError(f"{a.id} is accepted, but launch --ready refused: {e}") from None
+
+
 def cmd_check(a, cfg):
     repo = repo_root()
     state = load_run(repo, a.run)
@@ -3556,6 +3836,36 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--output")
     s.add_argument("--unowned-ok", metavar="REASON", help=unowned_help)
     s.set_defaults(fn=cmd_diff)
+
+    s = sub.add_parser("review", help="stop a writer, save its diff, write the reviewer prompt and launch a reviewer "
+                                      "from another model family, in one call")
+    s.add_argument("run")
+    s.add_argument("id", help="the ticket to review")
+    s.add_argument("--provider", help="reviewer provider (default: the first that fits, in routing pool order, "
+                                      "else defaults.prefer, then any other provider that is on)")
+    s.add_argument("--model", help="reviewer model, with --provider (default: its review tier)")
+    s.add_argument("--effort", help="reviewer effort, with --provider")
+    s.add_argument("--family", help="known family for an account-specific --model, with --provider")
+    s.add_argument("--as", dest="reviewer", metavar="REVIEWER_ID", help="reviewer ID (default review-<id>)")
+    s.add_argument("--pane", help="as for launch: split this pane (ref, UUID or index) instead of choosing one")
+    s.add_argument("--settle", type=float,
+                   help=f"seconds before the reviewer's screen is printed (default {LAUNCH_SETTLE_S}; 0 skips it)")
+    s.add_argument("--unowned-ok", metavar="REASON", help=unowned_help)
+    s.set_defaults(fn=cmd_review)
+
+    s = sub.add_parser("accept", help="stop a ticket's reviewer and writer, optionally gate it, verify the reviewer "
+                                      "then the writer, and list the tickets this unblocks")
+    s.add_argument("run")
+    s.add_argument("id", help="the ticket to accept")
+    s.add_argument("--evidence", required=True, action="append",
+                   help="the writer's evidence file; repeat to record several, in order")
+    s.add_argument("--review-evidence", action="append",
+                   help="the reviewer's evidence file (default: the --evidence files); repeat for several")
+    s.add_argument("--gate", action="store_true",
+                   help="run fleet gate first; a failure verifies nothing, a pass adds its evidence file")
+    s.add_argument("--unowned-ok", metavar="REASON", help=unowned_help)
+    s.add_argument("--launch-ready", action="store_true", help="then launch every ticket that can start (launch --ready)")
+    s.set_defaults(fn=cmd_accept)
 
     s = sub.add_parser("prompt", help="scaffold a worker prompt from the templates")
     s.add_argument("run")

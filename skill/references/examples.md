@@ -61,33 +61,53 @@ If it needs the owner (scope, a permission, a login), ask them first and send no
 
 ## 4. Cross-family review, with a fix round
 
-The writer `api-client` (codex, heavy) reported `needs-verification` and you checked it (skill step 5). Keep diffs and evidence in the run's `evidence/` folder:
+The writer `api-client` (codex, heavy) reported `needs-verification` and you checked it (skill step 5). One command stops it, saves its diff to the run's `evidence/` folder, writes the reviewer prompt and launches a reviewer from another family:
+
+```sh
+fleet review settings api-client
+fleet wait settings --timeout 540            # REPORT review-api-client [needs-verification]
+```
+
+```text
+api-client: exited (surface:7)
+DIFF .fleet/runs/settings/evidence/api-client.diff (2 files)
+REVIEW review-api-client claude:opus@high family=anthropic on surface:9
+```
+
+`review` chose the first provider that fits (see [`review`](commands.md#review)); `--provider claude` names one yourself. When none fits, it lists each candidate's reason and you tell the owner. Read the reviewer's report.
+
+**No findings to fix:** write the evidence files (example 5), then accept. It stops the reviewer, verifies it, verifies the writer and lists the tickets this unblocked:
+
+```sh
+fleet accept settings api-client --evidence .fleet/runs/settings/evidence/api-client.md \
+  --review-evidence .fleet/runs/settings/evidence/review-api-client.md
+```
+
+```text
+review-api-client: exited (surface:9)
+review-api-client: verified; update the source ticket only after implementation acceptance
+api-client: verified; update the source ticket only after implementation acceptance
+UNBLOCKED settings-ui
+```
+
+Add `--launch-ready` to launch them at once, and `--gate` to run the ticket's planned commands first (a failing check verifies nothing). Then update the source ticket.
+
+**Findings to fix:** repair the writer within its assignment (example 6); when it reports `needs-verification` again, check it and run `fleet review settings api-client` again. That round's diff still runs from the writer's first launch, so it covers both rounds; until then, `accept` refuses the first review as stale. Then accept as above.
+
+**The long form.** `review` and `accept` run these commands, which you can still use one at a time, for example to read the reviewer prompt before it launches:
 
 ```sh
 fleet stop settings api-client
 fleet diff settings api-client --output .fleet/runs/settings/evidence/api-client.diff
-fleet prompt settings review-api-client --review-of api-client --diff .fleet/runs/settings/evidence/api-client.diff
+fleet prompt settings review-api-client --review-of api-client --diff .fleet/runs/settings/evidence/api-client.diff   # --force in a later round
 fleet launch settings review-api-client claude --tier review
-fleet wait settings --timeout 540            # REPORT review-api-client [needs-verification]
+fleet wait settings --timeout 540
 fleet stop settings review-api-client
-```
-
-**No findings to fix:** verify the reviewer, then the writer, each with its own evidence file (example 5):
-
-```sh
 fleet verify settings review-api-client --evidence .fleet/runs/settings/evidence/review-api-client.md
 fleet verify settings api-client --evidence .fleet/runs/settings/evidence/api-client.md
 ```
 
-**Findings to fix:** repair the writer within its assignment (example 6); when it reports `needs-verification` again, check it and `fleet stop settings api-client`. Then review again. The first review is now stale (`fleet verify` refuses it), and the new diff still runs from the writer's first launch, so it covers both rounds:
-
-```sh
-fleet diff settings api-client --output .fleet/runs/settings/evidence/api-client.diff
-fleet prompt settings review-api-client --review-of api-client --diff .fleet/runs/settings/evidence/api-client.diff --force
-fleet launch settings review-api-client claude --tier review
-```
-
-Then stop, verify the reviewer and verify the writer as above. Only after the writer is verified, update the source ticket and launch its dependents.
+Only after the writer is verified, update the source ticket and launch its dependents.
 
 ## 5. An evidence file
 
