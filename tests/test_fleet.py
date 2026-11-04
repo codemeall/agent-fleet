@@ -114,6 +114,24 @@ class ProviderConfig(unittest.TestCase):
                          {"model": "gpt-6-luna", "effort": "medium"})
         self.assertEqual(cfg["providers"]["codex"]["bin"], "codex")
 
+    def test_scope_ignore_defaults_and_must_be_relative_paths(self):
+        self.assertEqual(self.cfg["defaults"]["scope_ignore"], [".scratch/", "node_modules/"])
+        for bad in ('"dist/"', '["/abs/"]', '["../up/"]', '[""]', '["a/../b"]'):
+            with self.subTest(value=bad):
+                with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
+                    fh.write(f"[defaults]\nscope_ignore = {bad}\n")
+                self.addCleanup(os.unlink, fh.name)
+                with self.assertRaisesRegex(fleet.FleetError, "scope_ignore"):
+                    fleet.load_config(Path(fh.name))
+
+    def test_scope_ignore_matches_directories_at_any_depth_and_exact_paths(self):
+        ignore = [".scratch/", "node_modules/", "web/dist/", "build/out.log"]
+        for path, ignored in ((".scratch/f/t.md", True), ("a/node_modules/x.js", True), ("web/dist/app.js", True),
+                              ("dist/app.js", False), ("build/out.log", True), ("build/other.log", False),
+                              ("node_modules", False), ("src/scratch.py", False)):
+            with self.subTest(path=path):
+                self.assertEqual(fleet.scope_ignored(path, ignore), ignored)
+
     def test_example_config_parses(self):
         with open(ROOT / "config.example.toml", "rb") as fh:
             tomllib.load(fh)

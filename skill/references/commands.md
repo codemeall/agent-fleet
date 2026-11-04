@@ -232,6 +232,7 @@ Blocks until something needs the lead, then prints it and exits 0. On timeout it
 | `HOLD` | Launches are held and no worker is running | Handle `PENDING` lines, tell the owner, end your turn |
 | `TIMEOUT` | Nothing new | Handle `PENDING` lines, otherwise wait again |
 | `PENDING <id> [status]` | A report is still waiting on the lead | Handle it |
+| `SCOPE <path> (<kind>) …` | A file outside every ticket changed while workers ran; it never wakes the lead on its own | Find out who changed it ([the scope check](#the-scope-check)) |
 
 A `REPORT` line ends with the report's path and, for a report with an `## Appendix`, the lines above it: `(read lines 1-34 of 180; appendix below)`. Read those lines; the appendix holds supporting detail for a line you doubt.
 
@@ -264,20 +265,20 @@ Sends each worker its quit keys and waits up to `--timeout` seconds (default 10,
 ### diff
 
 ```text
-fleet diff <run> <id> [--output <file>]
+fleet diff <run> <id> [--output <file>] [--unowned-ok <reason>]
 ```
 
-Prints or saves the ticket's changes since launch, including new files. The writer must be stopped and no live worker may own its files.
+Prints or saves the ticket's changes since launch, including new files. The writer must be stopped and no live worker may own its files. It refuses, like `verify`, while [files outside every ticket's scope](#the-scope-check) have changed since the writer launched.
 
 **Use:** to capture the diff for `prompt --review-of`.
 
 ### verify
 
 ```text
-fleet verify <run> <id> --evidence <file>
+fleet verify <run> <id> --evidence <file> [--unowned-ok <reason>]
 ```
 
-Accepts a ticket or a review. The worker must have exited, its report must say `Status: needs-verification`, and for a writer, any required review must be verified and match the current diff. It sets the report to `verified`, appends the evidence, records `verified_at` on the worker (shown by `resume --json`), and unblocks dependents.
+Accepts a ticket or a review. The worker must have exited, its report must say `Status: needs-verification`, and for a writer, any required review must be verified and match the current diff. No file outside every ticket's scope may have changed since the worker launched ([the scope check](#the-scope-check)). It sets the report to `verified`, appends the evidence, records `verified_at` on the worker (shown by `resume --json`), and unblocks dependents.
 
 **Use:** after running the ticket's checks yourself. Verify the reviewer first, then the writer, each with its own evidence file. Only then update the source ticket.
 
@@ -297,9 +298,18 @@ Records that a worker's process is gone when `stop` couldn't confirm it, for exa
 fleet check <run>
 ```
 
-Compares the current HEAD and index with the baseline from `init`. Exits 1 and lists changes if someone committed or staged during the run. It can't prove no Git action happened in between.
+Compares the current HEAD and index with the baseline from `init`. Exits 1 and lists changes if someone committed or staged during the run. It can't prove no Git action happened in between. A `NOTE` also lists files outside every ticket's scope that changed since `init` (the owner's edits, or a worker's outside its scope); it does not change the exit code.
 
 **Use:** before finishing a run. Investigate any difference with the owner.
+
+### The scope check
+
+A worker's diff covers only its own files, so Fleet also compares the whole checkout. At each launch it records HEAD and a fingerprint (mode and Git blob ID) of every changed or untracked file; nothing is written to `.git`. `diff` and `verify` then refuse while any file changed since that worker launched, unless a ticket owns it:
+
+- a ticket owns its files from its first launch until it is verified or dropped, so work running alongside is never blamed on this worker;
+- never counted: `.fleet/`, gitignored files, the run's ticket files, files the lead handed Fleet (`plan`/`add --file`, `diff --output`, `--evidence`, `prompt --diff`), and the owner's `scope_ignore` list under `[defaults]` (default `[".scratch/", "node_modules/"]`; `name/` is a directory at any depth, `a/b/` is anchored at the root, anything else an exact path; your list replaces the default).
+
+Reviewers and investigators own no files, so any change during their run counts. The refusal lists each file as `changed`, `created`, `deleted` or `mode changed`. Ways out, each recorded in the run's decisions: the owner reverts the file; `fleet grant` adds it to the ticket, so it enters the ticket's diff and review; `fleet drop` retires the ticket; or, for the owner's own edits only, `--unowned-ok "<owner's words>"` on `diff` or `verify` accepts that exact content (a later change to the file counts again). `stop` lists such files as soon as a worker exits, and `wait` adds a `SCOPE` line to a wake it is already making. Workers launched by an earlier Fleet have no snapshot; their check is skipped with a note.
 
 ## Continuity
 

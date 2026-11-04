@@ -102,7 +102,7 @@ Commands (repository root):
 
 Acceptance criteria:
 - [x] fetchSettings returns null on 404: new test "returns null on 404" passes; read src/api.ts lines 40–52.
-- [x] No change outside src/api.ts and src/api.test.ts: `fleet diff` lists only those files.
+- [x] No change outside src/api.ts and src/api.test.ts: `fleet verify` found no file outside every ticket's scope.
 - [ ] Retry on 503: not in this ticket; the worker noted it as out of scope.
 
 Review: review-api-client (claude, anthropic) found 1 issue (missing 404 test), fixed in round 2; re-review found none.

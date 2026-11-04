@@ -29,7 +29,9 @@ fleet = importlib.util.module_from_spec(spec)
 loader.exec_module(fleet)
 
 
-class Runtime(unittest.TestCase):
+class RuntimeCase(unittest.TestCase):
+    """A disposable repo, fake cmux and run helpers. Tests live in subclasses, here and in other test files."""
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -161,6 +163,17 @@ class Runtime(unittest.TestCase):
         self.prompt("review-01", "--review-of", "01", "--diff", str(diff))
         return diff
 
+    def commit_other(self, name="other.txt", text="tracked elsewhere\n"):
+        (self.repo / name).write_text(text)
+        self.git("add", name)
+        self.git("commit", "-qm", "add " + name)
+
+    def hand_back(self, ticket="01"):
+        self.report(ticket)
+        self.stop_with_receipt(ticket)
+
+
+class Runtime(RuntimeCase):
     def test_run_commands_tell_the_lead_its_zone_and_spot_a_compaction(self):
         self.setup_run()
         readings = iter([{"session": "lead-1", "tokens": 131_000, "zone": "dumb", "warn_at": 100_000, "dumb_at": 125_000},
@@ -1397,6 +1410,184 @@ class Runtime(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 5)
         self.assertIn("HOLD", out)
         self.assertIn("PENDING 01 [needs-verification]", out)
+
+    # ---------- whole-tree scope gate (#10) ----------
+
+    def test_scope_gate_refuses_an_edit_to_a_tracked_file_outside_the_ticket(self):
+        self.commit_other()
+        self.setup_run()
+        self.launch()
+        (self.repo / "owned.txt").write_text("in scope\n")
+        (self.repo / "other.txt").write_text("stray edit\n")
+        self.report()
+        with patch.object(fleet, "send_keys", side_effect=lambda *_: self.receipt("01")):
+            stopped = self.call("stop", "demo", "01", "--timeout", "1")
+        self.assertIn("other.txt (changed)", stopped)                       # stop tells the lead at once
+        refused = self.call("diff", "demo", "01", expected=1)
+        self.assertIn("other.txt (changed)", refused)
+        self.assertIn("fleet grant", refused)
+        self.assertIn("other.txt (changed)", self.verify(expected=1))
+        self.assertEqual(self.state()["tickets"]["01"]["status"], "pending")
+
+    def test_scope_gate_refuses_new_deleted_and_mode_changed_files(self):
+        self.commit_other()
+        self.commit_other("script.sh", "echo hi\n")
+        self.setup_run()
+        self.launch()
+        (self.repo / "stray.txt").write_text("new untracked file\n")
+        (self.repo / "other.txt").unlink()
+        (self.repo / "script.sh").chmod(0o755)
+        self.hand_back()
+        refused = self.verify(expected=1)
+        for line in ("stray.txt (created)", "other.txt (deleted)", "script.sh (mode changed)"):
+            self.assertIn(line, refused)
+
+    def test_scope_gate_accepts_a_worker_that_stays_in_scope(self):
+        self.commit_other()
+        (self.repo / "other.txt").write_text("owner's edit before the run\n")   # dirty before launch, unchanged after
+        self.setup_run()
+        self.launch()
+        (self.repo / "owned.txt").write_text("in scope\n")
+        self.hand_back()
+        self.call("diff", "demo", "01")
+        self.verify()
+        self.assertEqual(self.state()["tickets"]["01"]["status"], "verified")
+
+    def test_scope_gate_does_not_blame_a_ticket_running_at_the_same_time(self):
+        self.cfg["defaults"]["max_parallel"] = 2
+        self.cfg["providers"]["writer"]["max"] = 2
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"]}, {"id": "03", "files": ["third.txt"]}])
+        self.launch("01")
+        self.launch("03")
+        (self.repo / "owned.txt").write_text("01's change\n")
+        (self.repo / "third.txt").write_text("03's change\n")
+        self.hand_back("01")
+        self.verify("01")
+
+    def test_scope_gate_blames_an_edit_to_a_verified_tickets_file_after_it_closed(self):
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"]}, {"id": "02", "files": ["next.txt"]}])
+        self.launch("01")
+        (self.repo / "owned.txt").write_text("01's change\n")
+        self.hand_back("01")
+        self.verify("01")
+        self.launch("02")
+        (self.repo / "owned.txt").write_text("02 strays into 01's verified file\n")
+        self.hand_back("02")
+        self.assertIn("owned.txt (changed)", self.verify("02", expected=1))
+
+    def test_unowned_ok_records_the_owners_reason_for_that_exact_content(self):
+        self.commit_other()
+        self.setup_run()
+        self.launch()
+        (self.repo / "other.txt").write_text("the owner edited this meanwhile\n")
+        self.hand_back()
+        self.assertIn("reason", self.call("verify", "demo", "01", "--evidence", str(self.evidence), "--unowned-ok", "",
+                                          expected=1))
+        self.assertEqual(self.state()["tickets"]["01"]["status"], "pending")
+        self.call("verify", "demo", "01", "--evidence", str(self.evidence),
+                  "--unowned-ok", "owner edited other.txt by hand")
+        state = self.state()
+        self.assertEqual(state["tickets"]["01"]["status"], "verified")
+        self.assertTrue(any("other.txt" in d and "owner edited other.txt by hand" in d for d in state["decisions"]))
+        self.launch("02")                                                    # the same content is not raised again
+        (self.repo / "next.txt").write_text("02\n")
+        self.hand_back("02")
+        self.verify("02")
+
+    def test_unowned_ok_does_not_cover_a_later_change_to_the_same_file(self):
+        self.commit_other()
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"]}, {"id": "02", "files": ["next.txt"]}])
+        self.launch("01")
+        (self.repo / "other.txt").write_text("owner, first edit\n")
+        self.hand_back("01")
+        self.call("verify", "demo", "01", "--evidence", str(self.evidence), "--unowned-ok", "owner's edit")
+        self.launch("02")
+        (self.repo / "other.txt").write_text("someone changed it again\n")
+        self.hand_back("02")
+        self.assertIn("other.txt (changed)", self.verify("02", expected=1))
+
+    def test_scope_gate_never_blames_ignored_paths_tickets_or_the_leads_files(self):
+        self.cfg["defaults"]["scope_ignore"] = [".scratch/", "node_modules/", "dist/", "build/out.log"]
+        self.setup_run()
+        self.launch()
+        for name in (".scratch/feature/notes.md", "web/node_modules/pkg/index.js", "dist/app.js", "build/out.log"):
+            (self.repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / name).write_text("x\n")
+        (self.repo / "01.md").write_text("# Ticket 01\n- [x] done\n")         # the lead ticks its source ticket
+        self.report()
+        self.stop_with_receipt()
+        lead_evidence = self.repo / "lead-notes.md"
+        lead_evidence.write_text("Checked it.\n")
+        added = self.repo / "lead-add.json"                                  # the lead's own files, handed to Fleet
+        added.write_text(json.dumps({"tickets": [{"id": "later", "task": "Later work.", "files": ["later.txt"],
+                                                  "provider": "writer", "tier": "light"}]}))
+        self.call("add", "demo", "--file", str(added))
+        self.call("verify", "demo", "01", "--evidence", str(lead_evidence))
+        self.assertEqual(self.state()["tickets"]["01"]["status"], "verified")
+
+    def test_an_owner_commit_of_unchanged_content_is_not_a_change(self):
+        self.commit_other()
+        (self.repo / "other.txt").write_text("owner's work in progress\n")
+        self.setup_run()
+        self.launch()
+        self.git("add", "other.txt")
+        self.git("commit", "-qm", "owner commits during the run")              # fleet check reports the commit
+        (self.repo / "owned.txt").write_text("in scope\n")
+        self.hand_back()
+        self.verify()
+
+    def test_wait_adds_each_unowned_path_to_a_wake_once(self):
+        self.setup_run()
+        self.launch()
+        (self.repo / "stray.txt").write_text("outside\n")
+        self.report()
+        out = self.call("wait", "demo", "--timeout", "0", "--settle", "0")
+        self.assertIn("REPORT 01 [needs-verification]", out)
+        self.assertIn("SCOPE stray.txt (created) is outside every ticket's files and changed while 01 ran", out)
+        out = self.call("wait", "demo", "--timeout", "0", "--settle", "0", expected=2)
+        self.assertNotIn("SCOPE stray.txt", out)                             # once per path
+        (self.repo / "stray.txt").write_text("changed again\n")
+        self.assertIn("SCOPE stray.txt", self.call("wait", "demo", "--timeout", "0", "--settle", "0", expected=2))
+
+    def test_wait_never_wakes_for_an_unowned_change_alone(self):
+        self.setup_run()
+        self.launch()
+        (self.repo / "stray.txt").write_text("outside\n")
+        out = self.call("wait", "demo", "--timeout", "1", "--interval", "1", "--stall", "0", expected=2)
+        self.assertTrue(out.startswith("TIMEOUT"))                          # rides on the timeout, no wake of its own
+
+    def test_reviewer_and_investigator_own_no_files(self):
+        self.setup_run(review="cross-all", tickets=[{"id": "01", "files": ["owned.txt"]},
+                                                     {"id": "why", "kind": "investigate"}])
+        self.launch()
+        (self.repo / "owned.txt").write_text("implemented change\n")
+        self.hand_back()
+        self.review_prompt()
+        self.launch("review-01", "reviewer", "review")
+        (self.repo / "owned.txt").write_text("the reviewer fixed it itself\n")
+        (self.repo / "review-notes.txt").write_text("scratch file\n")
+        self.hand_back("review-01")
+        refused = self.verify("review-01", expected=1)
+        self.assertIn("review-notes.txt (created)", refused)
+        self.launch("why")
+        (self.repo / "fix.py").write_text("investigators must not write\n")
+        self.hand_back("why")
+        self.assertIn("fix.py (created)", self.verify("why", expected=1))
+
+    def test_check_notes_unowned_changes_since_the_run_started(self):
+        self.setup_run()
+        (self.repo / "stray.txt").write_text("outside\n")
+        out = self.call("check", "demo")
+        self.assertIn("NOTE changed since the run started outside every ticket's files", out)
+        self.assertIn("stray.txt (created)", out)
+
+    def test_a_worker_launched_by_an_earlier_fleet_skips_the_whole_tree_check(self):
+        self.setup_run()
+        self.launch()
+        (self.repo / ".fleet/runs/demo/snapshots/01.tree.json").unlink()
+        (self.repo / "stray.txt").write_text("outside\n")
+        self.hand_back()
+        self.assertIn("no whole-tree snapshot", self.verify())
 
 class ProcessRunner(unittest.TestCase):
     def test_exit_receipt_follows_real_child_exit_and_records_status(self):
