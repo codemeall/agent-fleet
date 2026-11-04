@@ -1,6 +1,6 @@
 # Fleet reviewer {{id}}
 
-Review writer `{{review_of}}` in `{{repo}}` against the local ticket `{{ticket}}` and the exact captured diff at `{{diff}}`.
+Review writer `{{review_of}}` in `{{repo}}` against the local ticket `{{ticket}}` and the exact captured diff at `{{diff}}`. The lead's messages are saved in `{{inbox}}`: read it when you start, if it exists, and whenever a message points to it.
 
 ## Review contract
 

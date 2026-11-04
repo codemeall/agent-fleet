@@ -41,6 +41,8 @@ Read `.fleet/runs/settings/reports/banner-copy.md`. If the answer is an authoriz
 fleet send settings banner-copy "Use the short copy from the spec: 'Saved'. Keep the existing aria-live region."
 ```
 
+Fleet saves the answer as the next message in `.fleet/runs/settings/inbox/banner-copy.md` and types a one-line pointer to it, so a relaunched worker still has it.
+
 ```markdown
 <!-- appended to .fleet/runs/settings/notes.md -->
 - banner-copy: banner text is "Saved" (spec section 3); aria-live region unchanged.
@@ -50,14 +52,15 @@ If it needs the owner (scope, a permission, a login), ask them first and send no
 
 ## 3. Request changes while the worker is still running
 
-`fleet send` does not change a report's status, so park the report yourself first:
-
-1. Edit the report's status line to `Status: changes-requested`. `fleet wait` ignores a parked report, and it is not listed as `PENDING`.
-2. Send a bounded fix list, and say how to hand back:
+1. Send a bounded fix list with `--changes`, and say how to hand back. The fix list can span lines; `--file -` reads a longer one from stdin. `--key` makes a retry safe:
    ```sh
-   fleet send settings api-client "Changes requested: 1) return null on 404 in fetchSettings (src/api.ts); 2) add that case to src/api.test.ts. Set your report to needs-verification when done."
+   fleet send settings api-client --changes --key fix-1 "Changes requested:
+   1) return null on 404 in fetchSettings (src/api.ts)
+   2) add that case to src/api.test.ts
+   Set your report to needs-verification when done."
    ```
-3. `fleet wait`. When the worker flips the report back, you get `REPORT api-client [needs-verification]` again.
+   Send first sets the report to `Status: changes-requested` (it refuses unless the report says `needs-verification`). `fleet wait` ignores a parked report, and it is not listed as `PENDING`.
+2. `fleet wait`. When the worker flips the report back, you get `REPORT api-client [needs-verification]` again.
 
 ## 4. Cross-family review, with a fix round
 

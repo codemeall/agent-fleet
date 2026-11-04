@@ -34,6 +34,9 @@ report = os.path.join(os.path.dirname(os.path.dirname(path)), "reports", ticket 
 print("fake agent on " + ticket + " CLAUDECODE=" + str(os.environ.get("CLAUDECODE")), flush=True)
 for line in sys.stdin:
     line = line.strip()
+    pointer = re.match(r'Lead message \d+: read ".*" in (\S+), then continue\.$', line)
+    if pointer:  # fleet send types a pointer; the message is the inbox's last line
+        line = open(pointer.group(1)).read().strip().splitlines()[-1]
     print("got " + line, flush=True)
     if line == "report":
         open(report, "w").write("# Report " + ticket + "\n\nStatus: needs-verification\n")

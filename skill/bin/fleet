@@ -71,7 +71,7 @@ PROMPT_FIELDS = {  # optional per-ticket plan fields that complete a worker prom
 TICKET_KINDS = ("implement", "investigate")  # investigate: read-only research or debugging; owns no files
 TIER_ORDER = ("heavy", "standard", "light")  # launch --ready takes consequential work first
 PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
-TEMPLATE_KEYS = {"id", "ticket", "report", "repo", "files", "diff", "review_of", "handdown", *PROMPT_FIELDS}
+TEMPLATE_KEYS = {"id", "ticket", "report", "repo", "files", "diff", "review_of", "handdown", "inbox", *PROMPT_FIELDS}
 HANDDOWN_LINES = 40  # of a blocker's report summary; past it, the dependent is pointed at the full report
 LATER_DECISION_RE = re.compile(r"\((?:added )?\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\)\s*$")  # Fleet stamps its own
 WAIT_SETTLE_S = 5  # after the first event, gather the others that land with it: one wake, one lead turn
@@ -326,10 +326,10 @@ def worker_prompt_line(prompt_path: Path, ticket_id: str) -> str:
             f"Your report path and hard rules are in that file.")
 
 
-def resume_prompt_line(prompt_path: Path, ticket_id: str, report: Path) -> str:
+def resume_prompt_line(prompt_path: Path, ticket_id: str, report: Path, inbox: Path) -> str:
     return (f"Continue as fleet worker {ticket_id} from where you stopped; your assignment is unchanged. "
-            f"Check the end of {prompt_path} for a Repair note from the lead. "
-            f"Your earlier report was archived: write {report} again when you hand back.")
+            f"Check the end of {prompt_path} for a Repair note from the lead, and read {inbox} if it exists: "
+            f"it holds the lead's messages. Your earlier report was archived: write {report} again when you hand back.")
 
 
 def unfilled_fields(text: str, content: list[str] = ()) -> list[str]:
@@ -1758,7 +1758,8 @@ def cmd_prompt(a, cfg):
     fields = {"id": a.id, "ticket": t["ticket"], "report": str(d / "reports" / f"{a.id}.md"),
               "repo": str(repo), "files": ", ".join(t["files"]),
               "diff": str(d / "snapshots" / f"{a.id}.diff") if review_of else "",
-              "review_of": review_of or "", "handdown": "", **lead_fields}
+              "review_of": review_of or "", "handdown": "", "inbox": str(inbox_path(repo, a.run, a.id)),
+              **lead_fields}
     parts = [] if review_of or investigate else [(SKILL_DIR / "templates" / "preamble.md").read_text()]
     rules = repo / ".fleet" / "rules.md"
     if rules.exists():
@@ -1901,7 +1902,8 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     if report.exists():
         report.replace(d / "reports" / f"{a.id}.{uuid.uuid4().hex}.previous")
     token = uuid.uuid4().hex
-    line = resume_prompt_line(prompt_path, a.id, report) if a.resume else worker_prompt_line(prompt_path, a.id)
+    line = (resume_prompt_line(prompt_path, a.id, report, inbox_path(repo, a.run, a.id)) if a.resume
+            else worker_prompt_line(prompt_path, a.id))
     command = build_launch(pcfg, model, effort, line, session, a.resume, prepare_trust(cfg, a.provider, pcfg, repo))
     exit_file = d / "exits" / f"{a.id}.{token}.json"
     wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_run", str(exit_file), token, command])
@@ -2149,14 +2151,94 @@ def send_keys(workspace: str, surface: str, items: list[str]) -> None:
         time.sleep(0.4)
 
 
+def inbox_path(repo: Path, run: str, ticket_id: str) -> Path:
+    """The ticket's durable inbox. Named by ticket ID, not by worker record, so a relaunch or --resume finds it."""
+    d = run_dir(repo, run)
+    return contained(d, d / "inbox" / f"{valid_id(ticket_id)}.md")
+
+
+def inbox_pointer(n: int, path: Path) -> str:
+    """The one line typed into the pane. A TUI may submit at every line break, so the message itself never is."""
+    return f'Lead message {n}: read "## Message {n}" in {path}, then continue.'
+
+
+def inbox_append(repo: Path, state: dict, ticket_id: str, text: str, key: str | None = None) -> tuple[int, Path]:
+    """Append message N to the ticket's inbox and count it in run state (the caller saves it). Numbering lives in
+    state["inbox"], not in the worker record, which launch replaces on a relaunch."""
+    box = state.setdefault("inbox", {}).setdefault(ticket_id, {"count": 0, "keys": {}})
+    n = box["count"] + 1
+    path = inbox_path(repo, state["run"], ticket_id)
+    path.parent.mkdir(exist_ok=True)
+    with path.open("a") as f:
+        f.write(f"## Message {n} ({time.strftime('%Y-%m-%dT%H:%M:%S')})\n\n{text}\n\n")
+    box["count"] = n
+    if key:
+        box["keys"][key] = n
+    return n, path
+
+
+def send_text(repo: Path, state: dict, a) -> str:
+    """The message from the command line or --file (- reads stdin); exactly one of the two."""
+    if a.text and a.file:
+        raise FleetError("give the message as text or with --file, not both")
+    if not a.text and not a.file:
+        raise FleetError("send needs a message: text, or --file <path> (- reads stdin)")
+    if a.file:
+        note_lead_file(repo, state, a.file)
+        text = sys.stdin.read() if a.file == "-" else Path(a.file).read_text()
+    else:
+        text = " ".join(a.text)
+    text = text.strip("\n").rstrip()
+    if not text.strip():
+        raise FleetError("the message is empty; nothing was sent")
+    return text
+
+
+def park_report(repo: Path, run: str, ticket_id: str) -> None:
+    """send --changes: a report sent back for changes no longer counts as handed back, so wait ignores it until
+    the worker sets needs-verification again."""
+    f = run_dir(repo, run) / "reports" / f"{ticket_id}.md"
+    text = f.read_text() if f.exists() else ""
+    status = parse_status(text)
+    if (status or "").lower() != "needs-verification":
+        raise FleetError(f"--changes needs {ticket_id}'s report at needs-verification, not {status or 'missing'}; "
+                         "send without --changes to only message the worker")
+    lines = text.splitlines(keepends=True)
+    n = next(n for n, line in enumerate(lines) if STATUS_RE.match(line))
+    lines[n] = "Status: changes-requested" + ("\n" if lines[n].endswith("\n") else "")
+    f.write_text("".join(lines))
+
+
 def cmd_send(a, cfg):
     repo = repo_root()
     state = load_run(repo, a.run)
-    w = worker(state, a.id)
-    terminal(state).send(w, [" ".join(a.text), "enter"])
+    valid_id(a.id)
+    if a.id not in state["tickets"] and a.id not in state["prompts"] and a.id not in state["workers"]:
+        raise FleetError(f"no ticket or worker '{a.id}' in this run")
+    if a.key is not None and not a.key.strip():
+        raise FleetError("--key needs a value")
+    sent = state.get("inbox", {}).get(a.id, {}).get("keys", {}).get(a.key) if a.key else None
+    if sent:  # checked first: a retried --changes would otherwise trip over the report it already parked
+        print(f"{a.id}: key {a.key} was already sent as message {sent}; nothing sent")
+        return
+    text = send_text(repo, state, a)
+    if a.changes:
+        park_report(repo, a.run, a.id)
+    n, path = inbox_append(repo, state, a.id, text, a.key)
+    save_run(repo, a.run, state)  # on record before typing, so a failed pointer still leaves the message
+    w = state["workers"].get(a.id)
+    if not w or w.get("state") not in ACTIVE_STATES:
+        print(f"{a.id}: saved message {n} in {path}; no worker is running, so it reads it when launched")
+        return
+    try:
+        terminal(state).send(w, [inbox_pointer(n, path), "enter"])
+    except (FleetError, OSError, subprocess.TimeoutExpired) as e:
+        raise FleetError(f"{a.id}: message {n} is saved in {path}, but typing the pointer failed "
+                         f"({str(e).strip()[:200]}). The worker reads it when it next checks its inbox, so do not "
+                         f"resend it; check the pane with fleet peek {a.run} {a.id}") from None
     w["last_send"] = time.time()  # the worker owes a response now; wait may report it stalled
     save_run(repo, a.run, state)
-    print(f"sent to {a.id} ({w['surface']})")
+    print(f"sent message {n} to {a.id} ({w['surface']}): {path}")
 
 
 def cmd_peek(a, cfg):
@@ -3585,10 +3667,14 @@ def main(argv: list[str] | None = None) -> int:
                    help="launch every ticket that can start now on its saved assignment; no screens are printed")
     s.set_defaults(fn=cmd_launch)
 
-    s = sub.add_parser("send", help="type a message into a worker's pane and press enter")
+    s = sub.add_parser("send", help="save a message in the ticket's inbox and type a one-line pointer to it")
     s.add_argument("run")
     s.add_argument("id")
-    s.add_argument("text", nargs="+")
+    s.add_argument("text", nargs="*", help="the message; or use --file")
+    s.add_argument("--file", help="read the message from this file; - reads stdin")
+    s.add_argument("--changes", action="store_true",
+                   help="request changes: set the needs-verification report to changes-requested first")
+    s.add_argument("--key", help="a retry with a key already used for this ticket sends nothing")
     s.set_defaults(fn=cmd_send)
 
     s = sub.add_parser("peek", help="read the bottom of a worker's screen")
@@ -3675,7 +3761,11 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("release", help="lift the hold so launches may continue")
     s.set_defaults(fn=cmd_release)
 
-    a = ap.parse_args(argv)
+    a, extra = ap.parse_known_args(argv)
+    if extra and a.cmd == "send" and not any(x.startswith("-") for x in extra):
+        a.text += extra  # before Python 3.12, argparse leaves send's text unparsed when it follows an option
+    elif extra:
+        ap.error(f"unrecognized arguments: {' '.join(extra)}")
     if a.cmd == "version":  # no config: a broken config must not hide the version
         return cmd_version(a, None) or 0
     try:
