@@ -2,7 +2,7 @@
 
 How the lead and its workers collaborate, compared with Claude Code agent teams, Codex multi-agent and T3 Code's delegation. The goal: match their collaboration, beat them on quality, and spend fewer tokens.
 
-Reviewed 2026-11-04 at `0.1.0-preview.23`. This is a review and plan, not an implementation. Claims about Fleet were checked against `skill/bin/fleet`, the skill and its templates; the defects below were reproduced with a fake worker CLI in headless tmux. Claims about other harnesses come from their current docs and source, cited in [Sources](#sources).
+Reviewed 2026-11-04 at `0.1.0-preview.23`. **Release 1 (P1–P7) is implemented in `0.1.0-preview.24`** (spec #21; tickets #10 and #22–#27); Phases 2–4 below remain proposals. Claims about Fleet were checked against `skill/bin/fleet`, the skill and its templates; the defects below were reproduced with a fake worker CLI in headless tmux. Claims about other harnesses come from their current docs and source, cited in [Sources](#sources).
 
 ## Summary
 
