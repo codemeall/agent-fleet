@@ -48,23 +48,27 @@ The worker rules say "If you need another file, report the blocker and wait for 
 
 ## How the harnesses compare
 
-| | Claude Code agent teams | Fleet today |
-| --- | --- | --- |
-| Status | Experimental, off by default (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`); interactive sessions only | Preview; any host with a shell and tmux or cmux |
-| Workers | Claude Code sessions only | Claude Code, Codex, Cursor, OpenCode, Antigravity |
-| Context at start | Spawn prompt plus CLAUDE.md, MCP servers and skills; not the lead's history | Generated prompt: worker rules, `.fleet/rules.md`, ticket, plan `context` and `checks`; not the lead's history |
-| Task list | Shared; pending, in progress, completed; dependencies; teammates self-claim unblocked tasks with file locking | Saved plan; lead assigns; blockers and exact file ownership enforced at launch; `launch --ready` starts what can start |
-| Messaging | Mailbox per agent; direct messages between any two agents, delivered automatically; no broadcast | Worker to lead: a report's `Status:` line. Lead to worker: keystrokes. No channel between workers |
-| Idle and done signals | Teammate's stop notifies the lead with its final answer | `fleet wait` polls report files, exit receipts and screen hashes |
-| Plan approval | Teammates spawned from plan mode must have their plan approved | None |
-| Quality gates | `TaskCompleted` and `TeammateIdle` hooks; exit 2 sends feedback and keeps the teammate working | Lead runs checks by hand; cross-family review bound to the diff's SHA; evidence required to verify |
-| Scope and permissions | Teammates start in the lead's permission mode; prompts surface in the lead's session; file conflicts avoided by guidance | Exact files per ticket checked at launch; edits outside scope not detected (D1); read-only roles by prompt only |
-| Isolation | Shared checkout (subagents can use `isolation: worktree`) | Shared checkout |
-| Model choice | Per teammate; one vendor | Per ticket by tier, across vendors, with model-family tracking |
-| Persistence | Task list persists; team config deleted at session end; `/resume` does not restore in-process teammates | Everything on disk; `resume` and `handoff` survive compaction and fresh leads |
-| Cost visibility | Docs only: cost grows per active teammate | Lead's own context size (`fleet context`); nothing per worker |
+| | Claude Code agent teams | Codex multi-agent | Fleet today |
+| --- | --- | --- | --- |
+| Status | Experimental, off by default (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`); interactive sessions only | `multi_agent` on by default; a second tool set (`multi_agent_v2`) behind a flag; spawns only when the user or instructions ask | Preview; any host with a shell and tmux or cmux |
+| Workers | Claude Code sessions only | Codex threads only; per-agent model and effort (not on a full-history fork in v2) | Claude Code, Codex, Cursor, OpenCode, Antigravity |
+| Context at start | Spawn prompt plus CLAUDE.md, MCP servers and skills; not the lead's history | Prompt only, or a fork of the parent's whole history (`fork_context` / `fork_turns`), which reuses the parent's prompt cache | Generated prompt: worker rules, `.fleet/rules.md`, ticket, plan `context` and `checks`; not the lead's history |
+| Task list | Shared; pending, in progress, completed; dependencies; teammates self-claim unblocked tasks with file locking | None; the parent assigns each task when it spawns or messages an agent | Saved plan; lead assigns; blockers and exact file ownership enforced at launch; `launch --ready` starts what can start |
+| Messaging | Mailbox per agent; direct messages between any two agents, delivered automatically; no broadcast | v1: parent to child (`send_input`). v2: any agent to any agent by path (`send_message`, `followup_task`); a message board is in development | Worker to lead: a report's `Status:` line. Lead to worker: keystrokes. No channel between workers |
+| Idle and done signals | Teammate's stop notifies the lead with its final answer | `wait_agent` on any of several agents with a timeout; a completion notice lands in the parent's context | `fleet wait` polls report files, exit receipts and screen hashes |
+| Plan approval | Teammates spawned from plan mode must have their plan approved | None | None |
+| Quality gates | `TaskCompleted` and `TeammateIdle` hooks; exit 2 sends feedback and keeps the teammate working | `SubagentStop` hook sees the last message and transcript and can block with a reason | Lead runs checks by hand; cross-family review bound to the diff's SHA; evidence required to verify |
+| Scope and permissions | Teammates start in the lead's permission mode; prompts surface in the lead's session; file conflicts avoided by guidance | Children inherit the parent's sandbox, approvals and directory; a role can only switch tools off (shell, plugins); write sets kept disjoint by instruction | Exact files per ticket checked at launch; edits outside scope not detected (D1); read-only roles by prompt only |
+| Isolation | Shared checkout (subagents can use `isolation: worktree`) | Shared directory ("edits made by one agent are immediately visible to all"); worktrees are a separate feature, not per agent | Shared checkout |
+| Roles | Subagent definitions as teammate types (tools, model, effort, prompt) | Roles in config or `.codex/agents/*.toml`: instructions, model, effort; built-in `explorer` and `worker` | Ticket kinds (`implement`, `investigate`) and the reviewer role; tiers pick model and effort |
+| Limits | 3–5 teammates suggested; teammates cannot spawn teammates | v1: 6 threads, depth 1; v2: 4 threads counting the parent | `max_parallel` and a per-provider `max` |
+| Model choice | Per teammate; one vendor | Per agent; one vendor | Per ticket by tier, across vendors, with model-family tracking |
+| Persistence | Task list persists; team config deleted at session end; `/resume` does not restore in-process teammates | Threads persist with the session; `resume_agent` reopens a closed one | Everything on disk; `resume` and `handoff` survive compaction and fresh leads |
+| Cost visibility | Docs only: cost grows per active teammate | Docs only: subagents use more tokens than one agent | Lead's own context size (`fleet context`); nothing per worker |
 
-Codex multi-agent and T3 Code columns follow in the next revision of this file.
+Fleet is the only one of the three that mixes vendors, binds a review to the exact diff, and keeps a run alive across lead resets. Both built-in harnesses share one checkout and keep agents apart by instruction, as Fleet does; neither enforces file ownership the way Fleet's launch checks do. Where they lead is in the plumbing: messages that arrive without polling, hooks that hold an agent until a gate passes, and roles whose tools are removed rather than forbidden in prose.
+
+<!-- T3 -->
 
 ## Gaps and proposals
 
@@ -94,7 +98,7 @@ Owner edits during a run show up as well, which is what the lead needs to know. 
 
 ### Phase 2: team mechanics
 
-**P7. Gate before waking the lead.** This is the cross-vendor version of Claude Code's `TaskCompleted` hook. With `wait --gate` (or `gate = true` under `[defaults]`), a report that turns `needs-verification` first runs the ticket's executable checks (P5) and the scope check (P1). On failure, Fleet writes the failing tail to the worker's inbox, sets `changes-requested` and lets the worker fix it, up to `gate_rounds` times (default 2), without waking the lead. The lead then wakes to `REPORT api [needs-verification] gate 3/3 pass, scope ok` or `GATE-FAILED api after 2 rounds`. In a shared checkout a failure may be another worker's half-done edit, so only scoped checks run here; combined-tree checks stay the lead's batch step until P15.
+**P7. Gate before waking the lead.** This is the cross-vendor version of Claude Code's `TaskCompleted` hook and Codex's `SubagentStop` block. With `wait --gate` (or `gate = true` under `[defaults]`), a report that turns `needs-verification` first runs the ticket's executable checks (P5) and the scope check (P1). On failure, Fleet writes the failing tail to the worker's inbox, sets `changes-requested` and lets the worker fix it, up to `gate_rounds` times (default 2), without waking the lead. The lead then wakes to `REPORT api [needs-verification] gate 3/3 pass, scope ok` or `GATE-FAILED api after 2 rounds`. In a shared checkout a failure may be another worker's half-done edit, so only scoped checks run here; combined-tree checks stay the lead's batch step until P15.
 
 **P8. A structured report header.** A short JSON or YAML block at the top of each report: `status`, `files_changed`, `checks` (command, exit), `criteria` (id, met, where), `findings` (severity, file, confidence) and `questions`. Fleet validates it (changed files inside scope, every criterion answered, every planned check reported) and summarizes it on the `REPORT` line. The lead opens the prose only when something is off.
 
@@ -158,6 +162,7 @@ Reviewers and investigators get file edits denied except for their report. Scope
 
 - **Self-claiming in a shared checkout.** Claude Code teammates pick unassigned tasks themselves, and its docs tell you to give each teammate distinct files to avoid overwrites. Fleet's lead-assigned waves with exact ownership are safer; `launch --ready` plus `auto_dispatch` (P19) gives the same throughput.
 - **Push messages into every context.** Use the pull board plus targeted inbox pointers (P2, P10).
+- **Forking the lead's history into workers.** Codex can fork a parent's whole history into a child, which reuses the prompt cache when both run the same model. Fleet's workers run other vendors' models, so a fork would be a cold, large prompt. A short brief plus hand-down (P3) is the cheaper path.
 - **Workers that spawn workers.** Claude Code teammates cannot spawn teammates. Keep Fleet one level deep. A worker may still use its own CLI's read-only helpers, such as Claude's Explore subagent, to search without filling its context.
 - **Automatic approvals.** The rule that the lead never answers a trust, login or permission prompt is right. P12's allow-list is the owner's opt-in, and it only covers the ticket's own files and checks.
 - **Lead edits code.** The lead stays the planner and verifier; fixes go back to workers.
@@ -165,5 +170,6 @@ Reviewers and investigators get file edits denied except for their report. Scope
 ## Sources
 
 - Fleet: `skill/bin/fleet`, `skill/SKILL.md`, `skill/templates/`, `skill/references/` and `skill/providers.toml` at `0.1.0-preview.23`. D1 and D2 were reproduced with a fake worker adapter in headless tmux (`backend = "tmux"`); Claude Code flags were checked against `claude --help` 2.1.318.
+- Codex: source of `openai/codex` at `main` commit `9ff072db` (2026-11-04; latest stable release 0.166.0), chiefly `codex-rs/core/src/tools/handlers/multi_agents_spec.rs`, `codex-rs/core/src/agent/role.rs`, `codex-rs/core/src/agent/child_config.rs`, `codex-rs/prompts/src/multi_agent_instructions.rs`, `codex-rs/config/src/config_toml.rs` and `codex-rs/features/src/lib.rs`; docs at <https://developers.openai.com/codex/subagents> (read through search summaries; the session's network blocked the site).
 - Claude Code agent teams: <https://code.claude.com/docs/en/agent-teams>; subagents: <https://code.claude.com/docs/en/sub-agents>; hooks: <https://code.claude.com/docs/en/hooks>; team token costs: <https://code.claude.com/docs/en/costs#agent-team-token-costs>.
 
