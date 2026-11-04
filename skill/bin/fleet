@@ -331,9 +331,12 @@ def resume_prompt_line(prompt_path: Path, ticket_id: str, report: Path) -> str:
             f"Your earlier report was archived: write {report} again when you hand back.")
 
 
-def unfilled_fields(text: str) -> list[str]:
+def unfilled_fields(text: str, content: list[str] = ()) -> list[str]:
+    """LEAD comments and template fields still in a prompt. `content` names the fields that were already in the
+    text Fleet wrote (a Handlebars `{{id}}` quoted in context or a handed-down report), not unfilled ones."""
     found = ["LEAD comments"] if "<!-- LEAD:" in text else []
-    return found + sorted({f"{{{{{k}}}}}" for k in PLACEHOLDER_RE.findall(text) if k in TEMPLATE_KEYS})
+    return found + sorted({f"{{{{{k}}}}}" for k in PLACEHOLDER_RE.findall(text) if k in TEMPLATE_KEYS
+                           and k not in content})
 
 
 def parse_status(text: str) -> str | None:
@@ -1687,6 +1690,8 @@ def cmd_prompt(a, cfg):
     # One pass over known keys: `{{...}}` inside rules, context or checks is content, not a placeholder.
     text = PLACEHOLDER_RE.sub(lambda m: fields.get(m.group(1), m.group(0)), text)
     todo = [k for k, v in lead_fields.items() if "<!-- LEAD:" in v]
+    # Every field was just filled, so a field name still here is quoted content; launch must not refuse it.
+    meta["content_placeholders"] = sorted({k for k in PLACEHOLDER_RE.findall(text) if k in TEMPLATE_KEYS})
     out.write_text(text)
     state["prompts"][a.id] = meta
     save_run(repo, a.run, state)
@@ -1723,7 +1728,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     prompt_path = contained(run_dir(repo, a.run), run_dir(repo, a.run) / "prompts" / f"{a.id}.md")
     if not prompt_path.exists() or a.id not in state["prompts"]:
         raise FleetError("write the prompt first with fleet prompt")
-    unfilled = unfilled_fields(prompt_path.read_text())
+    unfilled = unfilled_fields(prompt_path.read_text(), state["prompts"][a.id].get("content_placeholders", ()))
     if unfilled:
         raise FleetError(f"fill {', '.join(unfilled)} in the prompt before launch")
     w = state["workers"].get(a.id)
@@ -1875,7 +1880,8 @@ def ready_tickets(state: dict, live: dict, cfg: dict, prompts: Path) -> tuple[li
         blockers = [b for b in t["blockers"] if tickets[b]["status"] != "verified"]
         clash = next((j for j, files in taken if scopes_overlap(t["files"], files)), None)
         prompt = prompts / f"{i}.md"
-        unfilled = unfilled_fields(prompt.read_text()) if i in state["prompts"] and prompt.exists() else []
+        unfilled = (unfilled_fields(prompt.read_text(), state["prompts"][i].get("content_placeholders", ()))
+                    if i in state["prompts"] and prompt.exists() else [])
         if blockers:
             why[i] = f"blocked by {', '.join(blockers)}"
         elif clash:

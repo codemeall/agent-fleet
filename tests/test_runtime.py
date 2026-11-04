@@ -1065,10 +1065,11 @@ class Runtime(RuntimeCase):
         self.assertIn("Keep the Handlebars `{{title}}` helper and {{checks}} text.", text)
         self.assertIn("${{ secrets.TOKEN }}", text)
         self.assertIn("**Checks to run:** npm test", text)
-        # Known placeholders left in content still block launch, and are named.
-        self.assertIn("{{checks}}", self.launch(expected=1))
+        # A field name Fleet wrote as content does not block launch; one added to the prompt by hand still does.
         path = self.repo / ".fleet/runs/demo/prompts/01.md"
-        path.write_text(text.replace("{{checks}}", "checks"))
+        path.write_text(text + "\nReport to {{report}}.\n")
+        self.assertIn("{{report}}", self.launch(expected=1))
+        path.write_text(text)
         self.launch()
 
     def test_exit_after_a_handed_back_report_is_the_leads_stop_not_an_event(self):
