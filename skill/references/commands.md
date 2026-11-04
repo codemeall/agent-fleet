@@ -357,7 +357,7 @@ fleet accept <run> <id> --evidence <file> [--evidence <file> ...] [--review-evid
 Accepts a ticket, and its review, in one call:
 
 1. Stops the ticket's latest reviewer and its writer if either is still running, confirming each exit.
-2. With `--gate`, runs [`gate`](#gate). A failure verifies nothing; a pass puts its evidence file first in the writer's evidence.
+2. With `--gate`, runs [`gate`](#gate). A failure verifies nothing; a pass puts its evidence file first in the writer's evidence. Unlike `gate` alone, this holds the run's lock while the checks run, so other Fleet commands wait; for long checks, run `fleet gate` first and pass its evidence file with `--evidence`.
 3. Verifies the latest reviewer, unless it is verified already, with `--review-evidence` (default: the `--evidence` files).
 4. Verifies the writer with the `--evidence` files.
 5. Prints `UNBLOCKED <ids>`: tickets never launched that wait on this one and whose blockers are now all verified, or `UNBLOCKED none`. With `--launch-ready` it then runs `launch --ready` and prints its lines.

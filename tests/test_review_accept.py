@@ -184,10 +184,11 @@ class ReviewAccept(RuntimeCase):
         (self.repo / "stray.txt").write_text("owner's note\n")
         out = self.review(expected=1)
         self.assertIn("stray.txt (created)", out)
-        self.assertIn("01 is stopped and no reviewer is running", out)
+        self.assertIn("Nothing was stopped", out)                           # refused before the writer stops
+        self.assertEqual(self.state()["workers"]["01"]["state"], "running")
         self.assertNotIn("review-01", self.state()["workers"])
         out = self.review("--unowned-ok", "owner's scratch note")
-        self.assertIn("already stopped", out)
+        self.assertIn("01: exited", out)
         self.assertIn("REVIEW review-01", out)
         self.assertTrue(any("stray.txt" in d and "owner's scratch note" in d for d in self.state()["decisions"]))
 
@@ -359,3 +360,28 @@ class ReviewAccept(RuntimeCase):
 if __name__ == "__main__":
     import unittest
     unittest.main()
+
+    def test_review_refuses_a_writer_that_has_not_handed_back_without_stopping_it(self):
+        self.setup_run(review="cross-all")
+        self.launch()
+        out = self.review(expected=1)
+        self.assertIn("review it once it hands back", out)
+        self.assertEqual(self.state()["workers"]["01"]["state"], "running")
+
+    def test_a_new_review_round_gets_its_own_scope_window_and_a_fresh_inbox(self):
+        self.setup_run(review="cross-all")
+        self.handed_back()
+        self.review()
+        runs = self.repo / ".fleet/runs/demo"
+        first_tree = (runs / "snapshots/review-01.tree.json").read_text()
+        self.call("send", "demo", "review-01", "round one note")
+        self.report("review-01")
+        self.stop_with_receipt("review-01")
+        self.launch("01")                                                    # a fix round for the writer
+        (self.repo / "owned.txt").write_text("round two fix\n")
+        self.report("01")
+        self.review()
+        self.assertNotEqual((runs / "snapshots/review-01.tree.json").read_text(), first_tree)
+        self.assertFalse((runs / "inbox/review-01.md").exists())
+        self.assertTrue(list((runs / "inbox").glob("review-01.*.previous")))
+

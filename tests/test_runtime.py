@@ -1590,6 +1590,41 @@ class Runtime(RuntimeCase):
         self.hand_back()
         self.assertIn("no whole-tree snapshot", self.verify())
 
+    def test_the_scope_check_survives_a_file_that_vanishes_while_it_runs(self):
+        self.setup_run()
+        self.launch()
+        (self.repo / "flicker.tmp").write_text("there for a moment\n")
+        real = fleet.git_lines
+
+        def vanishing(repo, args, stdin=None):
+            if args[:2] == ["hash-object", "--stdin-paths"] and "flicker.tmp" in (stdin or ""):
+                (self.repo / "flicker.tmp").unlink(missing_ok=True)       # gone between status and hashing
+            return real(repo, args, stdin)
+        with patch.object(fleet, "git_lines", side_effect=vanishing):
+            self.hand_back()
+            self.verify()                                                  # vanished, so nothing to blame
+
+    def test_ignored_folders_are_never_hashed(self):
+        self.setup_run()
+        self.launch()
+        (self.repo / "node_modules/pkg").mkdir(parents=True)
+        (self.repo / "node_modules/pkg/index.js").write_text("x\n")
+        state = fleet.tree_state(self.repo, fleet.run_ignore(self.state()))
+        self.assertNotIn("node_modules/pkg/index.js", state["paths"])
+
+    def test_a_failing_scope_report_never_stops_stop_all(self):
+        self.cfg["defaults"]["max_parallel"] = 2
+        self.cfg["providers"]["writer"]["max"] = 2
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"]}, {"id": "03", "files": ["third.txt"]}])
+        self.launch("01")
+        self.launch("03")
+        receipts = lambda *_: [self.receipt(i) for i in ("01", "03")]
+        with patch.object(fleet, "send_keys", side_effect=receipts), \
+                patch.object(fleet, "tree_state", side_effect=fleet.FleetError("git timed out")):
+            out = self.call("stop", "demo", "--all", "--timeout", "1")
+        self.assertIn("could not run the scope check", out)
+        self.assertFalse(fleet.active(self.state()))
+
 class ProcessRunner(unittest.TestCase):
     def test_exit_receipt_follows_real_child_exit_and_records_status(self):
         with tempfile.TemporaryDirectory() as tmp:

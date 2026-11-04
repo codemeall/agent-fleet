@@ -152,3 +152,20 @@ class HandDown(RuntimeCase):
         (self.repo / RUN / "run.json").write_text(json.dumps(state))
         self.deliver_01("# Report 01\nStatus: needs-verification\n\n- done\n")
         self.assertNotIn("was verified", self.launch("02"))
+
+    def test_a_lead_comment_quoted_from_a_blockers_report_does_not_block_launch(self):
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"], "context": "Spec.", "checks": "Read it."},
+                                {"id": "02", "files": ["next.txt"], "blockers": ["01"], "context": "Spec.",
+                                 "checks": "Read it."}])
+        self.launch()
+        (self.repo / "owned.txt").write_text("implemented\n")
+        report = self.repo / ".fleet/runs/demo/reports/01.md"
+        report.write_text("# Report 01\n\nStatus: needs-verification\n\n## Work or review performed\n"
+                          "- templates/ticket.md: kept the `<!-- LEAD: fill me -->` marker as the spec asks\n")
+        self.stop_with_receipt()
+        self.verify()
+        out = self.call("prompt", "demo", "02", "--force")
+        self.assertNotIn("fill before launch", out)
+        self.assertIn("<!-- LEAD: fill me -->", (self.repo / ".fleet/runs/demo/prompts/02.md").read_text())
+        self.launch("02")
+

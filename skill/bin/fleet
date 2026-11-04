@@ -332,10 +332,11 @@ def resume_prompt_line(prompt_path: Path, ticket_id: str, report: Path, inbox: P
             f"it holds the lead's messages. Your earlier report was archived: write {report} again when you hand back.")
 
 
-def unfilled_fields(text: str, content: list[str] = ()) -> list[str]:
+def unfilled_fields(text: str, content: list[str] = (), content_lead: int = 0) -> list[str]:
     """LEAD comments and template fields still in a prompt. `content` names the fields that were already in the
-    text Fleet wrote (a Handlebars `{{id}}` quoted in context or a handed-down report), not unfilled ones."""
-    found = ["LEAD comments"] if "<!-- LEAD:" in text else []
+    text Fleet wrote (a Handlebars `{{id}}` quoted in context or a handed-down report), not unfilled ones, and
+    `content_lead` counts the LEAD comments it quoted the same way."""
+    found = ["LEAD comments"] if text.count("<!-- LEAD:") > content_lead else []
     return found + sorted({f"{{{{{k}}}}}" for k in PLACEHOLDER_RE.findall(text) if k in TEMPLATE_KEYS
                            and k not in content})
 
@@ -950,11 +951,30 @@ def disk_fingerprints(repo: Path, paths: list[str]) -> dict[str, str]:
             regular.append(p)
     for n in range(0, len(regular), FINGERPRINT_BATCH):
         batch = regular[n:n + FINGERPRINT_BATCH]
-        ids = git_lines(repo, ["hash-object", "--stdin-paths"], "\n".join(batch) + "\n").split()
+        try:
+            ids = git_lines(repo, ["hash-object", "--stdin-paths"], "\n".join(batch) + "\n").split()
+        except FleetError:  # a file vanished (another worker's test cache) or is unreadable: one at a time
+            ids = [one_blob(repo, p) for p in batch]
         for p, oid in zip(batch, ids):
-            mode = "100755" if (repo / p).stat().st_mode & 0o111 else "100644"
-            out[p] = f"{mode}:{oid}"
+            try:
+                mode = "100755" if (repo / p).stat().st_mode & 0o111 else "100644"
+            except FileNotFoundError:
+                oid = None
+            out[p] = "absent" if oid is None else f"{mode}:{oid}"
     return out
+
+
+def one_blob(repo: Path, p: str) -> str | None:
+    """One file's blob ID; None when it vanished. An unreadable file gets its size and time instead, so the
+    whole check still runs and the file still counts as changed when either moves."""
+    try:
+        return git_lines(repo, ["hash-object", "--", p]).strip()
+    except FleetError:
+        try:
+            st = (repo / p).stat()
+        except FileNotFoundError:
+            return None
+        return f"unreadable-{st.st_size}-{st.st_mtime_ns}"
 
 
 def head_fingerprints(repo: Path, head: str | None, paths: list[str]) -> dict[str, str]:
@@ -970,13 +990,20 @@ def head_fingerprints(repo: Path, head: str | None, paths: list[str]) -> dict[st
     return {p: fp for p, fp in out.items() if fp}
 
 
-def tree_state(repo: Path) -> dict:
-    """HEAD plus a fingerprint for every changed or untracked (not ignored) path outside .fleet/."""
+def run_ignore(state: dict | None, cfg: dict | None = None) -> list[str]:
+    """The run's scope_ignore list (saved with its options at init), else the config's."""
+    saved = (state or {}).get("options", {}).get("scope_ignore")
+    return saved if saved is not None else (cfg or {}).get("defaults", DEFAULTS)["scope_ignore"]
+
+
+def tree_state(repo: Path, ignore: list[str] = ()) -> dict:
+    """HEAD plus a fingerprint for every changed or untracked (not ignored) path outside .fleet/. Paths the run
+    ignores are never hashed: a dependency or cache folder can hold thousands of files that come and go."""
     head = sh(["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=repo, check=False).strip() or None
     listing = git_lines(repo, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames",
                                "--ignore-submodules=all"])
     paths = [e[3:] for e in listing.split("\0") if len(e) > 3]
-    paths = [p for p in paths if not p.endswith("/") and not p.startswith(".fleet/")]
+    paths = [p for p in paths if not p.endswith("/") and not p.startswith(".fleet/") and not scope_ignored(p, ignore)]
     return {"head": head, "paths": disk_fingerprints(repo, paths), "at": time.time()}
 
 
@@ -1044,7 +1071,7 @@ def unowned_since(repo: Path, state: dict, base: dict, own: str | None, now: dic
                   cfg: dict | None = None) -> list[tuple[str, str, str]]:
     """Changes since `base` that no ticket owns: (path, kind, fingerprint now). A ticket owns its files while
     its window overlaps the one since `base`; `own` names the worker's own ticket, which always does."""
-    now = now or tree_state(repo)
+    now = now or tree_state(repo, run_ignore(state, cfg))
     owned = set()
     for i, t in state["tickets"].items():
         window = ticket_window(state, i)
@@ -1055,7 +1082,7 @@ def unowned_since(repo: Path, state: dict, base: dict, own: str | None, now: dic
         if source.is_relative_to(repo):
             owned.add(source.relative_to(repo).as_posix())
     owned.update(state.get("lead_files", []))
-    ignore = state["options"].get("scope_ignore", (cfg or {}).get("defaults", DEFAULTS)["scope_ignore"])
+    ignore = run_ignore(state, cfg)
     accepted = state.get("accepted_changes", {})
     wrote = check_outputs(repo, state["run"])
     return [(p, change_kind(old, new), new) for p, (old, new) in tree_changes(repo, base, now).items()
@@ -1348,7 +1375,7 @@ def cmd_init(a, cfg):
     state = {"schema": 2, "run": a.run, "repo": str(repo), "workspace": workspace, **extra,
              "created": time.strftime("%Y-%m-%dT%H:%M:%S"), "baseline": git_snapshot(repo),
              "options": options, "tickets": {}, "workers": {}, "prompts": {}, "decisions": []}
-    atomic_json(d / "tree.json", tree_state(repo))  # fleet check lists what changed outside every ticket since
+    atomic_json(d / "tree.json", tree_state(repo, options["scope_ignore"]))  # fleet check lists what changed outside every ticket since
     save_run(repo, a.run, state)
     if backend == "cmux":
         print(f"run dir: {d}\nworkspace: {workspace}{'' if given == workspace else f' ({given})'}")
@@ -1919,6 +1946,12 @@ def cmd_prompt(a, cfg):
             raise FleetError("review diff differs from current scoped changes; regenerate it")
         snapshot = d / "snapshots" / f"{a.id}.diff"
         snapshot.write_text(diff)
+        # A new round: its scope window starts at its own launch, and the last round's messages were about a
+        # diff it no longer reviews.
+        (d / "snapshots" / f"{a.id}.tree.json").unlink(missing_ok=True)
+        box = inbox_path(repo, a.run, a.id)
+        if box.exists():
+            box.replace(box.with_name(f"{a.id}.{uuid.uuid4().hex}.previous"))
         meta = {"role": "review", "review_of": review_of, "diff_sha": digest(diff.encode())}
         template = "review-prompt.md"
     else:
@@ -1951,9 +1984,10 @@ def cmd_prompt(a, cfg):
     text = "\n\n".join(p.strip() for p in parts) + "\n"
     # One pass over known keys: `{{...}}` inside rules, context or checks is content, not a placeholder.
     text = PLACEHOLDER_RE.sub(lambda m: fields.get(m.group(1), m.group(0)), text)
-    todo = [k for k, v in lead_fields.items() if "<!-- LEAD:" in v]
-    # Every field was just filled, so a field name still here is quoted content; launch must not refuse it.
+    todo = [k for k in PROMPT_FIELDS if lead_fields.get(k, "").strip().startswith("<!-- LEAD:")]
+    # Every field was just filled, so a field name or LEAD comment still here beyond those is quoted content.
     meta["content_placeholders"] = sorted({k for k in PLACEHOLDER_RE.findall(text) if k in TEMPLATE_KEYS})
+    meta["content_lead"] = text.count("<!-- LEAD:") - len(todo)
     out.write_text(text)
     state["prompts"][a.id] = meta
     save_run(repo, a.run, state)
@@ -1990,7 +2024,9 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     prompt_path = contained(run_dir(repo, a.run), run_dir(repo, a.run) / "prompts" / f"{a.id}.md")
     if not prompt_path.exists() or a.id not in state["prompts"]:
         raise FleetError("write the prompt first with fleet prompt")
-    unfilled = unfilled_fields(prompt_path.read_text(), state["prompts"][a.id].get("content_placeholders", ()))
+    meta_now = state["prompts"][a.id]
+    unfilled = unfilled_fields(prompt_path.read_text(), meta_now.get("content_placeholders", ()),
+                               meta_now.get("content_lead", 0))
     if unfilled:
         raise FleetError(f"fill {', '.join(unfilled)} in the prompt before launch")
     w = state["workers"].get(a.id)
@@ -2077,7 +2113,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         atomic_json(baseline, capture_files(repo, t["files"]))
     tree = d / "snapshots" / f"{a.id}.tree.json"
     if not tree.exists():  # the first launch's, like the scoped baseline, so repair rounds stay in one window
-        atomic_json(tree, tree_state(repo))
+        atomic_json(tree, tree_state(repo, run_ignore(state, cfg)))
     if meta["role"] == "implementation":
         t.setdefault("launched_at", time.time())  # from here until verified or dropped, it owns its files
     report = d / "reports" / f"{a.id}.md"
@@ -2143,7 +2179,8 @@ def ready_tickets(state: dict, live: dict, cfg: dict, prompts: Path) -> tuple[li
         blockers = [b for b in t["blockers"] if tickets[b]["status"] != "verified"]
         clash = next((j for j, files in taken if scopes_overlap(t["files"], files)), None)
         prompt = prompts / f"{i}.md"
-        unfilled = (unfilled_fields(prompt.read_text(), state["prompts"][i].get("content_placeholders", ()))
+        meta = state["prompts"].get(i, {})
+        unfilled = (unfilled_fields(prompt.read_text(), meta.get("content_placeholders", ()), meta.get("content_lead", 0))
                     if i in state["prompts"] and prompt.exists() else [])
         if blockers:
             why[i] = f"blocked by {', '.join(blockers)}"
@@ -2786,7 +2823,7 @@ def scope_lines(repo: Path, state: dict, seen: Path) -> list[str]:
     if not live:
         return []
     try:
-        now = tree_state(repo)
+        now = tree_state(repo, run_ignore(state))
         found: dict[str, tuple[str, str, list[str]]] = {}
         for i in live:
             for path, kind, fp in unowned_for(repo, state, i, now) or []:
@@ -2842,8 +2879,6 @@ def wait_loop(a, repo: Path, d: Path, seen: Path, statuses, deadline: float) -> 
             print(f"HOLD {hold_text(hold)} and no worker is running; tell the owner and end your turn (do not run `fleet stop`); do not wait again")
             for i, status in pending_reports(d / "reports"):
                 print(f"PENDING {i} [{status}]")
-            for line in scope_lines(repo, state, seen):
-                print(line)
             return 0
         if time.time() >= deadline:
             print(f"TIMEOUT nothing new in {a.timeout}s; wait again")
@@ -2888,8 +2923,14 @@ def cmd_stop(a, cfg):
         save_run(repo, a.run, state)
         print(f"{i}: {w['state']} ({w['surface']})")
         if was_live and w["state"] not in ACTIVE_STATES:
-            now = now or tree_state(repo)
-            if changes := unowned_for(repo, state, i, now):
+            try:
+                now = now or tree_state(repo, run_ignore(state, cfg))
+                changes = unowned_for(repo, state, i, now)
+            except (FleetError, OSError, ValueError, subprocess.TimeoutExpired) as e:
+                print(f"{i}: could not run the scope check ({str(e).strip()[:200]}); diff and verify run it again",
+                      file=sys.stderr)
+                changes = None
+            if changes:
                 print(f"{i}: files outside every ticket's scope changed since it launched; diff and verify refuse "
                       f"until resolved:\n{unowned_text(changes)}", file=sys.stderr)
     return 1 if failed else 0
@@ -3125,12 +3166,12 @@ def fenced(text: str) -> str:
     return f"{fence}text\n{text}\n{fence}"
 
 
-def gate_scope(repo: Path, state: dict, i: str) -> tuple[str, str, list[tuple[str, str, str]]]:
+def gate_scope(repo: Path, state: dict, i: str, now: dict) -> tuple[str, str, list[tuple[str, str, str]]]:
     """Ticket `i`'s whole-tree scope result: a few words for the summary, a sentence for the evidence, and the
     unowned changes that fail the gate."""
     if i not in state["workers"]:
         return "scope not checked (not launched yet)", "Not launched yet: there is no launch snapshot to compare.", []
-    changes = unowned_for(repo, state, i)
+    changes = unowned_for(repo, state, i, now)
     if changes is None:
         return ("scope not checked (no whole-tree snapshot)",
                 "No whole-tree snapshot (launched by an earlier Fleet); only its own files are compared.", [])
@@ -3158,10 +3199,10 @@ def gate_evidence(run: str, i: str, results: list[dict], scope: str, summary: st
     return "\n".join(lines) + "\n"
 
 
-def record_check_outputs(repo: Path, state: dict, i: str, before: dict) -> list[str]:
+def record_check_outputs(repo: Path, state: dict, i: str, before: dict, after: dict) -> list[str]:
     """Files the gate's commands changed outside every ticket's files. Recorded (in their own file, since gate
     saves no run state) only while no worker runs: otherwise a worker's stray edit could pass as a cache."""
-    changed = {p: new for p, (_, new) in tree_changes(repo, before, tree_state(repo)).items()}
+    changed = {p: new for p, (_, new) in tree_changes(repo, before, after).items()}
     owned = {f for t in state["tickets"].values() for f in t["files"]} | set(state.get("lead_files", []))
     changed = {p: fp for p, fp in changed.items() if p not in owned}
     if changed and not active(state):
@@ -3193,10 +3234,11 @@ def cmd_gate(a, cfg):
         raise FleetError(f"no directory for --output: {out.parent}")
     note_lead_file(repo, state, a.output)  # in memory only: a rerun's scope check skips its own earlier output
     reconcile(repo, state)  # in memory only, like the rest of gate
-    before = tree_state(repo)
+    before = tree_state(repo, run_ignore(state, cfg))
     results = [run_check(repo, c) for c in t["commands"]]
-    wrote = record_check_outputs(repo, state, a.id, before)
-    scope_word, scope, unowned = gate_scope(repo, state, a.id)
+    after = tree_state(repo, run_ignore(state, cfg))
+    wrote = record_check_outputs(repo, state, a.id, before, after)
+    scope_word, scope, unowned = gate_scope(repo, state, a.id, after)
     if wrote:
         scope += "\n\nThe checks themselves wrote " + ", ".join(code_span(p) for p in wrote) + (
             "; they are not blamed on a worker." if not active(state) else
@@ -3405,6 +3447,15 @@ def cmd_review(a, cfg):
     writer = state["workers"][a.id]
     rid = review_id(a, state)
     route = pick_reviewer(a, cfg, state, writer)
+    # Refused before the writer stops: a writer mid-edit, or one with stray edits, must keep running.
+    report = run_dir(repo, a.run) / "reports" / f"{a.id}.md"
+    status = parse_status(report.read_text()) if report.exists() else None
+    if (status or "").lower() != "needs-verification":
+        raise FleetError(f"{a.id}'s report says {status or 'nothing yet'}; review it once it hands back with "
+                         "Status: needs-verification. Nothing was stopped")
+    if a.unowned_ok is None and (changes := unowned_for(repo, state, a.id)):
+        raise FleetError(f"{a.id}: files outside every ticket's scope changed since it launched:\n"
+                         f"{unowned_text(changes)}\n{UNOWNED_WAYS_OUT} Nothing was stopped.")
     if writer["state"] in ACTIVE_STATES:
         stop_live(a, cfg, state, [a.id], f"no review of {a.id} started")
     else:
@@ -3466,9 +3517,9 @@ def accept_problems(repo: Path, state: dict, a, review: dict | None, rid: str | 
     if a.unowned_ok is not None and not a.unowned_ok.strip():
         out.append("--unowned-ok needs the owner's reason")
     if a.unowned_ok is None:
-        unowned = {}
+        unowned, now = {}, tree_state(repo, run_ignore(state))
         for wid in filter(None, (rid, a.id)):
-            for path, kind, fp in unowned_for(repo, state, wid) or []:
+            for path, kind, fp in unowned_for(repo, state, wid, now) or []:
                 unowned.setdefault(path, (path, kind, fp))
         if unowned:
             out.append("files outside every ticket's scope changed since launch:\n"
