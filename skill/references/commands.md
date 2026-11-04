@@ -155,7 +155,9 @@ fleet prompt <run> <review-id> --review-of <id> --diff <diff-file> [--force]
 
 Writes `.fleet/runs/<run>/prompts/<id>.md` from the saved ticket, the worker rules, `.fleet/rules.md`, and the ticket's `context` and `checks`. If either is missing from the plan, the prompt keeps a `<!-- LEAD: … -->` comment for you to fill; `launch` refuses until you do. With `--review-of`, it writes a reviewer prompt instead; the writer must be stopped and the diff must match its current changes. `--force` overwrites an existing prompt, but never a live worker's. For an `investigate` ticket it writes a read-only investigator prompt instead of the worker rules; `--review-of` refuses one, since it has no diff.
 
-**Use:** before each launch, and before each review.
+A ticket's prompt (not a reviewer's) also gets a "Since this ticket was planned" section, because the plan is frozen at the first launch and its `context` is what you knew then. For each blocker: once verified, the blocker's files that changed since its launch and its report above `## Appendix` (without its title and `Status:` line; at most 40 lines, then the full report's path); before that, a line saying it is not verified yet. Then the decisions recorded after `plan` (by `add`, `drop` and accepted out-of-scope changes; in a run planned by an earlier Fleet, those stamped with a time), and the path of `notes.md` when it exists. A ticket with none of these gets no section. The prompt records which blockers were verified when it was written.
+
+**Use:** before each launch, and before each review. Write a dependent's prompt after its blockers are verified, or regenerate it then with `--force`, so it hands down their work.
 
 ### launch
 
@@ -166,7 +168,7 @@ fleet launch <run> <id> <provider> --tier heavy|standard|light|review
 fleet launch <run> --ready [--pane <ref|uuid|index>]
 ```
 
-Starts the worker in its own cmux pane, or its own window of the run's tmux session, with the prompt. The provider, tier and pins must match the saved plan; a steer (see `steer`) may change the provider and model, and launch prints `steered (<tier>): …`. Launch enforces blockers, file ownership, capacity and any hold.
+Starts the worker in its own cmux pane, or its own window of the run's tmux session, with the prompt. The provider, tier and pins must match the saved plan; a steer (see `steer`) may change the provider and model, and launch prints `steered (<tier>): …`. Launch enforces blockers, file ownership, capacity and any hold. If a blocker was verified after the ticket's prompt was written, launch still starts the worker but warns on stderr that the prompt does not hand down that blocker's work; regenerate it with `fleet prompt <run> <id> --force` before the next launch. `--ready` writes a missing prompt itself, so that one is current; it does not rewrite one you wrote earlier.
 
 Under tmux each worker gets a new window, with no limit; the window stays after the worker exits, so its screen and scrollback stay readable until `stop --close`. Fleet strips the lead's session variables (such as `CLAUDECODE`) from the worker's environment.
 

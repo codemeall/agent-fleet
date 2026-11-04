@@ -6,7 +6,7 @@ Read the local ticket: `{{ticket}}`.
 
 **Context and decisions:**{{context}}
 
-**Checks to run:**{{checks}}
+**Checks to run:**{{checks}}{{handdown}}
 
 ## How to work
 

@@ -4,7 +4,7 @@ You investigate one question in the shared checkout at `{{repo}}` and report wha
 
 **Context and decisions:**{{context}}
 
-**Checks you may run:**{{checks}}
+**Checks you may run:**{{checks}}{{handdown}}
 
 ## Read-only contract
 
