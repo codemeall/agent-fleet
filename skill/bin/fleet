@@ -70,7 +70,9 @@ PROMPT_FIELDS = {  # optional per-ticket plan fields that complete a worker prom
 TICKET_KINDS = ("implement", "investigate")  # investigate: read-only research or debugging; owns no files
 TIER_ORDER = ("heavy", "standard", "light")  # launch --ready takes consequential work first
 PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
-TEMPLATE_KEYS = {"id", "ticket", "report", "repo", "files", "diff", "review_of", *PROMPT_FIELDS}
+TEMPLATE_KEYS = {"id", "ticket", "report", "repo", "files", "diff", "review_of", "handdown", *PROMPT_FIELDS}
+HANDDOWN_LINES = 40  # of a blocker's report summary; past it, the dependent is pointed at the full report
+LATER_DECISION_RE = re.compile(r"\((?:added )?\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\)\s*$")  # Fleet stamps its own
 WAIT_SETTLE_S = 5  # after the first event, gather the others that land with it: one wake, one lead turn
 WAIT_MAX = 600  # Claude Code's longest foreground command timeout; other hosts may allow less
 MODEL_LINE_RE = re.compile(r"^\s*([A-Za-z0-9][^\s]*)(?:\t| +- )|^\s*([A-Za-z0-9][^\s/]*/\S+)\s*$")  # bare lines: provider/model
@@ -1450,6 +1452,7 @@ def cmd_plan(a, cfg):
     write_tasks(d, texts)
     state["tickets"] = tickets
     state["decisions"] = data.get("decisions", [])
+    state["plan_decisions"] = len(state["decisions"])  # a prompt hands down only the decisions after these
     save_run(repo, a.run, state)
     print(f"saved {len(tickets)} tickets; routing, dependencies and assignments persist across sessions")
 
@@ -1544,6 +1547,83 @@ def cmd_drop(a, cfg):
     print(f"{a.id}: dropped; its files are free, and any edits it made stay in the checkout for the owner to review")
 
 
+def report_summary(text: str) -> list[str]:
+    """A report's lines above its appendix (and the lead's verification note), without the title and Status
+    lines: what the lead itself reads, so it is what a dependent needs."""
+    out = []
+    for n, line in enumerate(text.splitlines()):
+        if line.strip().lower() in ("## appendix", "## lead verification"):
+            break
+        if (n == 0 and line.startswith("# ")) or STATUS_RE.match(line):
+            continue
+        out.append(line.rstrip())
+    while out and not out[0].strip():
+        out.pop(0)
+    while out and not out[-1].strip():
+        out.pop()
+    return out
+
+
+def changed_since_launch(repo: Path, state: dict, i: str) -> list[str] | None:
+    """Ticket i's files whose content differs from its launch baseline, with how; None without a baseline."""
+    path = run_dir(repo, state["run"]) / "snapshots" / f"{i}.json"
+    if not path.exists():
+        return None
+    before, files = json.loads(path.read_text()), state["tickets"][i]["files"]
+    after = capture_files(repo, files)
+    return [f"{f} ({'created' if not before.get(f) else 'deleted' if not after[f] else 'changed'})"
+            for f in files if before.get(f) != after[f]]
+
+
+def later_decisions(state: dict) -> list[str]:
+    """Decisions recorded after the plan was saved. A run planned before Fleet counted them falls back to the
+    ones Fleet stamped with a time (add, drop, accepted changes); plan-time decisions carry none."""
+    decisions = state.get("decisions", [])
+    if "plan_decisions" in state:
+        return decisions[state["plan_decisions"]:]
+    return [x for x in decisions if LATER_DECISION_RE.search(x)]
+
+
+def blocker_handdown(repo: Path, state: dict, b: str) -> list[str]:
+    """One blocker's part of the hand-down: once verified, its changed files and its report summary."""
+    t = state["tickets"][b]
+    if t["status"] != "verified":
+        return [f"### {b}: not verified yet", "",
+                "Its work is not accepted, so nothing from it is handed down here. Do not build on its files "
+                "until the lead tells you it is verified."]
+    lines = [f"### {b}: verified", ""]
+    if t["files"]:  # an investigator changes nothing; its report is the hand-down
+        changed = changed_since_launch(repo, state, b)
+        lines += ["Changed files: " + ("unknown (no launch baseline)" if changed is None
+                                       else ", ".join(changed) or "none"), ""]
+    report = run_dir(repo, state["run"]) / "reports" / f"{b}.md"
+    summary = report_summary(report.read_text()) if report.exists() else []
+    if not summary:
+        return lines + [f"Its report has no summary; read `{report}` if you need it."]
+    lines += [f"Its report, down to the appendix (full report: `{report}`):", ""]
+    lines += [("> " + x).rstrip() for x in summary[:HANDDOWN_LINES]]
+    if len(summary) > HANDDOWN_LINES:
+        lines += ["", f"{len(summary) - HANDDOWN_LINES} more lines cut; read the rest in `{report}`."]
+    return lines
+
+
+def handdown_section(repo: Path, state: dict, t: dict) -> str:
+    """What a ticket's prompt learns since the plan was saved: its blockers' verified work, later decisions and
+    the lead's notes. The plan is frozen at the first launch, so without this a dependent builds against the
+    interface the lead guessed at planning time. Empty when there is nothing to say."""
+    parts = ["\n".join(blocker_handdown(repo, state, b)) for b in t["blockers"]]
+    decisions = later_decisions(state)
+    if decisions:
+        parts.append("### Decisions since the plan\n\n" + "\n".join(f"- {x}" for x in decisions))
+    notes = run_dir(repo, state["run"]) / "notes.md"
+    if notes.exists():
+        parts.append(f"### Lead notes\n\n`{notes}` holds the lead's later decisions; read it before you start.")
+    if not parts:
+        return ""
+    return ("\n\n## Since this ticket was planned\n\nWhere this differs from the context above, this is newer.\n\n"
+            + "\n\n".join(parts))
+
+
 def cmd_prompt(a, cfg):
     repo = repo_root()
     state = load_run(repo, a.run)
@@ -1584,6 +1664,8 @@ def cmd_prompt(a, cfg):
         meta = {"role": "implementation"}  # an investigator too: launch, stop and verify treat it as a writer of no files
         investigate = t.get("kind") == "investigate"
         template = "investigate-prompt.md" if investigate else "ticket-prompt.md"
+        lead_fields["handdown"] = handdown_section(repo, state, t)
+        meta["verified_blockers"] = [b for b in t["blockers"] if state["tickets"][b]["status"] == "verified"]
         # Plan-supplied fields make the prompt complete; missing ones stay LEAD comments, which launch refuses.
         for key, hint in PROMPT_FIELDS.items():
             value = t.get(key)
@@ -1594,7 +1676,7 @@ def cmd_prompt(a, cfg):
     fields = {"id": a.id, "ticket": t["ticket"], "report": str(d / "reports" / f"{a.id}.md"),
               "repo": str(repo), "files": ", ".join(t["files"]),
               "diff": str(d / "snapshots" / f"{a.id}.diff") if review_of else "",
-              "review_of": review_of or "", **lead_fields}
+              "review_of": review_of or "", "handdown": "", **lead_fields}
     parts = [] if review_of or investigate else [(SKILL_DIR / "templates" / "preamble.md").read_text()]
     rules = repo / ".fleet" / "rules.md"
     if rules.exists():
@@ -1612,6 +1694,14 @@ def cmd_prompt(a, cfg):
         print(out)
         if todo:
             print(f"fill before launch: {', '.join(todo)} (or add them to the plan)")
+
+
+def stale_handdown(meta: dict, t: dict) -> list[str]:
+    """Blockers verified since the prompt was written, so missing from its hand-down. A prompt written by an
+    earlier Fleet recorded none, and had no hand-down to go stale."""
+    if "verified_blockers" not in meta:
+        return []
+    return [b for b in t["blockers"] if b not in meta["verified_blockers"]]
 
 
 def launch_one(a, cfg) -> tuple[str, dict]:
@@ -1663,6 +1753,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
             raise FleetError(f"{a.id} was dropped; add a new ticket for the work instead")
         if any(state["tickets"][b]["status"] != "verified" for b in t["blockers"]):
             raise FleetError("ticket has unverified blockers")
+        stale = stale_handdown(meta, t)
         try:
             model, effort = resolve_model(pcfg, a.tier, a.model, a.effort)
         except FleetError:
@@ -1747,6 +1838,10 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     save_run(repo, a.run, state)
     if term.retire(state, place):
         save_run(repo, a.run, state)
+    if meta["role"] == "implementation" and stale:
+        print(f"warning: {a.id}'s prompt was written before {', '.join(stale)} was verified, so it does not hand "
+              f"down that work. This worker can read the blocker's report in {d / 'reports'}; before {a.id}'s "
+              f"next launch, regenerate its prompt with fleet prompt {a.run} {a.id} --force", file=sys.stderr)
     if a.settle:  # outside the lock: a read-only look must not hold up the lead's next command
         a.unlocked = lambda: print_start_screen(term, w, a.settle)
     return label, w
