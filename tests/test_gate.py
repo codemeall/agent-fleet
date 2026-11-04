@@ -204,3 +204,28 @@ class Gate(RuntimeCase):
         report = (self.repo / ".fleet/runs/demo/reports/01.md").read_text()
         self.assertIn("## Lead verification\nGate: 2/2 passed.\n\nInspected the owned diff", report)
         self.assertIn("a.md", self.state()["lead_files"])
+
+    def test_files_the_gates_checks_write_are_not_blamed_once_workers_have_stopped(self):
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"],
+                                 "checks": [{"run": "echo cached > check-cache.log"}]},
+                                {"id": "02", "files": ["next.txt"]}])
+        self.launch()
+        (self.repo / "owned.txt").write_text("in scope\n")
+        self.hand_back()
+        out = self.call("gate", "demo", "01")
+        self.assertIn("1/1 passed, scope ok", out)
+        self.assertIn("check-cache.log", (self.repo / ".fleet/runs/demo/evidence/01.gate.md").read_text())
+        self.verify()
+        self.launch("02")
+        (self.repo / "check-cache.log").write_text("a later change counts again\n")
+        self.hand_back("02")
+        self.assertIn("check-cache.log (changed)", self.verify("02", expected=1))
+
+    def test_files_the_gates_checks_write_while_a_worker_runs_still_count(self):
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"],
+                                 "checks": [{"run": "echo cached > check-cache.log"}]}])
+        self.launch()
+        out = self.call("gate", "demo", "01", expected=1)
+        self.assertIn("SCOPE check-cache.log (created)", out)
+        self.assertIn("a worker was running", (self.repo / ".fleet/runs/demo/evidence/01.gate.md").read_text())
+

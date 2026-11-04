@@ -115,7 +115,8 @@ class ProviderConfig(unittest.TestCase):
         self.assertEqual(cfg["providers"]["codex"]["bin"], "codex")
 
     def test_scope_ignore_defaults_and_must_be_relative_paths(self):
-        self.assertEqual(self.cfg["defaults"]["scope_ignore"], [".scratch/", "node_modules/"])
+        self.assertEqual(self.cfg["defaults"]["scope_ignore"], [".scratch/", "node_modules/", "__pycache__/",
+                                                             ".pytest_cache/", ".mypy_cache/", ".ruff_cache/"])
         for bad in ('"dist/"', '["/abs/"]', '["../up/"]', '[""]', '["a/../b"]'):
             with self.subTest(value=bad):
                 with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:

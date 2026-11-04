@@ -57,7 +57,7 @@ DEFAULTS = {
     "tmux_socket": "fleet",  # tmux -L name for headless workers; "" uses your default tmux server
     # Paths the whole-tree scope check never blames on a worker, besides .fleet/ and gitignored files:
     # "name/" is a directory at any depth ("a/b/" is anchored at the root), anything else an exact path.
-    "scope_ignore": [".scratch/", "node_modules/"],
+    "scope_ignore": [".scratch/", "node_modules/", "__pycache__/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/"],
 }
 STATUS_RE = re.compile(r"^\s*[*_`]*\s*status\s*[*_`]*\s*:\s*[*_`]*\s*(.+?)\s*[*_`]*\s*$", re.I)
 SURFACE_RE = re.compile(r"(surface:\d+)(?: \(([^)\s]+)\))?")  # the UUID follows when cmux is asked for both
@@ -1057,8 +1057,20 @@ def unowned_since(repo: Path, state: dict, base: dict, own: str | None, now: dic
     owned.update(state.get("lead_files", []))
     ignore = state["options"].get("scope_ignore", (cfg or {}).get("defaults", DEFAULTS)["scope_ignore"])
     accepted = state.get("accepted_changes", {})
+    wrote = check_outputs(repo, state["run"])
     return [(p, change_kind(old, new), new) for p, (old, new) in tree_changes(repo, base, now).items()
-            if p not in owned and not scope_ignored(p, ignore) and accepted.get(p) != new]
+            if p not in owned and not scope_ignored(p, ignore) and accepted.get(p) != new
+            and new not in wrote.get(p, ())]
+
+
+def check_outputs(repo: Path, run: str) -> dict[str, set[str]]:
+    """What fleet gate's own commands wrote outside every ticket (caches, reports), by path and fingerprint: a
+    worker is not blamed for them, but a later change to such a file counts again."""
+    out: dict[str, set[str]] = {}
+    for f in (run_dir(repo, run) / "check-outputs").glob("*.json"):
+        for path, fp in json.loads(f.read_text()).items():
+            out.setdefault(path, set()).add(fp)
+    return out
 
 
 def unowned_for(repo: Path, state: dict, worker_id: str, now: dict | None = None) -> list[tuple[str, str, str]] | None:
@@ -2976,6 +2988,19 @@ def gate_evidence(run: str, i: str, results: list[dict], scope: str, summary: st
     return "\n".join(lines) + "\n"
 
 
+def record_check_outputs(repo: Path, state: dict, i: str, before: dict) -> list[str]:
+    """Files the gate's commands changed outside every ticket's files. Recorded (in their own file, since gate
+    saves no run state) only while no worker runs: otherwise a worker's stray edit could pass as a cache."""
+    changed = {p: new for p, (_, new) in tree_changes(repo, before, tree_state(repo)).items()}
+    owned = {f for t in state["tickets"].values() for f in t["files"]} | set(state.get("lead_files", []))
+    changed = {p: fp for p, fp in changed.items() if p not in owned}
+    if changed and not active(state):
+        f = contained(run_dir(repo, state["run"]), run_dir(repo, state["run"]) / "check-outputs" / f"{i}.json")
+        f.parent.mkdir(exist_ok=True)
+        atomic_json(f, {**(json.loads(f.read_text()) if f.exists() else {}), **changed})
+    return sorted(changed)
+
+
 def cmd_gate(a, cfg):
     """Run a ticket's planned commands and write what actually ran as evidence. It changes no run state and holds
     no lock (see mutation_lock), so long checks never block the lead's other commands; it never calls save_run."""
@@ -2997,8 +3022,15 @@ def cmd_gate(a, cfg):
     if not out.parent.is_dir():
         raise FleetError(f"no directory for --output: {out.parent}")
     note_lead_file(repo, state, a.output)  # in memory only: a rerun's scope check skips its own earlier output
+    reconcile(repo, state)  # in memory only, like the rest of gate
+    before = tree_state(repo)
     results = [run_check(repo, c) for c in t["commands"]]
+    wrote = record_check_outputs(repo, state, a.id, before)
     scope_word, scope, unowned = gate_scope(repo, state, a.id)
+    if wrote:
+        scope += "\n\nThe checks themselves wrote " + ", ".join(code_span(p) for p in wrote) + (
+            "; they are not blamed on a worker." if not active(state) else
+            "; a worker was running, so they still count (Fleet cannot tell them from its edits).")
     failed = [r for r in results if check_failed(r)]
     summary = f"{len(results) - len(failed)}/{len(results)} passed, {scope_word}"
     out.write_text(gate_evidence(a.run, a.id, results, scope, summary))
