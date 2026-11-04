@@ -18,6 +18,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -727,7 +728,8 @@ def atomic_json(path: Path, data: dict) -> None:
 
 @contextmanager
 def mutation_lock(a):
-    if a.cmd not in ("hold", "release") and (not hasattr(a, "run") or a.cmd in ("wait", *OWNER_VIEWS)):
+    # wait and gate change no run state and may run for minutes; holding the lock would block the lead's commands.
+    if a.cmd not in ("hold", "release") and (not hasattr(a, "run") or a.cmd in ("wait", "gate", *OWNER_VIEWS)):
         yield
         return
     repo = repo_root()
@@ -1116,6 +1118,17 @@ def read_evidence(filename: str) -> str:
     return text
 
 
+def read_evidence_files(filenames: list[str]) -> str:
+    """Every --evidence file in the order given (a gate's evidence, then the lead's notes), recorded as one."""
+    texts = []
+    for filename in filenames:
+        try:
+            texts.append(read_evidence(filename))
+        except FleetError as e:
+            raise FleetError(f"{filename}: {e}") from None
+    return "\n\n".join(texts)
+
+
 def run_child(args: list[str]) -> int:
     """Runs inside the worker terminal. Reports exit, never writes the shared run state."""
     if len(args) != 3:
@@ -1328,6 +1341,66 @@ def cmd_init(a, cfg):
     print(f"Next: fleet plan {a.run} --file <plan.json>")
 
 
+CHECK_KEYS = {"run", "cwd", "timeout"}  # a future key (such as a manual marker) is refused until Fleet knows it
+CHECK_TIMEOUT, CHECK_TIMEOUT_MAX = 300, 3600
+
+
+def check_command(repo: Path, i: str, raw: dict) -> dict:
+    """One runnable check, `{"run", "cwd", "timeout"}`, normalized for `fleet gate`."""
+    unknown = sorted(set(raw) - CHECK_KEYS)
+    if unknown:
+        raise FleetError(f"{i}: unknown key {', '.join(unknown)} in a check; a command takes run, cwd and timeout")
+    run = raw.get("run")
+    if not isinstance(run, str) or not run.strip():
+        raise FleetError(f"{i}: a check command needs \"run\": the shell command to run")
+    cwd = raw.get("cwd", ".")
+    path = Path(cwd) if isinstance(cwd, str) and cwd.strip() else None
+    if path is None or path.is_absolute() or ".." in path.parts:
+        raise FleetError(f"{i}: check cwd must be a repo-relative directory without ..: {cwd!r}")
+    try:
+        full = contained(repo.resolve(), repo.resolve() / path)
+    except FleetError as e:
+        raise FleetError(f"{i}: check cwd {cwd!r}: {e}") from None
+    if not full.is_dir():
+        raise FleetError(f"{i}: check cwd {cwd!r} is not a directory in the repository")
+    timeout = raw.get("timeout", CHECK_TIMEOUT)
+    if type(timeout) is not int or not 1 <= timeout <= CHECK_TIMEOUT_MAX:
+        raise FleetError(f"{i}: check timeout must be whole seconds from 1 to {CHECK_TIMEOUT_MAX}: {timeout!r}")
+    return {"run": run.strip(), "cwd": path.as_posix(), "timeout": timeout}
+
+
+def code_span(text: str) -> str:
+    return f"`` {text} ``" if "`" in text else f"`{text}`"
+
+
+def check_line(c: dict) -> str:
+    where = "the repository root" if c["cwd"] == "." else c["cwd"] + "/"
+    return f"{code_span(c['run'])} (from {where}; Fleet runs it with fleet gate)"
+
+
+def normalize_checks(repo: Path, i: str, value) -> tuple[str, list[dict]]:
+    """A ticket's `checks` as prompt text plus the commands `fleet gate` runs. Prose (a string, or a list of
+    strings) reads exactly as before and yields no commands; a list may mix prose with command objects."""
+    if isinstance(value, dict):
+        value = [value]
+    if isinstance(value, list) and value and all(isinstance(x, (str, dict)) for x in value):
+        lines, commands = [], []
+        for x in value:
+            if isinstance(x, dict):
+                commands.append(check_command(repo, i, x))
+                lines.append(check_line(commands[-1]))
+            elif x.strip():
+                lines.append(x.strip())
+            else:
+                break
+        else:
+            return "\n".join(f"- {x}" for x in lines), commands
+    if not isinstance(value, str) or not value.strip():
+        raise FleetError(f"{i}: checks must be nonempty text or a list of nonempty strings and "
+                         "{\"run\": …} commands; omit it to fill the prompt by hand")
+    return value.strip(), []
+
+
 def validate_ticket(repo: Path, d: Path, state: dict, cfg: dict, pool: dict | None,
                     raw: dict) -> tuple[dict, str | None]:
     """One `plan` or `add` entry, checked and normalized. Returns the ticket and, for an inline `task`, the text
@@ -1381,7 +1454,13 @@ def validate_ticket(repo: Path, d: Path, state: dict, cfg: dict, pool: dict | No
     t["blockers"] = t.get("blockers", [])
     if not isinstance(t["blockers"], list):
         raise FleetError(f"{i}: blockers must be a list")
-    for key in ("context", "checks"):
+    if "commands" in t:
+        raise FleetError(f"{i}: give runnable checks inside checks, as {{\"run\": …}} items, not as commands")
+    if "checks" in t:
+        t["checks"], commands = normalize_checks(repo, i, t["checks"])
+        if commands:
+            t["commands"] = commands
+    for key in ("context",):
         if key not in t:
             continue
         value = t[key]
@@ -2597,8 +2676,9 @@ def cmd_recover(a, cfg):
     repo = repo_root()
     state = load_run(repo, a.run)
     w = worker(state, a.id)
-    evidence = read_evidence(a.evidence)
-    note_lead_file(repo, state, a.evidence)
+    evidence = read_evidence_files(a.evidence)
+    for f in a.evidence:
+        note_lead_file(repo, state, f)
     # Deliberate lead attestation for externally stopped/legacy/crashed processes.
     w["state"] = "recovered"
     w["recovery_evidence"] = evidence
@@ -2627,6 +2707,126 @@ def cmd_diff(a, cfg):
         print(result, end="")
 
 
+GATE_TAIL_LINES = 40
+
+
+def check_env() -> dict[str, str]:
+    """The lead's environment without its session markers, as a worker gets it: a check that starts Claude Code
+    or reads CLAUDECODE must behave as it would for anyone running it."""
+    return {k: v for k, v in os.environ.items() if k not in LEAD_ENV}
+
+
+def run_check(repo: Path, c: dict) -> dict:
+    """Run one check from its directory with /bin/sh, no stdin and its timeout. The command gets its own process
+    group, so a timeout kills whatever it started too. Returns its exit code (None on timeout) and output."""
+    started = time.monotonic()
+    try:
+        cwd = contained(repo.resolve(), repo.resolve() / c["cwd"])  # checked again: the tree may have changed
+        if not cwd.is_dir():
+            raise FleetError(f"{c['cwd']} is no longer a directory")
+        proc = subprocess.Popen(["/bin/sh", "-c", c["run"]], cwd=cwd, env=check_env(), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    except (FleetError, OSError) as e:
+        return {**c, "code": None, "error": f"could not start: {e}", "seconds": 0.0, "output": ""}
+    try:
+        out, _ = proc.communicate(timeout=c["timeout"])
+        code, error = proc.returncode, None
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            out, _ = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:  # something left the process group and still holds the pipe
+            proc.kill()
+            out = b""
+        code, error = None, f"timed out after {c['timeout']}s"
+    return {**c, "code": code, "error": error, "seconds": time.monotonic() - started,
+            "output": out.decode(errors="replace")}
+
+
+def check_outcome(r: dict) -> str:
+    return r["error"] or f"exit {r['code']}"
+
+
+def check_failed(r: dict) -> bool:
+    return r["code"] != 0
+
+
+def fenced(text: str) -> str:
+    """A code fence longer than any backtick run inside, so command output can never end it early."""
+    fence = "`" * max(3, 1 + max((len(m) for m in re.findall(r"`+", text)), default=0))
+    return f"{fence}text\n{text}\n{fence}"
+
+
+def gate_scope(repo: Path, state: dict, i: str) -> tuple[str, str, list[tuple[str, str, str]]]:
+    """Ticket `i`'s whole-tree scope result: a few words for the summary, a sentence for the evidence, and the
+    unowned changes that fail the gate."""
+    if i not in state["workers"]:
+        return "scope not checked (not launched yet)", "Not launched yet: there is no launch snapshot to compare.", []
+    changes = unowned_for(repo, state, i)
+    if changes is None:
+        return ("scope not checked (no whole-tree snapshot)",
+                "No whole-tree snapshot (launched by an earlier Fleet); only its own files are compared.", [])
+    if not changes:
+        return "scope ok", "None: no file outside every ticket's scope changed since it launched.", []
+    return (f"{len(changes)} file(s) outside every ticket's scope",
+            "Files outside every ticket's scope changed since it launched:\n\n"
+            + "\n".join(f"- {code_span(p)} ({kind})" for p, kind, _ in changes), changes)
+
+
+def gate_evidence(run: str, i: str, results: list[dict], scope: str, summary: str) -> str:
+    lines = [f"# Gate evidence: {i}", "",
+             f"Run `{run}`, ticket `{i}`, {time.strftime('%Y-%m-%dT%H:%M:%S')}. Fleet ran each command with "
+             "/bin/sh from its directory, without the lead's session variables or stdin.", "", "## Commands", ""]
+    for n, r in enumerate(results, 1):
+        mark = "FAILED" if check_failed(r) else "passed"
+        lines.append(f"{n}. {code_span(r['run'])}: {mark}, {check_outcome(r)}, {r['seconds']:.1f}s, "
+                     f"cwd `{r['cwd']}`")
+    for n, r in enumerate(results, 1):
+        if check_failed(r):
+            tail = "\n".join(r["output"].rstrip().splitlines()[-GATE_TAIL_LINES:])
+            lines += ["", f"### Output of {n}: {code_span(r['run'])} (last {GATE_TAIL_LINES} lines at most)", "",
+                      fenced(tail) if tail.strip() else "No output."]
+    lines += ["", "## Scope", "", scope, "", "## Result", "", summary]
+    return "\n".join(lines) + "\n"
+
+
+def cmd_gate(a, cfg):
+    """Run a ticket's planned commands and write what actually ran as evidence. It changes no run state and holds
+    no lock (see mutation_lock), so long checks never block the lead's other commands; it never calls save_run."""
+    repo = repo_root()
+    state = load_run(repo, a.run)
+    t = state["tickets"].get(a.id)
+    if t is None:
+        meta = state["prompts"].get(a.id) or state["workers"].get(a.id) or {}
+        if meta.get("role") == "review":
+            raise FleetError(f"{a.id} is a reviewer; gate the ticket it reviews: fleet gate {a.run} {meta['review_of']}")
+        raise FleetError(f"no ticket '{a.id}' in this run")
+    if t["status"] == "dropped":
+        raise FleetError(f"{a.id} was dropped; there is nothing to gate")
+    if not t.get("commands"):
+        raise FleetError(f"{a.id} has no runnable checks in the plan; run its checks by hand and write the evidence "
+                         "file yourself")
+    d = run_dir(repo, a.run)
+    out = Path(a.output) if a.output else contained(d, d / "evidence" / f"{a.id}.gate.md")
+    if not out.parent.is_dir():
+        raise FleetError(f"no directory for --output: {out.parent}")
+    note_lead_file(repo, state, a.output)  # in memory only: a rerun's scope check skips its own earlier output
+    results = [run_check(repo, c) for c in t["commands"]]
+    scope_word, scope, unowned = gate_scope(repo, state, a.id)
+    failed = [r for r in results if check_failed(r)]
+    summary = f"{len(results) - len(failed)}/{len(results)} passed, {scope_word}"
+    out.write_text(gate_evidence(a.run, a.id, results, scope, summary))
+    print(f"GATE {a.id} {summary}; evidence {out}")
+    for r in failed:
+        print(f"FAIL {r['run']}: {check_outcome(r)}")
+    for path, kind, _ in unowned:
+        print(f"SCOPE {path} ({kind}) is outside every ticket's files; verify refuses until it is resolved")
+    return 1 if failed or unowned else 0
+
+
 def cmd_verify(a, cfg):
     repo = repo_root()
     state = load_run(repo, a.run)
@@ -2639,11 +2839,12 @@ def cmd_verify(a, cfg):
     if state["tickets"][owner]["status"] == "dropped":
         raise FleetError(f"{owner} was dropped; there is nothing to accept")
     assert_scope_idle(state, state["tickets"][owner]["files"])
-    evidence = read_evidence(a.evidence)
+    evidence = read_evidence_files(a.evidence)
     report = run_dir(repo, a.run) / "reports" / f"{a.id}.md"
     if not report.exists() or parse_status(report.read_text()) != "needs-verification":
         raise FleetError("report must have Status: needs-verification")
-    note_lead_file(repo, state, a.evidence)
+    for f in a.evidence:
+        note_lead_file(repo, state, f)
     guard_unowned(repo, state, a.id, a.unowned_ok)
     if w["role"] == "implementation":
         t = state["tickets"][a.id]
@@ -3235,10 +3436,18 @@ def main(argv: list[str] | None = None) -> int:
         s = sub.add_parser(name, help="record lead verification" if name == "verify" else "attest worker process has exited after manual inspection")
         s.add_argument("run")
         s.add_argument("id")
-        s.add_argument("--evidence", required=True)
+        s.add_argument("--evidence", required=True, action="append",
+                       help="a file describing the checks and results; repeat to record several, in order")
         if name == "verify":
             s.add_argument("--unowned-ok", metavar="REASON", help=unowned_help)
         s.set_defaults(fn=fn)
+
+    s = sub.add_parser("gate", help="run a ticket's planned check commands and the scope check, and write the "
+                                    "results as evidence (exit 1 on any failure)")
+    s.add_argument("run")
+    s.add_argument("id")
+    s.add_argument("--output", help="evidence file (default .fleet/runs/<run>/evidence/<id>.gate.md)")
+    s.set_defaults(fn=cmd_gate)
 
     s = sub.add_parser("diff", help="diff owned files against their launch baseline")
     s.add_argument("run")

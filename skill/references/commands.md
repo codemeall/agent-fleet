@@ -25,6 +25,7 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`wait`](#wait) | Blocks until something needs the lead | Between actions, while workers run |
 | [`status`](#status) | Lists workers and report statuses | You need a snapshot after `EXITED` or a recovery |
 | [`stop`](#stop) | Quits workers and confirms they exited | Before review or verification, or before shutdown |
+| [`gate`](#gate) | Runs a ticket's planned check commands and the scope check, and writes the results as evidence | Before verifying a ticket whose `checks` include commands |
 | [`diff`](#diff) | Captures a ticket's changes since launch | Before a cross-family review |
 | [`verify`](#verify) | Accepts a ticket with evidence | After checks and any required review pass |
 | [`recover`](#recover) | Records that a worker's process is gone | `stop` could not confirm the exit and you confirmed it yourself |
@@ -122,6 +123,14 @@ fleet plan <run> --file <plan.json>
 
 Saves every ticket, blocker, exact file list, tier, provider and decision, and validates dependencies, cycles, scopes and assignments. The plan is frozen once a worker launches. The plan format is in [SKILL.md step 2](../SKILL.md#2-save-a-complete-plan). Each ticket may give `task` (inline text) instead of `ticket`, and `kind: "investigate"` for read-only work that owns no files.
 
+`checks` is text, or a list that may mix text with commands Fleet can run for you:
+
+```json
+"checks": ["Read the copy against the ticket", {"run": "npm test -- src/api.test.ts", "cwd": "web", "timeout": 120}]
+```
+
+A command needs `run` (a shell command). `cwd` is a directory inside the repository, relative to its root (default `.`; no `..`, absolute paths or symlinks). `timeout` is whole seconds from 1 to 3600 (default 300). Any other key is refused. The worker's prompt lists each command with its directory, and [`gate`](#gate) runs them. A command Fleet cannot accept refuses the whole plan, naming the ticket, and nothing is saved.
+
 **Use:** after the owner approves the plan, before the first launch. Record later decisions in `notes.md`; new work goes in with `add`; a launched ticket's changed scope needs a follow-up run ([example 8](examples.md#8-change-scope-after-launch-a-follow-up-run)).
 
 ### add
@@ -130,7 +139,7 @@ Saves every ticket, blocker, exact file list, tier, provider and decision, and v
 fleet add <run> --file <tasks.json|->
 ```
 
-Appends tickets to a run, before or after its first launch; `-` reads stdin. Same JSON as `plan`. Saved tickets never change. Each entry gives `ticket` (a local file) or `task` (inline text, written to `.fleet/runs/<run>/tasks/<id>.md`), and may set `kind: "investigate"` for read-only work that owns no files. A new ticket whose files overlap an unverified ticket must list it in `blockers`. Added tickets show as `+<id>` in `resume`; added decisions end with `(added <time>)`.
+Appends tickets to a run, before or after its first launch; `-` reads stdin. Same JSON as `plan`. Saved tickets never change. Each entry gives `ticket` (a local file) or `task` (inline text, written to `.fleet/runs/<run>/tasks/<id>.md`), and may set `kind: "investigate"` for read-only work that owns no files. Its `checks` may include commands, as in [`plan`](#plan). A new ticket whose files overlap an unverified ticket must list it in `blockers`. Added tickets show as `+<id>` in `resume`; added decisions end with `(added <time>)`.
 
 **Use:** for delegation from the conversation and new work in a live run ([delegation](delegation.md)). Changing an already-launched ticket's scope still needs a follow-up run.
 
@@ -262,6 +271,23 @@ Sends each worker its quit keys and waits up to `--timeout` seconds (default 10,
 
 **Use:** before capturing a review diff, before verifying, after a reviewer finishes, and with `--all` before the machine, cmux or the tmux server shuts down.
 
+### gate
+
+```text
+fleet gate <run> <id> [--output <file>]
+```
+
+Runs the ticket's `checks` commands in plan order, each with `/bin/sh -c` from its `cwd`, with no stdin, without the lead's session variables (`CLAUDECODE`, `TMUX` and the like), and killed at its `timeout`. Then it runs [the scope check](#the-scope-check) against the ticket's launch snapshot. It writes the evidence to `.fleet/runs/<run>/evidence/<id>.gate.md` (or `--output`): each command, its directory, exit code or `timed out after <N>s`, and duration; the last 40 lines of each failing command's output; and the scope result. It prints one line, then a line per failure and per file outside every ticket's scope:
+
+```text
+GATE api 2/3 passed, scope ok; evidence .fleet/runs/demo/evidence/api.gate.md
+FAIL npm test -- src/api.test.ts: exit 1
+```
+
+It exits 1 when a command fails or times out, or a file outside every ticket's scope changed; otherwise 0. The scope reads `scope not checked (not launched yet)` before launch, and `(no whole-tree snapshot)` for a worker launched by an earlier Fleet. It works for `implement` and `investigate` tickets, whether or not the worker is still running; a ticket with only prose checks is refused (run those by hand), and so is a reviewer's ID. It changes no run state and takes no lock, so other commands keep working during long checks. Prose checks are not run: record them in your own evidence file.
+
+**Use:** after a worker hands back, instead of retyping its checks. Read the evidence, then pass it to `verify` with your own notes: `fleet verify <run> <id> --evidence <gate-file> --evidence <your-notes>`. The combined-tree checks (full suite, typecheck, build) stay your batch step.
+
 ### diff
 
 ```text
@@ -275,17 +301,17 @@ Prints or saves the ticket's changes since launch, including new files. The writ
 ### verify
 
 ```text
-fleet verify <run> <id> --evidence <file> [--unowned-ok <reason>]
+fleet verify <run> <id> --evidence <file> [--evidence <file> ...] [--unowned-ok <reason>]
 ```
 
-Accepts a ticket or a review. The worker must have exited, its report must say `Status: needs-verification`, and for a writer, any required review must be verified and match the current diff. No file outside every ticket's scope may have changed since the worker launched ([the scope check](#the-scope-check)). It sets the report to `verified`, appends the evidence, records `verified_at` on the worker (shown by `resume --json`), and unblocks dependents.
+Accepts a ticket or a review. Repeat `--evidence` to record several files, such as a `gate` file and your own notes; they are read in order, each must be non-empty, and they are recorded together. The worker must have exited, its report must say `Status: needs-verification`, and for a writer, any required review must be verified and match the current diff. No file outside every ticket's scope may have changed since the worker launched ([the scope check](#the-scope-check)). It sets the report to `verified`, appends the evidence, records `verified_at` on the worker (shown by `resume --json`), and unblocks dependents.
 
 **Use:** after running the ticket's checks yourself. Verify the reviewer first, then the writer, each with its own evidence file. Only then update the source ticket.
 
 ### recover
 
 ```text
-fleet recover <run> <id> --evidence <file>
+fleet recover <run> <id> --evidence <file> [--evidence <file> ...]
 ```
 
 Records that a worker's process is gone when `stop` couldn't confirm it, for example after a crash or a shutdown. It frees the slot. It doesn't accept the work.
@@ -307,7 +333,7 @@ Compares the current HEAD and index with the baseline from `init`. Exits 1 and l
 A worker's diff covers only its own files, so Fleet also compares the whole checkout. At each launch it records HEAD and a fingerprint (mode and Git blob ID) of every changed or untracked file; nothing is written to `.git`. `diff` and `verify` then refuse while any file changed since that worker launched, unless a ticket owns it:
 
 - a ticket owns its files from its first launch until it is verified or dropped, so work running alongside is never blamed on this worker;
-- never counted: `.fleet/`, gitignored files, the run's ticket files, files the lead handed Fleet (`plan`/`add --file`, `diff --output`, `--evidence`, `prompt --diff`), and the owner's `scope_ignore` list under `[defaults]` (default `[".scratch/", "node_modules/"]`; `name/` is a directory at any depth, `a/b/` is anchored at the root, anything else an exact path; your list replaces the default).
+- never counted: `.fleet/`, gitignored files, the run's ticket files, files the lead handed Fleet (`plan`/`add --file`, `diff --output`, `--evidence`, `prompt --diff`; a `gate --output` inside the checkout counts once `verify` takes it as `--evidence`), and the owner's `scope_ignore` list under `[defaults]` (default `[".scratch/", "node_modules/"]`; `name/` is a directory at any depth, `a/b/` is anchored at the root, anything else an exact path; your list replaces the default).
 
 Reviewers and investigators own no files, so any change during their run counts. The refusal lists each file as `changed`, `created`, `deleted` or `mode changed`. Ways out, each recorded in the run's decisions: the owner reverts the file; `fleet grant` adds it to the ticket, so it enters the ticket's diff and review; `fleet drop` retires the ticket; or, for the owner's own edits only, `--unowned-ok "<owner's words>"` on `diff` or `verify` accepts that exact content (a later change to the file counts again). `stop` lists such files as soon as a worker exits, and `wait` adds a `SCOPE` line to a wake it is already making. Workers launched by an earlier Fleet have no snapshot; their check is skipped with a note.
 
