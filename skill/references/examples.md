@@ -11,7 +11,7 @@ Command sequences for the cases the skill describes in prose. Each uses the run 
 - [5. An evidence file](#5-an-evidence-file)
 - [6. Repair or relaunch a stopped worker](#6-repair-or-relaunch-a-stopped-worker)
 - [7. Recover a worker whose exit cannot be confirmed](#7-recover-a-worker-whose-exit-cannot-be-confirmed)
-- [8. Change scope after launch: a follow-up run](#8-change-scope-after-launch-a-follow-up-run)
+- [8. Change scope after launch](#8-change-scope-after-launch)
 - [9. Finish the run](#9-finish-the-run)
 - [10. Delegate mid-conversation](#10-delegate-mid-conversation)
 - [Handing off the lead](#handing-off-the-lead)
@@ -127,7 +127,7 @@ Use this after `EXITED api-client`, or when a stopped worker needs fixes within 
 
 If the worker stopped on a usage limit and its adapter can resume (Claude), relaunch after the limit resets and add `--resume`: the worker continues its own session, so step 2 is only needed for new instructions.
 
-A change of scope is not a repair; use a follow-up run (example 8). To move future launches to another provider or model, use `fleet steer` (skill step 1, Steering routing).
+A change of scope is not a repair; grant the file, or use a follow-up run when grant refuses (example 8). To move future launches to another provider or model, use `fleet steer` (skill step 1, Steering routing).
 
 ## 7. Recover a worker whose exit cannot be confirmed
 
@@ -144,9 +144,22 @@ api-client: quit sent but process exit unconfirmed; slot retained
 
 Recovery frees the slot only. Verify or relaunch the ticket as usual afterwards.
 
-## 8. Change scope after launch: a follow-up run
+## 8. Change scope after launch
 
-The plan of `settings` is frozen. To add a file to `api-client` (moving launches to another provider or model needs only `fleet steer`):
+The plan of `settings` is frozen, but a ticket can still be granted files. `api-client` reports `blocked`: retry on 503 belongs in `src/retry.ts` and `src/retry.test.ts`, which no ticket owns.
+
+1. Check that the files are this ticket's work; ask the owner first when they widen what the ticket set out to do. Then:
+   ```sh
+   fleet grant settings api-client src/retry.ts src/retry.test.ts --reason "retry on 503 lives in src/retry.ts (owner, 2026-10-06)"
+   ```
+   Fleet adds the files to the ticket and records `Granted src/retry.test.ts, src/retry.ts to api-client: … (<time>)` in the decisions. The worker is live, so the grant goes to its inbox and its pane gets the pointer, as with `fleet send`. A stopped worker reads it when relaunched; regenerate a written prompt with `fleet prompt settings api-client --force` before that launch, since its scope line is stale.
+2. `fleet wait` as usual. The ticket's `fleet diff` now compares the granted files with their content when `api-client` first launched, so an edit the worker made before the grant goes to review too. A review captured before the grant goes stale once a granted file differs: capture a fresh diff and review.
+
+The same command resolves a scope-check refusal when the stray file is the ticket's own work: grant it, then run `diff` and `verify` again. If the file was already changed when the ticket launched and has changed since, Fleet has no copy of its launch content and refuses; look at the file with the owner, and add `--accept-current` when its current content is the right starting point.
+
+### When grant refuses: a follow-up run
+
+Grant refuses a file that a live worker of another ticket holds, or that another unverified ticket owns when neither waits on the other. If waiting for that ticket to be verified is not an option, use a follow-up run (moving launches to another provider or model needs only `fleet steer`):
 
 1. Stop every worker that could overlap: `fleet stop settings --all`. A new `fleet init` refuses ("one active run per checkout") until every worker in `settings` has a confirmed exit.
 2. **Review the partial edits yourself first:** `git diff -- src/api.ts src/api.test.ts`. The follow-up run's launch baseline includes them, so its `fleet diff` and any cross-family reviewer will not see them.

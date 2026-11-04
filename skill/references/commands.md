@@ -18,6 +18,7 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`plan`](#plan) | Saves the ticket graph and routing | After the owner approves the plan, before any launch |
 | [`add`](#add) | Appends tickets or inline tasks to a run, before or after launch | The owner hands you new work mid-conversation or mid-run |
 | [`drop`](#drop) | Retires a pending ticket nobody will finish | The owner abandons work, so it stops holding files and keeping its run open |
+| [`grant`](#grant) | Adds files to a pending ticket's scope, before or after launch | A worker needs one more file, or the scope check names a file that is the ticket's own work |
 | [`prompt`](#prompt) | Writes a worker or reviewer prompt | Before each launch |
 | [`launch`](#launch) | Starts a worker in a cmux pane or a headless tmux window | A ticket is ready and its prompt is written |
 | [`peek`](#peek) | Shows the bottom of a worker's screen | After `STALLED`, or when the launch screen shows a prompt |
@@ -131,7 +132,7 @@ Saves every ticket, blocker, exact file list, tier, provider and decision, and v
 
 A command needs `run` (a shell command). `cwd` is a directory inside the repository, relative to its root (default `.`; no `..`, absolute paths or symlinks). `timeout` is whole seconds from 1 to 3600 (default 300). Any other key is refused. The worker's prompt lists each command with its directory, and [`gate`](#gate) runs them. A command Fleet cannot accept refuses the whole plan, naming the ticket, and nothing is saved.
 
-**Use:** after the owner approves the plan, before the first launch. Record later decisions in `notes.md`; new work goes in with `add`; a launched ticket's changed scope needs a follow-up run ([example 8](examples.md#8-change-scope-after-launch-a-follow-up-run)).
+**Use:** after the owner approves the plan, before the first launch. Record later decisions in `notes.md`; new work goes in with `add`; a ticket that needs another file gets it with `grant`, and a follow-up run only when grant refuses ([example 8](examples.md#8-change-scope-after-launch)).
 
 ### add
 
@@ -141,7 +142,7 @@ fleet add <run> --file <tasks.json|->
 
 Appends tickets to a run, before or after its first launch; `-` reads stdin. Same JSON as `plan`. Saved tickets never change. Each entry gives `ticket` (a local file) or `task` (inline text, written to `.fleet/runs/<run>/tasks/<id>.md`), and may set `kind: "investigate"` for read-only work that owns no files. Its `checks` may include commands, as in [`plan`](#plan). A new ticket whose files overlap an unverified ticket must list it in `blockers`. Added tickets show as `+<id>` in `resume`; added decisions end with `(added <time>)`.
 
-**Use:** for delegation from the conversation and new work in a live run ([delegation](delegation.md)). Changing an already-launched ticket's scope still needs a follow-up run.
+**Use:** for delegation from the conversation and new work in a live run ([delegation](delegation.md)). To give an existing ticket another file, use [`grant`](#grant).
 
 ### drop
 
@@ -152,6 +153,35 @@ fleet drop <run> <id> --reason <text>
 Marks a pending ticket `dropped`: its files are free for new work, it no longer keeps its run open, and its report (if any) says `Status: dropped` so it stops coming back as `PENDING`. The reason is saved with the run's decisions. It refuses while the ticket's worker or reviewer may be running, and while another pending ticket waits on it. Edits the worker already made stay in the checkout. A dropped ticket cannot be launched, verified or used as a new blocker.
 
 **Use:** only when the owner abandons the work. To change it instead, drop it and `add` a new ticket.
+
+### grant
+
+```text
+fleet grant <run> <id> <file>... --reason <text> [--accept-current]
+```
+
+Adds exact files to a pending `implement` ticket, before or after its launch, so one more file doesn't need a follow-up run. The files join the ticket's scope wherever Fleet reads it: `resume`, `diff`, launch's overlap checks and [the scope check](#the-scope-check). The grant is saved on the ticket and in the run's decisions as `Granted <files> to <id>: <reason> (<time>)`, which dependents' prompts hand down. A file already in the scope is skipped.
+
+Once the ticket has launched, a granted file's baseline is its content at the ticket's first launch, not its content now, so an edit the worker already made to it shows in the ticket's diff and goes to review. Fleet rebuilds that content from the launch snapshot:
+
+- a file that was clean at launch: its content in that launch's HEAD (absent if HEAD lacked it);
+- a file that was already changed at launch: Fleet kept only its fingerprint, so it uses the file while it is unchanged since, and otherwise refuses, because the diff could not show what the worker did to it. Look at the file with the owner; `--accept-current` then takes its current content as the baseline, and the decision says so;
+- a file another ticket owned while this one ran: its current content, because its changes are that ticket's.
+
+Before launch there is nothing to rebuild: launch captures the baseline.
+
+It refuses, granting nothing:
+
+- an `investigate`, verified or dropped ticket;
+- a file a live worker of another ticket holds;
+- a file another unverified ticket owns, unless one of the two waits on the other (the rule `add` uses);
+- any grant while the ticket's reviewer may be running.
+
+A live worker gets an inbox message naming the files and the reason, and its pane gets the pointer, as with [`send`](#send); if typing the pointer fails, grant exits 1 with the grant and message saved, so don't grant again. A worker that launched before but isn't running reads the message when relaunched. When the ticket's prompt is already written, grant says its scope line is stale: regenerate it with `fleet prompt <run> <id> --force` before the next launch.
+
+A review captured before the grant goes stale once a granted file differs from its baseline: `verify` refuses until you capture a fresh diff and review.
+
+**Use:** when a worker reports it needs another file, or the scope check names a file that is the ticket's own work. Ask the owner first when the file widens what the ticket set out to change. When grant refuses because another ticket holds the file, wait until that ticket is verified, or use a follow-up run ([example 8](examples.md#8-change-scope-after-launch)).
 
 ## Launching and talking to workers
 
@@ -349,7 +379,7 @@ A worker's diff covers only its own files, so Fleet also compares the whole chec
 - a ticket owns its files from its first launch until it is verified or dropped, so work running alongside is never blamed on this worker;
 - never counted: `.fleet/`, gitignored files, the run's ticket files, files the lead handed Fleet (`plan`/`add --file`, `diff --output`, `--evidence`, `prompt --diff`; a `gate --output` inside the checkout counts once `verify` takes it as `--evidence`), files `fleet gate`'s own commands wrote while no worker was running (until they change again), and the owner's `scope_ignore` list under `[defaults]` (default `[".scratch/", "node_modules/"]` plus the `__pycache__/`, `.pytest_cache/`, `.mypy_cache/` and `.ruff_cache/` caches; `name/` is a directory at any depth, `a/b/` is anchored at the root, anything else an exact path; your list replaces the default).
 
-Reviewers and investigators own no files, so any change during their run counts. The refusal lists each file as `changed`, `created`, `deleted` or `mode changed`. Ways out, each recorded in the run's decisions: the owner reverts the file; `fleet grant` adds it to the ticket, so it enters the ticket's diff and review; `fleet drop` retires the ticket; or, for the owner's own edits only, `--unowned-ok "<owner's words>"` on `diff` or `verify` accepts that exact content (a later change to the file counts again). `stop` lists such files as soon as a worker exits, and `wait` adds a `SCOPE` line to a wake it is already making. Workers launched by an earlier Fleet have no snapshot; their check is skipped with a note.
+Reviewers and investigators own no files, so any change during their run counts. The refusal lists each file as `changed`, `created`, `deleted` or `mode changed`. Ways out, each recorded in the run's decisions: the owner reverts the file; when it is the ticket's own work, [`fleet grant`](#grant) adds it to the ticket, so it enters the ticket's diff against its launch content, and its review; `fleet drop` retires the ticket; or, for the owner's own edits only, `--unowned-ok "<owner's words>"` on `diff` or `verify` accepts that exact content (a later change to the file counts again). `stop` lists such files as soon as a worker exits, and `wait` adds a `SCOPE` line to a wake it is already making. Workers launched by an earlier Fleet have no snapshot; their check is skipped with a note.
 
 ## Continuity
 

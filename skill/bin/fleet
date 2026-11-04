@@ -1641,6 +1641,176 @@ def cmd_drop(a, cfg):
     print(f"{a.id}: dropped; its files are free, and any edits it made stay in the checkout for the owner to review")
 
 
+# ---------- scope grants ----------
+# "I need one more file" used to cost a stop, a follow-up run and a new plan. A grant adds the file to a pending
+# ticket instead, with the file's content at the ticket's first launch as its baseline, so whatever the worker
+# already did to it lands in the ticket's diff and review rather than slipping past both.
+
+def git_blob(repo: Path, oid: str) -> bytes | None:
+    """A blob's bytes, or None when the object database lacks it (a dirty file's hash was never written)."""
+    res = subprocess.run(["git", "cat-file", "blob", oid], cwd=repo, capture_output=True, timeout=60)
+    return res.stdout if res.returncode == 0 else None
+
+
+def git_ignored(repo: Path, path: str) -> bool:
+    res = subprocess.run(["git", "check-ignore", "-q", "--", path], cwd=repo, capture_output=True, timeout=60)
+    return res.returncode == 0
+
+
+def blob_mode(repo: Path, f: str, fp: str) -> int:
+    """capture_files' mode for a rebuilt file: the file's own bits while its executable bit agrees with Git's,
+    so an untouched mode never shows as a change."""
+    executable, path = fp.startswith("100755:"), repo / f
+    if path.is_file() and bool(path.stat().st_mode & 0o111) == executable:
+        return path.stat().st_mode & 0o777
+    return 0o755 if executable else 0o644
+
+
+def owned_alongside(state: dict, i: str, f: str) -> str | None:
+    """Another ticket that owned `f` while ticket `i` was running. The scope check credits it with any edit to
+    `f` in that time, so the grant must not hand those edits to `i`'s diff."""
+    mine = ticket_window(state, i)
+    for j, o in state["tickets"].items():
+        window = ticket_window(state, j)
+        if j != i and mine and window and f in o["files"] and (window[1] is None or window[1] >= mine[0]):
+            return j
+    return None
+
+
+def launch_unknown(repo: Path, tree: dict | None, f: str, fp: str | None) -> str | None:
+    """Why `f`'s launch content cannot be rebuilt from the ticket's whole-tree snapshot, or None when it may be."""
+    if tree is None:
+        return "launched by an earlier Fleet, which kept no whole-tree snapshot"
+    if f not in tree["paths"] and git_ignored(repo, f):
+        return "gitignored, so the launch snapshot skipped it"
+    if fp is None or fp.startswith(("120000:", "160000:")):
+        return "not a regular file at launch"
+    return None
+
+
+def grant_baseline(repo: Path, state: dict, i: str, files: list[str], accept_current: bool
+                   ) -> tuple[dict, list[str], list[str]]:
+    """The launched ticket `i`'s baseline for newly granted files, in capture_files' format: each file's content
+    at the first launch. A file clean then is HEAD's blob. A dirty one is known only by its fingerprint, so it is
+    rebuilt only while unchanged, or while Git happens to hold that blob (a staged file). Returns the entries, the
+    files that took their current content under --accept-current, and notes for the lead."""
+    tree = tree_baseline(repo, state, i)
+    now, disk = capture_files(repo, files), disk_fingerprints(repo, files)
+    launch = {} if tree is None else {
+        **head_fingerprints(repo, tree["head"], [f for f in files if f not in tree["paths"]]), **tree["paths"]}
+    entries, current, notes, unknown = {}, [], [], []
+    for f in files:
+        fp, other = launch.get(f), owned_alongside(state, i, f)
+        why = launch_unknown(repo, tree, f, fp)
+        if other:
+            entries[f] = now[f]
+            notes.append(f"{f}: {other} owned it while {i} ran, so its edits stay {other}'s and its current content "
+                         "is the baseline")
+        elif why is None and fp == disk.get(f):  # unchanged since launch, whether clean or dirty then
+            entries[f] = now[f]
+        elif why is None and fp == "absent":
+            entries[f] = None
+        elif why is None and (blob := git_blob(repo, fp.split(":")[1])) is not None:
+            entries[f] = {"data": base64.b64encode(blob).decode(), "mode": blob_mode(repo, f, fp)}
+        elif accept_current:
+            entries[f] = now[f]
+            current.append(f)
+        else:
+            unknown.append(f"  {f} ({why or 'already changed when it launched; Fleet kept only its fingerprint'})")
+    if unknown:
+        raise FleetError(f"{i}: these files changed since {i} launched, and Fleet has no copy of their launch "
+                         f"content, so {i}'s diff could not show what its worker did to them:\n" + "\n".join(unknown) +
+                         "\nAsk the owner whether the current content is right; --accept-current then takes it as "
+                         "the baseline (recorded in decisions). Nothing was granted.")
+    return entries, current, notes
+
+
+def check_grantable(state: dict, i: str, files: list[str]) -> None:
+    """Refuse files someone else holds: a live worker of another ticket, or an unverified ticket that neither
+    waits on `i` nor is waited on by it (fleet add's rule, so two open diffs never share a file); and refuse
+    any grant while `i`'s reviewer runs, since its diff would change under it."""
+    tickets, live = state["tickets"], active(state)
+    if any(w.get("review_of") == i for w in live):
+        raise FleetError(f"{i}'s reviewer may still be running; stop it first (fleet stop), then grant, capture a "
+                         "fresh diff and review again")
+    for w in live:
+        owner = w.get("review_of") or w["id"]
+        if owner != i and scopes_overlap(files, tickets[owner]["files"]):
+            raise FleetError(f"{owner}'s worker is live and holds files you asked for; nothing was granted. Wait "
+                             f"until {owner} is verified, or make the change in a follow-up run (examples.md 8)")
+    waits_on = ancestors(tickets, i)
+    for j, o in tickets.items():
+        if (j != i and o["status"] == "pending" and scopes_overlap(files, o["files"])
+                and j not in waits_on and i not in ancestors(tickets, j)):
+            raise FleetError(f"files overlap unverified ticket {j}, and neither waits on the other; nothing was "
+                             f"granted. Wait until {j} is verified or dropped, or use a follow-up run (examples.md 8)")
+
+
+def grant_message(files: list[str], reason: str) -> str:
+    return (f"The lead granted you {', '.join(files)}: {reason}\n\nThey are in your scope now; edit them as your "
+            "ticket needs. Fleet compares them with their content at your first launch, so any edit you already "
+            "made to them is part of your diff and its review.")
+
+
+def cmd_grant(a, cfg):
+    """Add files to a pending implement ticket, launched or not, so one more file needs no follow-up run."""
+    repo = repo_root()
+    state = load_run(repo, a.run)
+    reconcile(repo, state)
+    t = state["tickets"].get(a.id)
+    if t is None:
+        raise FleetError(f"no ticket '{a.id}' in this run; grant files to the ticket itself, not to its reviewer")
+    if t.get("kind") == "investigate":
+        raise FleetError(f"{a.id} is an investigate ticket and owns no files; add an implement ticket with fleet add")
+    if t["status"] != "pending":
+        raise FleetError(f"{a.id} is already {t['status']}; add a new ticket with fleet add for the further change")
+    reason = a.reason.strip()
+    if not reason:
+        raise FleetError("say why with --reason; it is saved with the run's decisions and sent to the worker")
+    files = sorted(set(safe_file(repo, f) for f in a.files))
+    new = [f for f in files if f not in t["files"]]
+    if not new:
+        print(f"{a.id}: {', '.join(files)} already in its scope; nothing granted")
+        return
+    check_grantable(state, a.id, new)
+    d = run_dir(repo, a.run)
+    snapshot = d / "snapshots" / f"{a.id}.json"
+    current = []
+    if snapshot.exists():  # launched: launch captures the baseline for a ticket that has not
+        entries, current, notes = grant_baseline(repo, state, a.id, new, a.accept_current)
+        atomic_json(snapshot, {**json.loads(snapshot.read_text()), **entries})
+        for note in notes:
+            print(note, file=sys.stderr)
+    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    t["files"] = sorted(set(t["files"]) | set(new))
+    t.setdefault("grants", []).append({"files": new, "reason": reason, "at": now, "accept_current": current})
+    took = f"; baseline is the current content of {', '.join(current)} (--accept-current)" if current else ""
+    state["decisions"].append(f"Granted {', '.join(new)} to {a.id}: {reason}{took} ({now})")
+    w = state["workers"].get(a.id)
+    if w:  # it has launched, so it reads its inbox now (live) or when relaunched
+        n, path = inbox_append(repo, state, a.id, grant_message(new, reason))
+    save_run(repo, a.run, state)
+    print(f"{a.id}: granted {', '.join(new)}; its scope is now {', '.join(t['files'])}")
+    live = bool(w) and w.get("state") in ACTIVE_STATES
+    if a.id in state["prompts"]:
+        print(f"{a.id}: its prompt's scope line is stale; regenerate it with fleet prompt {a.run} {a.id} --force "
+              + ("once this worker exits" if live else "before its next launch"))
+    if not w:
+        return
+    if not live:
+        print(f"{a.id}: saved message {n} in {path}; no worker is running, so it reads it when relaunched")
+        return
+    try:
+        terminal(state).send(w, [inbox_pointer(n, path), "enter"])
+    except (FleetError, OSError, subprocess.TimeoutExpired) as e:
+        raise FleetError(f"{a.id}: the grant is saved and message {n} is in {path}, but typing the pointer failed "
+                         f"({str(e).strip()[:200]}). The worker reads it when it next checks its inbox, so do not "
+                         f"grant or send again; check the pane with fleet peek {a.run} {a.id}") from None
+    w["last_send"] = time.time()  # the worker owes a response now; wait may report it stalled
+    save_run(repo, a.run, state)
+    print(f"sent message {n} to {a.id} ({w['surface']}): {path}")
+
+
 def report_summary(text: str) -> list[str]:
     """A report's lines above its appendix (and the lead's verification note), without the title and Status
     lines: what the lead itself reads, so it is what a dependent needs."""
@@ -3639,6 +3809,17 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("id")
     s.add_argument("--reason", required=True, help="why; saved with the run's decisions")
     s.set_defaults(fn=cmd_drop)
+
+    s = sub.add_parser("grant", help="add files to a pending ticket's scope, launched or not; a launched ticket's "
+                                     "diff compares them with their content at its first launch")
+    s.add_argument("run")
+    s.add_argument("id")
+    s.add_argument("files", nargs="+", help="exact repo-relative files")
+    s.add_argument("--reason", required=True, help="why; saved with the run's decisions and sent to the worker")
+    s.add_argument("--accept-current", action="store_true",
+                   help="for a file whose launch content Fleet cannot rebuild (it was already changed at launch "
+                        "and has changed since), take its current content as the baseline; recorded in decisions")
+    s.set_defaults(fn=cmd_grant)
 
     s = sub.add_parser("resume", help="reconcile exits and show saved plan and decisions")
     s.add_argument("run")
