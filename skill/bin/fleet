@@ -13,7 +13,8 @@ import fcntl
 import hashlib
 import uuid
 from datetime import datetime
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+import io
 import json
 import os
 import re
@@ -58,6 +59,7 @@ DEFAULTS = {
     "review_rounds": 2,  # reviewer launches per ticket before a repair or review needs the owner (--extra-round)
     "gate": False,  # wait --gate by default: run a hand-back's planned checks before waking the lead
     "gate_rounds": 2,  # failing gates wait --gate sends back to a worker per ticket before it wakes the lead
+    "supervise": ["gate"],  # the steps fleet supervise takes itself: gate, review, dispatch; ["gate"] is wait --gate
     "auto_trust": False,  # the owner's opt-in: mark the repo trusted in each worker CLI before launch
     "backend": "auto",  # cmux (visible panes), tmux (headless) or auto: cmux inside cmux, else tmux
     "tmux_socket": "fleet",  # tmux -L name for headless workers; "" uses your default tmux server
@@ -208,6 +210,9 @@ def load_config(user_path: Path | None = None) -> dict:
             raise FleetError(f"defaults.{key} must be a whole number from 1 to 5")
     if not isinstance(cfg["defaults"]["gate"], bool):
         raise FleetError("defaults.gate must be true or false")
+    if not isinstance(cfg["defaults"]["supervise"], list):
+        raise FleetError(f"defaults.supervise must be a list drawn from {', '.join(SUPERVISE_STEPS)}")
+    supervise_steps(cfg["defaults"]["supervise"], "defaults.supervise")
     for key in CAP_KEYS:
         cap = cfg["defaults"][key]
         if isinstance(cap, bool) or not isinstance(cap, int) or cap < 0:
@@ -1119,8 +1124,10 @@ def try_lock(repo: Path):
 
 @contextmanager
 def mutation_lock(a):
-    # wait and gate change no run state and may run for minutes; holding the lock would block the lead's commands.
-    if a.cmd not in ("hold", "release") and (not hasattr(a, "run") or a.cmd in ("wait", "gate", *OWNER_VIEWS)):
+    # wait, supervise and gate may run for minutes; holding the lock would block the lead's commands. supervise
+    # takes it only for each brief change, without waiting (try_lock).
+    if a.cmd not in ("hold", "release") and (not hasattr(a, "run") or a.cmd in ("wait", "supervise", "gate",
+                                                                              *OWNER_VIEWS)):
         yield
         return
     with try_lock(repo_root()) as held:
@@ -4104,14 +4111,19 @@ def scope_marker(path: str) -> str:
 
 
 def cmd_wait(a, cfg):
+    return watch(a, lambda repo, state, seen: GateLoop(repo, state, cfg, seen) if gate_on(a, state, cfg) else None)
+
+
+def watch(a, loop_for) -> int:
+    """wait's body, which supervise shares: `loop_for` gives the loop that acts on each pass (None: plain wait)."""
     repo = repo_root()
     state = load_run(repo, a.run)
     d = run_dir(repo, a.run)
     seen = d / ".seen"
     seen.mkdir(exist_ok=True)
-    statuses = None if a.any_change else WAKE_STATUSES
+    statuses = None if getattr(a, "any_change", False) else WAKE_STATUSES
     deadline = time.time() + a.timeout
-    loop = GateLoop(repo, state, cfg, seen) if gate_on(a, state, cfg) else None
+    loop = loop_for(repo, state, seen)
     pid_file, pid = seen / "wait.pid", str(os.getpid())
     pid_file.write_text(pid)  # handoff refuses while a wait could still consume events
     try:
@@ -4139,6 +4151,8 @@ def wait_loop(a, repo: Path, d: Path, seen: Path, statuses, deadline: float, loo
             if settled:  # screens once more, not every second: each read is a cmux call per worker
                 events += scan_workers(repo, load_run(repo, a.run), seen, a.stall)
             fresh = list({i: (i, status, f) for i, status, f in fresh}.values())  # a rewritten report: latest status
+            for line in getattr(loop, "actions", ()):  # supervise's own steps: listed, never a wake of their own
+                print(line)
             for i, status, f in fresh:
                 text = f.read_text()
                 line, _ = header_summary(repo, state, i, text)
@@ -4153,18 +4167,317 @@ def wait_loop(a, repo: Path, d: Path, seen: Path, statuses, deadline: float, loo
             reconcile(repo, state)
         if hold and not active(state):  # a held, idle run has nothing to wait for; waiting would only burn turns
             print(f"HOLD {hold_text(hold)} and no worker is running; tell the owner and end your turn (do not run `fleet stop`); do not wait again")
-            for i, status in pending_reports(d / "reports"):
-                print(f"PENDING {i} [{status}]")
+            for line in [*getattr(loop, "actions", ()), *pending_lines(d / "reports", state, loop)]:
+                print(line)
             return 0
         if time.time() >= deadline:
             print(f"TIMEOUT nothing new in {a.timeout}s; wait again")
             # Another wait may have consumed a wake; never let a handed-back report sit unseen.
-            for i, status in pending_reports(d / "reports"):
-                print(f"PENDING {i} [{status}]")
+            for line in [*getattr(loop, "actions", ()), *pending_lines(d / "reports", state, loop)]:
+                print(line)
             for line in scope_lines(repo, state, seen):
                 print(line)
             return 2
         time.sleep(min(a.interval, max(0, deadline - time.time())))
+
+
+def pending_lines(reports: Path, state: dict, loop) -> list[str]:
+    """PENDING lines for reports still waiting on the lead; supervise notes a writer its reviewer is reading."""
+    note = getattr(loop, "pending_note", None)
+    return [f"PENDING {i} [{status}]{note(state, i) if note else ''}" for i, status in pending_reports(reports)]
+
+
+# ---------- supervise ----------
+# P20: the lead runs fleet supervise in the background in place of wait --gate. It takes the mechanical steps the
+# owner opted into itself (gate, review, dispatch) and wakes the lead only for a judgment call or a ticket ready to
+# accept. Like wait it holds no lock while it waits: each change takes the lock without waiting (try_lock), reloads
+# and re-checks run state inside it, and is left for the next pass while one of the lead's commands holds it. It
+# sends no keystrokes beyond the gate loop's and fleet review's, answers no prompt, and never verifies, accepts,
+# commits or pushes. Reports are data: it counts and quotes them, and never acts on what they say.
+
+SUPERVISE_STEPS = ("gate", "review", "dispatch")
+
+
+def supervise_steps(value, where: str) -> list[str]:
+    """`[defaults] supervise` or --auto as steps in their fixed order. review needs gate: only a hand-back whose gate
+    passed is reviewed."""
+    steps = [x.strip() for x in value.split(",") if x.strip()] if isinstance(value, str) else value
+    if not isinstance(steps, list) or not all(isinstance(x, str) for x in steps):
+        raise FleetError(f"{where} must be a list drawn from {', '.join(SUPERVISE_STEPS)}")
+    if unknown := [x for x in steps if x not in SUPERVISE_STEPS]:
+        raise FleetError(f"{where}: unknown step {', '.join(map(repr, unknown))}; the steps are "
+                         f"{', '.join(SUPERVISE_STEPS)}")
+    if "review" in steps and "gate" not in steps:
+        raise FleetError(f"{where}: review needs gate, since supervise reviews only a hand-back whose gate passed")
+    return [x for x in SUPERVISE_STEPS if x in steps]
+
+
+def cmd_supervise(a, cfg):
+    """wait with the owner's steps: gate alone is exactly wait --gate, and no step at all is plain wait."""
+    steps = supervise_steps(a.auto, "--auto") if a.auto is not None else None
+
+    def loop_for(repo: Path, state: dict, seen: Path):
+        chosen = steps if steps is not None else supervise_steps(
+            state["options"].get("supervise", cfg["defaults"]["supervise"]), "the run's supervise option")
+        if chosen == ["gate"]:
+            return GateLoop(repo, state, cfg, seen)
+        return Supervisor(repo, state, cfg, seen, chosen) if chosen else None
+
+    return watch(a, loop_for)
+
+
+def header_doubts(repo: Path, state: dict, wid: str, text: str) -> str | None:
+    """Why a report's `fleet` header leaves something for the lead to judge (None when it shows nothing): missing,
+    a problem, an unmet criterion, a check not at exit 0, a finding or an open question."""
+    _, problems = header_summary(repo, state, wid, text)
+    if problems:
+        return "its report has no fleet header" if problems == ["header missing"] else header_text(problems)
+    data, _ = parse_header(text)
+    why = []
+    if unmet := sum(not c["met"] for c in data["criteria"]):
+        why.append(f"{unmet} criteria unmet")
+    if failed := sum(c.get("exit") != 0 for c in data["checks"]):
+        why.append(f"{failed} check(s) not at exit 0")
+    if data["findings"]:
+        why.append(f"{len(data['findings'])} finding(s)")
+    if asked := sum(1 for q in data["questions"] if q.strip()):
+        why.append(f"{asked} open question(s)")
+    return ", ".join(why) or None
+
+
+def severity_counts(findings: list) -> str:
+    """Header findings counted by severity, as the REPORT summary counts them: `1 high, 2 low`."""
+    rated = [str(f.get("severity", "")).lower() if isinstance(f, dict) else "" for f in findings]
+    parts = [f"{rated.count(s)} {s}" for s in SEVERITIES if s in rated]
+    unrated = sum(r not in SEVERITIES for r in rated)
+    return ", ".join(parts + ([f"{unrated} unrated"] if unrated else []))
+
+
+def captured(fn, *args) -> tuple[list[str], str | None]:
+    """Run another command's function quietly: its printed lines, and its refusal when it raised one."""
+    out = io.StringIO()
+    try:
+        with redirect_stdout(out), redirect_stderr(out):
+            fn(*args)
+    except (FleetError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
+        return out.getvalue().splitlines(), str(e).strip() or type(e).__name__
+    return out.getvalue().splitlines(), None
+
+
+class Supervisor:
+    """The loop wait_loop runs for supervise beyond the gate alone. It shares the gate loop's notes and wake lines,
+    and adds `actions`: what it did itself (REVIEWING, LAUNCHED), printed in the next wake, never a wake of their
+    own."""
+
+    def __init__(self, repo: Path, state: dict, cfg: dict, seen: Path, steps: list[str]):
+        self.repo, self.run, self.cfg, self.seen, self.steps = repo, state["run"], cfg, seen, steps
+        self.gates = GateLoop(repo, state, cfg, seen) if "gate" in steps else None
+        self.notes: dict[str, str] = self.gates.notes if self.gates else {}
+        self.lines: dict[str, list[str]] = self.gates.lines if self.gates else {}
+        self.actions: list[str] = []
+
+    def handle(self, state: dict, fresh: list) -> list:
+        if "dispatch" in self.steps:
+            try:
+                self.dispatch(state)
+            except (FleetError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as e:
+                self.lines["(dispatch)"] = [f"DISPATCH-FAILED: {one_line(e, 300)}; run fleet launch {self.run} "
+                                            "--ready yourself when it is resolved"]
+        if not self.gates:
+            return fresh
+        for i, _, _ in fresh:
+            self.gates.results.pop(i, None)
+        keep = self.gates.handle(state, fresh)
+        if "review" not in self.steps:
+            return keep
+        out = []
+        for i, status, f in keep:
+            try:
+                wake = self.judge(state, i, status, f)
+            except (FleetError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as e:
+                self.note(i, f"supervise took no step ({one_line(e, 160)})")  # never lose a hand-back
+                wake = True
+            if wake:
+                out.append((i, status, f))
+        return out
+
+    def note(self, i: str, text: str) -> None:
+        self.notes[i] = "; ".join(filter(None, (self.notes.get(i), text)))
+
+    def pending_note(self, state: dict, i: str) -> str:
+        review = next((w for w in active(state) if w.get("review_of") == i), None)
+        return f" in review ({review['id']} is running)" if review else ""
+
+    # ---------- review ----------
+
+    def judge(self, state: dict, i: str, status: str, f: Path) -> bool:
+        """What a hand-back the gate let through needs: True wakes the lead with its REPORT line (and any READY or
+        FINDINGS line), False means supervise took the step itself or there is nothing to do."""
+        meta = state["workers"].get(i) or {}
+        if meta.get("role") == "review":
+            if status.lower() == "needs-verification":
+                self.verdict(state, i, meta, f)
+            return True
+        t = state["tickets"].get(i)
+        if not t or t.get("kind", "implement") != "implement" or status.lower() != "needs-verification":
+            return True
+        g = self.gates.results.get(i)
+        if g is None:  # not gated: its writer had stopped, or it has no planned commands
+            review = latest_reviewer(state, i)
+            return not (review and review.get("launched_at", 0) >= f.stat().st_mtime)  # the lead reviewed it
+        if g["failed"] or g["unowned"]:
+            return True  # the gate's own lines (SCOPE) already say why
+        text = f.read_text()
+        why = header_doubts(self.repo, state, i, text) or (
+            f"its checks wrote {len(g['excused'])} file(s) outside every ticket" if g["excused"] else None)
+        if why:
+            self.note(i, f"{'not reviewed' if t['review_required'] else 'not ready'}: {why}")
+            return True
+        n = len(t["commands"])
+        if not t["review_required"]:
+            self.lines[i] = [f"READY {i}: gate passed ({n}/{n}), no review required (review "
+                             f"{state['options']['review']}, {t['tier']}); fleet accept {self.run} {i} --gate "
+                             "--evidence <file>"]
+            return True
+        return self.review(i, f, g, header_summary(self.repo, state, i, text)[0])
+
+    def review(self, i: str, f: Path, g: dict, summary: str | None) -> bool:
+        key = report_key(f, f.read_text())
+        result, lines = self.start_review(i, key)
+        if result == "busy":  # retried next pass on this same gate, as the gate loop retries a send
+            self.gates.deferred[i] = (key, (g["after"]["head"], g["after"]["paths"]), g)
+            (self.seen / i).unlink(missing_ok=True)
+            self.notes.pop(i, None)
+            return False
+        if result == "gone":  # its writer stopped without a review: the lead gets the hand-back as wait --gate gives it
+            return True
+        self.gates.deferred.pop(i, None)
+        if result == "refused":
+            self.note(i, "supervise did not start its review (below)")
+            self.lines[i] = [f"REVIEW-REFUSED {i}: fleet review refused: {lines[0]}", *lines[1:]]
+            return True
+        self.notes.pop(i, None)
+        if result == "started":  # stale (a new hand-back comes back on the next scan) and done need nothing
+            started = next((x[len("REVIEW "):] for x in lines if x.startswith("REVIEW ")), "a reviewer")
+            diff = next((x[len("DIFF "):] for x in lines if x.startswith("DIFF ")), None)
+            self.actions.append(f"REVIEWING {i}: {started}; gate {g['summary']}" + (f"; {summary}" if summary else "")
+                                + f"; report {f}" + (f"; diff {diff}" if diff else ""))
+            self.actions += [f"REVIEWING {i} note: {x}" for x in lines
+                             if not x.startswith(("REVIEW ", "DIFF ", f"{i}: "))]
+        return False
+
+    def start_review(self, i: str, key: str) -> tuple[str, list[str]]:
+        """fleet review's own code path for ticket `i`, under the lock taken without waiting. Inside it, run state
+        is reloaded and the hand-back re-checked, so a review the lead already started, or a new hand-back, is
+        never reviewed twice: ("busy",) the lead holds the lock; ("stale",) the report changed since its gate;
+        ("done",) a reviewer of this hand-back exists; ("gone",) its writer stopped; ("refused", error lines);
+        ("started", fleet review's lines)."""
+        with try_lock(self.repo) as held:
+            if not held:
+                return "busy", []
+            state = load_run(self.repo, self.run)
+            f = run_dir(self.repo, self.run) / "reports" / f"{i}.md"
+            if not f.exists() or report_key(f, f.read_text()) != key:
+                return "stale", []
+            review = latest_reviewer(state, i)
+            if any(w.get("review_of") == i for w in active(state)) or \
+                    review and review.get("launched_at", 0) >= f.stat().st_mtime:
+                return "done", []
+            if live_writer(self.repo, state, i) is None:
+                return "gone", []
+            args = argparse.Namespace(cmd="review", run=self.run, id=i, provider=None, model=None, effort=None,
+                                      family=None, reviewer=None, pane=None, settle=0, unowned_ok=None,
+                                      extra_round=None)
+            lines, error = captured(cmd_review, args, self.cfg)
+        if error:
+            return "refused", error.splitlines()
+        return "started", lines
+
+    def verdict(self, state: dict, rid: str, meta: dict, f: Path) -> None:
+        """READY or FINDINGS for the latest reviewer of an open ticket, from its report's `fleet` header. A header
+        that is missing or leaves something to judge gets neither: its REPORT line is the lead's to read."""
+        i = meta.get("review_of")
+        t = state["tickets"].get(i)
+        if not t or t["status"] in ("verified", "dropped") or (latest_reviewer(state, i) or {}).get("id") != rid:
+            return
+        text = f.read_text()
+        data, _ = parse_header(text)
+        findings = data.get("findings") if isinstance(data, dict) else None
+        family = meta.get("family") or "unknown family"
+        if isinstance(findings, list) and findings:
+            self.lines[rid] = [f"FINDINGS {i}: {severity_counts(findings)} ({rid}, {family}); decide each, then "
+                               "repair the writer or take a disputed one to the owner", *open_findings(self.repo, state, i)]
+            return
+        if why := header_doubts(self.repo, state, rid, text):
+            self.note(rid, f"not ready: {why}")
+            return
+        try:
+            stale = digest(scoped_diff(self.repo, state, i).encode()) != meta.get("diff_sha")
+        except (FleetError, OSError, KeyError, subprocess.TimeoutExpired):
+            stale = True
+        if stale:
+            self.note(rid, f"not ready: {i}'s files changed since the reviewed diff; fleet review {self.run} {i} again")
+            return
+        n = len(t.get("commands", []))
+        gate = (f"gate passed ({n}/{n})" if reusable_gate(self.repo, state, self.cfg, i) else
+                f"gate to run again ({n} check(s) changed or the tree moved since)") if n else "no planned commands"
+        self.lines[rid] = [f"READY {i}: {gate}, review clean ({family}, findings 0); fleet accept {self.run} {i}"
+                           + (" --gate" if n else "") + " --evidence <file>"]
+
+    # ---------- dispatch ----------
+
+    def unblocked(self, state: dict, before: set) -> tuple[list[str], list[str]]:
+        """The run's verified tickets, and the never-launched tickets one of them unblocked since `before` (the
+        verified tickets supervise has already dispatched for)."""
+        tickets = state["tickets"]
+        verified = sorted(i for i, t in tickets.items() if t["status"] == "verified")
+        new = set(verified) - before
+        return verified, [j for j, t in tickets.items() if t["status"] == "pending" and j not in state["workers"]
+                          and new & set(t["blockers"]) and all(tickets[b]["status"] == "verified"
+                                                               for b in t["blockers"])]
+
+    def dispatch(self, state: dict) -> None:
+        """Once the lead has verified a ticket, start the tickets that unblocked through launch --ready's own code
+        path, so blockers, files, max_parallel, each provider's max, the caps and a hold all apply as they do for
+        the lead. A lockless look first: the lock is taken, without waiting, only when launch --ready would start
+        one of them now. Under a hold, a busy lock, or no room yet, it looks again on a later pass. Inside the lock
+        run state is re-read, so a ticket the lead launched meanwhile is never launched again. The verified
+        tickets it is done with are kept in .seen, across supervise runs."""
+        marker = self.seen / "supervise.verified"
+        try:
+            before = set(json.loads(marker.read_text()))
+        except (OSError, ValueError, TypeError):
+            before = set()
+        verified, wanted = self.unblocked(state, before)
+        if not wanted:
+            if set(verified) != before:
+                marker.write_text(json.dumps(verified))
+            return
+        if load_hold(self.repo):
+            return
+        picked, _ = ready_tickets(state, load_live_state(self.repo, self.run), self.cfg,
+                                  run_dir(self.repo, self.run) / "prompts")
+        if not set(picked) & set(wanted):
+            return
+        with try_lock(self.repo) as held:
+            if not held:
+                return
+            state = load_run(self.repo, self.run)
+            _, wanted = self.unblocked(state, before)
+            if not wanted or load_hold(self.repo):
+                return
+            args = argparse.Namespace(cmd="launch", run=self.run, ready=True, resume=False, pane=None, id=None,
+                                      provider=None, tier=None, model=None, effort=None, family=None, settle=None,
+                                      extra_round=None)
+            lines, error = captured(launch_ready, args, self.cfg)
+            verified, still = self.unblocked(load_run(self.repo, self.run), before)
+            if error or not still:  # a refusal wakes the lead once; the lead decides what comes next
+                marker.write_text(json.dumps(verified))
+        self.actions += [x for x in lines if x.startswith("LAUNCHED ")]
+        self.actions += [x for x in lines if x.startswith("SKIPPED ") and x.split()[1].rstrip(":") in wanted]
+        if error:
+            self.lines["(dispatch)"] = [f"DISPATCH-REFUSED {', '.join(wanted)}: launch --ready refused: "
+                                        f"{one_line(error, 400)}"]
 
 
 def quit_keys(cfg: dict, w: dict) -> list[str]:
@@ -4715,6 +5028,7 @@ class GateLoop:
         self.deferred: dict[str, tuple[str, tuple, dict]] = {}
         self.notes: dict[str, str] = {}         # ticket -> the gate's words on its REPORT line
         self.lines: dict[str, list[str]] = {}   # ticket -> wake lines of the gate's own
+        self.results: dict[str, dict] = {}      # ticket -> the gate this pass ran or reused, for supervise
 
     def handle(self, state: dict, fresh: list) -> list:
         """Gate each fresh hand-back the loop may act on; returns the reports that still wake the lead."""
@@ -4747,6 +5061,7 @@ class GateLoop:
             g = run_gate(self.repo, state, self.cfg, i, out, loop=True)
             write_gate_record(self.repo, state, i, g, out)
             (self.seen / i).write_text(key)
+        self.results[i] = g
         for p in g["excused"]:  # what the commands wrote is no SCOPE line for this wake or a later one
             if p in g["after"]["paths"]:
                 mark_once(self.seen, scope_marker(p), g["after"]["paths"][p])
@@ -6301,6 +6616,20 @@ def cmd_smoke(a, cfg):
     return Smoke(a, scfg, names, routes, socket).run()
 
 
+def watch_args(s) -> None:
+    """The options wait and supervise share, so the lead's background-run pattern is the same for both."""
+    s.add_argument("run")
+    s.add_argument("--timeout", type=int, default=45,
+                   help=f"seconds, at most {WAIT_MAX}; use the longest your host's command tool allows")
+    s.add_argument("--interval", type=int, default=10)
+    s.add_argument("--stall", type=int, default=180,
+                   help=f"wake when a working worker's screen is unchanged this long (0 disables); a worker "
+                        f"launched in the last {LAUNCH_WATCH_S // 60} minutes wakes after {LAUNCH_STALL_S}")
+    s.add_argument("--settle", type=float, default=WAIT_SETTLE_S,
+                   help="after the first event, seconds to gather others that land with it "
+                        "(at most 30, never past --timeout; 0 returns at once)")
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "_run":
@@ -6508,21 +6837,21 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("wait", help="block until a report reaches needs-verification or blocked, or a worker "
                                     "exits, stalls, becomes unreachable, or (with hooks) shows a permission prompt "
                                     "or goes idle (exit 0), or timeout (exit 2)")
-    s.add_argument("run")
-    s.add_argument("--timeout", type=int, default=45,
-                   help=f"seconds, at most {WAIT_MAX}; use the longest your host's command tool allows")
-    s.add_argument("--interval", type=int, default=10)
-    s.add_argument("--stall", type=int, default=180,
-                   help=f"wake when a working worker's screen is unchanged this long (0 disables); a worker "
-                        f"launched in the last {LAUNCH_WATCH_S // 60} minutes wakes after {LAUNCH_STALL_S}")
+    watch_args(s)
     s.add_argument("--any-change", action="store_true", help="wake on any report change, whatever its status")
     s.add_argument("--gate", action=argparse.BooleanOptionalAction, default=None,
                    help="run a live writer's planned checks on its hand-back before waking you, and send a failure "
                         "back to it, up to defaults.gate_rounds times (default: defaults.gate, off)")
-    s.add_argument("--settle", type=float, default=WAIT_SETTLE_S,
-                   help="after the first event, seconds to gather others that land with it "
-                        "(at most 30, never past --timeout; 0 returns at once)")
     s.set_defaults(fn=cmd_wait)
+
+    s = sub.add_parser("supervise", help="wait in the background and take the mechanical steps the owner opted into "
+                                         "(gate, review, dispatch), waking you only for a judgment call or a ticket "
+                                         "ready to accept (exit 0), or timeout (exit 2)")
+    watch_args(s)
+    s.add_argument("--auto", metavar="STEPS",
+                   help=f"comma-separated steps from {', '.join(SUPERVISE_STEPS)} (default: defaults.supervise, "
+                        "gate); gate alone is wait --gate")
+    s.set_defaults(fn=cmd_supervise)
 
     s = sub.add_parser("stop", help="send each worker its quit sequence")
     s.add_argument("run")
@@ -6607,7 +6936,7 @@ def main(argv: list[str] | None = None) -> int:
             valid_id(a.id)
         if getattr(a, "run", None) is not None:  # agents may pick the latest run itself
             valid_id(a.run)
-        limit = WAIT_MAX if a.cmd == "wait" else 60
+        limit = WAIT_MAX if a.cmd in ("wait", "supervise") else 60
         if hasattr(a, "timeout") and not 0 <= a.timeout <= limit:
             raise FleetError(f"timeout must be between 0 and {limit} seconds")
         if getattr(a, "settle", None) is not None and not 0 <= a.settle <= 30:
