@@ -65,6 +65,7 @@ DEFAULTS = {
     # Paths the whole-tree scope check never blames on a worker, besides .fleet/ and gitignored files:
     # "name/" is a directory at any depth ("a/b/" is anchored at the root), anything else an exact path.
     "scope_ignore": [".scratch/", "node_modules/", "__pycache__/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/"],
+    "permission_ceiling": "workspace-write",  # the widest profile level launch will start; the owner's to raise
 }
 STATUS_RE = re.compile(r"^\s*[*_`]*\s*status\s*[*_`]*\s*:\s*[*_`]*\s*(.+?)\s*[*_`]*\s*$", re.I)
 SURFACE_RE = re.compile(r"(surface:\d+)(?: \(([^)\s]+)\))?")  # the UUID follows when cmux is asked for both
@@ -77,6 +78,12 @@ PROMPT_FIELDS = {  # optional per-ticket plan fields that complete a worker prom
 }
 TICKET_KINDS = ("implement", "investigate")  # investigate: read-only research or debugging; owns no files
 TIER_ORDER = ("heavy", "standard", "light")  # launch --ready takes consequential work first
+# What a launch lets a CLI do without the owner answering in its pane, narrowest first:
+# read-only changes nothing unasked, workspace-write edits the checkout, full-access runs anything.
+PERMISSION_LEVELS = ("read-only", "workspace-write", "full-access")
+PROFILES = ("worker", "review")  # worker: implementation tickets; review: reviewers and investigate tickets
+UNDECLARED_PROFILE = {"args": "", "level": "workspace-write"}  # an adapter written before profiles existed
+HELP_TIMEOUT_S = 10  # doctor's `<bin> --help`; a CLI that takes longer leaves its flags unverified
 PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
 TEMPLATE_KEYS = {"id", "ticket", "report", "repo", "files", "diff", "review_of", "handdown", "inbox", *PROMPT_FIELDS}
 HANDDOWN_LINES = 40  # of a blocker's report summary; past it, the dependent is pointed at the full report
@@ -134,6 +141,8 @@ def load_config(user_path: Path | None = None) -> dict:
             raise FleetError(f"defaults.{key} must be a whole number, or 0 for no cap")
     if not isinstance(cfg["defaults"]["auto_trust"], bool):
         raise FleetError("defaults.auto_trust must be true or false")
+    if cfg["defaults"]["permission_ceiling"] not in PERMISSION_LEVELS:
+        raise FleetError(f"defaults.permission_ceiling must be one of {', '.join(PERMISSION_LEVELS)} (narrowest first)")
     if cfg["defaults"]["backend"] not in ("auto", *BACKENDS):
         raise FleetError(f"defaults.backend must be auto, {' or '.join(BACKENDS)}")
     if not isinstance(cfg["defaults"]["tmux_socket"], str) or not re.fullmatch(r"[A-Za-z0-9_-]*", cfg["defaults"]["tmux_socket"]):
@@ -162,6 +171,14 @@ def load_config(user_path: Path | None = None) -> dict:
                 raise FleetError(f"{name}.{flag} must be true or false")
         if adapter.get("trust") not in (None, *TRUST_METHODS):
             raise FleetError(f"{name}.trust must be one of {', '.join(TRUST_METHODS)}")
+        profiles = adapter.get("profiles", {})
+        if not (isinstance(profiles, dict) and all(isinstance(v, dict) and isinstance(v.get("args", ""), str)
+                                                   and v.get("level") in PERMISSION_LEVELS for v in profiles.values())):
+            raise FleetError(f'{name}.profiles must be tables like worker = {{ args = "…", level = "workspace-write" }}, '
+                             f"each level one of {', '.join(PERMISSION_LEVELS)}")
+        aliases = adapter.get("bin_aliases", [])
+        if not (isinstance(aliases, list) and all(isinstance(b, str) for b in aliases)):
+            raise FleetError(f"{name}.bin_aliases must be a list of executable names")
     cfg["lead_context"] = lead_context_config(cfg.get("lead_context", {}))
     return cfg
 
@@ -255,16 +272,57 @@ def resumable(pcfg: dict) -> bool:
     return "{session}" in pcfg["launch"] and bool(pcfg.get("session")) and bool(pcfg.get("resume"))
 
 
+def launch_profile(meta: dict, ticket: dict | None) -> str:
+    """The profile a launch runs: `worker` for an implementation ticket, `review` for a reviewer or an investigate
+    ticket, which write only their report. Launch passes this name down to the adapter's launch line, so a role that
+    later gets a read-only mechanism (a headless run, a hook) changes its profile, not launch_one."""
+    if meta.get("role") == "implementation" and (ticket or {}).get("kind", "implement") == "implement":
+        return "worker"
+    return "review"
+
+
+def adapter_profile(pcfg: dict, profile: str) -> dict:
+    """A profile's launch fragment and level. A launch line without a {profile} slot (an owner's override from before
+    profiles) runs as written for every role, so it counts at the worker level; an adapter that declares no profiles
+    counts as workspace-write. A role the adapter leaves out runs as its worker."""
+    profiles = pcfg.get("profiles", {})
+    if "{profile}" not in pcfg.get("launch", "{profile}"):
+        return dict(profiles.get("worker", UNDECLARED_PROFILE), args="")
+    return dict(UNDECLARED_PROFILE, **profiles.get(profile, profiles.get("worker", {})))
+
+
+def ceiling_problem(cfg: dict, name: str, pcfg: dict, profile: str) -> str | None:
+    """Why the owner's permission_ceiling forbids this profile, or None. The level is the one the profile declares:
+    Fleet cannot see a CLI's own permission settings, so it never narrows or widens a launch to fit."""
+    ceiling = cfg.get("defaults", DEFAULTS).get("permission_ceiling", DEFAULTS["permission_ceiling"])
+    level = adapter_profile(pcfg, profile)["level"]
+    if PERMISSION_LEVELS.index(level) <= PERMISSION_LEVELS.index(ceiling):
+        return None
+    return (f"{name}'s {profile} profile is {level}, above permission_ceiling {ceiling}, so Fleet will not launch it. "
+            f"That is the owner's call: raise [defaults] permission_ceiling in {USER_CONFIG}, or narrow the CLI's "
+            f"own permissions and set providers.{name}.profiles.{profile}.level to match "
+            "(references/providers.md#permission-profiles). Until then route to another provider")
+
+
+def check_ceiling(cfg: dict, name: str, pcfg: dict, profile: str) -> None:
+    why = ceiling_problem(cfg, name, pcfg, profile)
+    if why:
+        raise FleetError(why)
+
+
 def build_launch(pcfg: dict, model: str, effort: str | None, prompt: str,
-                 session: str | None = None, resume: bool = False, trust: str = "") -> str:
+                 session: str | None = None, resume: bool = False, trust: str = "", profile: str = "worker") -> str:
     template = pcfg["launch"]
     if "{effort}" in template and not effort:
         raise FleetError("this provider's launch needs an effort: pass --effort or set it on the tier")
     flag = pcfg["resume" if resume else "session"].format(id=shlex.quote(session)) if session and resumable(pcfg) else ""
     if not flag:
         template = template.replace(" {session}", "").replace("{session}", "")
+    args = adapter_profile(pcfg, profile)["args"]  # trusted adapter config, like bin, so not quoted
+    if not args:
+        template = template.replace(" {profile}", "").replace("{profile}", "")
     return env_prefix(pcfg) + template.format(bin=pcfg["bin"] + (" " + trust if trust else ""), session=flag, model=shlex.quote(model),
-                                              effort=shlex.quote(effort or ""), prompt=shlex.quote(prompt))
+                                              effort=shlex.quote(effort or ""), prompt=shlex.quote(prompt), profile=args)
 
 
 # ---------- folder trust ----------
@@ -2365,6 +2423,8 @@ def launch_one(a, cfg) -> tuple[str, dict]:
                                meta_now.get("content_lead", 0))
     if unfilled:
         raise FleetError(f"fill {', '.join(unfilled)} in the prompt before launch")
+    profile = launch_profile(meta_now, state["tickets"].get(a.id))
+    check_ceiling(cfg, a.provider, pcfg, profile)
     w = state["workers"].get(a.id)
     if w and w.get("state") in ACTIVE_STATES:
         raise FleetError(f"worker {a.id} may still be running on {w['surface']}; stop or recover it first")
@@ -2462,7 +2522,8 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     token = uuid.uuid4().hex
     line = (resume_prompt_line(prompt_path, a.id, report, inbox_path(repo, a.run, a.id)) if a.resume
             else worker_prompt_line(prompt_path, a.id))
-    command = build_launch(pcfg, model, effort, line, session, a.resume, prepare_trust(cfg, a.provider, pcfg, repo))
+    command = build_launch(pcfg, model, effort, line, session, a.resume, prepare_trust(cfg, a.provider, pcfg, repo),
+                           profile)
     exit_file = d / "exits" / f"{a.id}.{token}.json"
     wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_run", str(exit_file), token, command])
     if meta["role"] != "implementation" and not a.resume:  # a launch that reaches the terminal is a round;
@@ -4231,6 +4292,7 @@ def review_fit(cfg: dict, routing: str, pool: dict | None, name: str, writer_fam
         check_allowed(pcfg, name, model)
         check_effort(pcfg, name, effort)
         check_pool(pool, name, model, "reviewer")
+        check_ceiling(cfg, name, pcfg, "review")
     except FleetError as e:
         return str(e), {}
     family = model_family(pcfg, "review", model, family)
@@ -4592,6 +4654,80 @@ def first_binary(bin_field: str) -> str:
     return tokens[0] if tokens else bin_field
 
 
+def launch_flags(pcfg: dict) -> list[str]:
+    """Every flag the adapter's launch can pass: its launch line, the profile fragments that line takes and the
+    session fragments, in order and without values (`--x=1` is `--x`)."""
+    launch = pcfg.get("launch", "")
+    parts = [launch]
+    if "{session}" in launch:
+        parts += [pcfg.get("session", ""), pcfg.get("resume", "")]
+    if "{profile}" in launch:
+        parts += [v.get("args", "") for v in pcfg.get("profiles", {}).values()]
+    flags = []
+    for part in parts:
+        try:
+            tokens = shlex.split(part)
+        except ValueError:
+            tokens = part.split()
+        for flag in (t.split("=", 1)[0] for t in tokens):
+            if re.fullmatch(r"--?[A-Za-z0-9][\w-]*", flag) and flag not in flags:
+                flags.append(flag)
+    return flags
+
+
+def help_commands(pcfg: dict) -> list[str]:
+    """`<bin> --help`, plus the subcommand's help when the launch line runs one (`{bin} exec …`)."""
+    commands = [f"{pcfg['bin']} --help"]
+    tokens = pcfg.get("launch", "").split()
+    if len(tokens) > 1 and tokens[0] == "{bin}" and re.fullmatch(r"[a-z][\w-]*", tokens[1]):
+        commands.append(f"{pcfg['bin']} {tokens[1]} --help")
+    return commands
+
+
+def flag_drift(pcfg: dict) -> tuple[list[str] | None, str]:
+    """Launch flags the CLI's own help does not mention, and the help commands read; None, with the reason, when the
+    help could not be read. Help that exits non-zero or prints nothing proves nothing, so it is not read."""
+    commands, texts = help_commands(pcfg), []
+    for command in commands:
+        try:
+            res = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=HELP_TIMEOUT_S,
+                                 stdin=subprocess.DEVNULL, env=child_env(pcfg))
+        except subprocess.TimeoutExpired:
+            return None, f"`{command}` took over {HELP_TIMEOUT_S}s"
+        except OSError as e:
+            return None, f"`{command}` could not run ({e})"
+        if res.returncode != 0 or not (res.stdout + res.stderr).strip():
+            return None, f"`{command}` " + (f"exited {res.returncode}" if res.returncode else "printed nothing")
+        texts.append(res.stdout + res.stderr)
+    text = "\n".join(texts)
+    missing = [f for f in launch_flags(pcfg) if not re.search(r"(?<![\w-])" + re.escape(f) + r"(?![\w-])", text)]
+    return missing, " and ".join(f"`{c}`" for c in commands)
+
+
+def profile_report(cfg: dict, name: str, p: dict, found: str) -> tuple[list[str], bool]:
+    """Doctor's lines on how an adapter launches: the binary found, each profile's level against the owner's ceiling,
+    and launch flags the CLI's help no longer lists. A profile above the ceiling fails doctor, as launch would refuse
+    it; flag drift only warns, because help text is not a contract."""
+    pad = " " * 14
+    ceiling = cfg.get("defaults", DEFAULTS).get("permission_ceiling", DEFAULTS["permission_ceiling"])
+    levels = ", ".join(f"{role} {adapter_profile(p, role)['level']}" for role in PROFILES)
+    note = "" if p.get("profiles") else " (none declared, so counted as workspace-write)"
+    if "{profile}" not in p.get("launch", "{profile}"):
+        note += " (the launch line has no {profile} slot, so every role runs it as written)"
+    lines = [f"{pad}bin {found}; profiles {levels}{note}; ceiling {ceiling}"]
+    above = [why for why in (ceiling_problem(cfg, name, p, role) for role in PROFILES) if why]
+    lines += [f"{pad}ABOVE CEILING: {why}" for why in above]
+    missing, where = flag_drift(p)
+    if missing is None:
+        lines.append(f"{pad}flags unverified: {where}")
+    elif missing:
+        lines += [f"{pad}WARNING: {flag} is not in {where}; check {name}'s launch line against this CLI version"
+                  for flag in missing]
+    else:
+        lines.append(f"{pad}flags listed by {where}")
+    return lines, not above
+
+
 def cmd_hold(a, cfg):
     repo = repo_root()
     since = (load_hold(repo) or {}).get("since") or time.strftime("%Y-%m-%dT%H:%M:%S")  # re-holding keeps it
@@ -4642,12 +4778,19 @@ def cmd_doctor(a, cfg):
             print(f"{name:<13} PLACEHOLDER: not a supported adapter; see references/providers.md#placeholder-adapters")
             continue
         binary = first_binary(p["bin"])
-        if not shutil.which(binary):
+        found = shutil.which(binary)
+        if not found:
             ok = False
-            print(f"{name:<13} MISSING binary '{binary}'")
+            alias = next((b for b in p.get("bin_aliases", []) if shutil.which(b)), None)
+            print(f"{name:<13} MISSING binary '{binary}'" + (
+                f" (found '{alias}', a name this CLI also installs as; the owner can set {name}'s bin, login and "
+                f"models to use it)" if alias else ""))
             continue
+        launch_lines, within = profile_report(cfg, name, p, found)
+        ok &= within
         if "login" not in p:
             print(f"{name:<13} installed (no login check defined)")
+            print(*launch_lines, sep="\n")
             continue
         try:
             res = subprocess.run(p["login"], shell=True, capture_output=True, text=True, timeout=60, env=child_env(p))
@@ -4662,10 +4805,12 @@ def cmd_doctor(a, cfg):
         tiers = ", ".join(f"{t}={v.get('model')}" for t, v in p.get("tiers", {}).items())
         if not ready:
             print(f"{name:<13} LOGIN CHECK FAILED  max={p.get('max', 2)}  {tiers}")
+            print(*launch_lines, sep="\n")
             continue
         missing, note = model_problems(p)
         ok &= not missing
         print(f"{name:<13} authenticated ({note})  max={p.get('max', 2)}  {tiers}")
+        print(*launch_lines, sep="\n")
     for (binary, account), same in accounts.items():
         if len(same) > 1:
             ok = False

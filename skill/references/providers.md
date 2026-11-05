@@ -18,6 +18,20 @@ What each shipped adapter was last checked against, from the changelog and the r
 
 `tests/test_adapters_smoke.py` runs every shipped adapter through `fleet launch`, `wait` and `stop` in headless tmux against a fake executable named after its `bin`, which accepts only the exact command line the adapter builds (model, effort, session and resume fragments, Codex's `-c` overrides, Cursor's `--trust`, OpenCode's `--prompt`) and quits only on the adapter's own quit sequence. Those tests use fakes: they prove the launch line's shape and the quit sequence, not that a CLI version accepts them, that the account is signed in or that a model is offered. Re-check a CLI live after it changes its flags, and update this table.
 
+### Profile flags checked
+
+What was checked on 2026-11-05 for the [launch profiles](#permission-profiles). Only Claude Code is installed where this was done; nothing was launched.
+
+| Adapter | Flags its launch line and profiles use | How they were checked |
+| --- | --- | --- |
+| `claude`, `claude-co` | `--session-id`, `--resume`, `--model`, `--effort`, `--permission-mode manual` | `claude --help` on 2.1.318: every flag listed, and `manual` is one of `--permission-mode`'s choices (`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`). The 2.1.318 binary's own mode table titles it "Manual" and stores it as `default`, the name older versions' `--help` used. `fleet doctor claude` printed `flags listed by claude --help`. |
+| `codex` | `-m`, `-c`, `-s workspace-write`, `-a on-request` | Read, not run, in the Codex source at commit `9ff072d` (2026-11-04): `utils/cli/src/shared_options.rs` (`-m, --model`; `-s, --sandbox` with `read-only`, `workspace-write`, `danger-full-access`), `tui/src/cli.rs` (`-a, --ask-for-approval`: `on-request` or `never`), `utils/cli/src/config_override.rs` (`-c, --config`, global). No `codex --help` was run. |
+| `cursor` | `--model`, `--trust` | Not checked: no Cursor CLI here. **`--trust` in the interactive TUI is unverified**: it is in the shipped line and the smoke fake accepts it, but no real Cursor run has shown that the TUI honours it rather than rejecting or ignoring it. Check it with the `fleet smoke` path (#32) on a machine with Cursor signed in, and record the result here. Cursor's docs also name the CLI `agent`; that was not checked either, and doctor only names `agent` when `cursor-agent` is missing. |
+| `agy` | `--model`, `--effort`, `--mode accept-edits`, `-i` | Unchanged since the 1.3.0 live check and the 1.4.8 `--help` listing; not re-checked. |
+| `opencode` | `--model`, `--prompt` | Unchanged since the 1.18.34 live check. Its docs (opencode.ai) were unreachable from this session, so no narrower agent for reviewers was checked and none is shipped. |
+
+`fleet doctor` repeats the help check on the owner's machine for every enabled adapter (see [below](#permission-profiles)), which is how drift in a newer CLI shows up.
+
 ## Turning providers on and off
 
 Which providers are on is the owner's decision. `fleet doctor` shows each one as `off`, as a sign-in result, or as `PLACEHOLDER`.
@@ -70,6 +84,37 @@ Claude Code, Codex and Antigravity ask once per folder whether to trust it. With
 
 Cursor always launches with `--trust`; OpenCode asks nothing. Launch never creates a CLI's file: a CLI that has not run yet, or a file it cannot read or write, gets one stderr line and the worker shows its trust screen as before. `auto_trust` is the owner's decision. The lead never turns it on, and never answers a trust, login or permission prompt with `fleet send`.
 
+## Permission profiles
+
+Each adapter launches a role through a profile. `profiles.worker` runs implementation tickets. `profiles.review` runs reviewers and investigate tickets, which write only their report. A profile has `args`, the fragment that fills the launch line's `{profile}` slot (dropped when empty), and a `level`, what that launch lets the CLI do without the owner answering in its pane:
+
+| Level | Meaning |
+| --- | --- |
+| `read-only` | Changes nothing unasked: every edit, and every command that is not read-only, waits for the owner. |
+| `workspace-write` | Edits files in the checkout without asking; commands that could reach further run in a sandbox or wait for the owner. |
+| `full-access` | Edits and runs any command without asking. |
+
+`[defaults] permission_ceiling` (default `workspace-write`) is the widest level Fleet will start. `fleet launch` (and the reviewer `fleet review` picks) refuses a profile above it, naming the adapter, the profile and the ceiling, before it touches the run. `fleet doctor` fails an enabled adapter with such a profile. Raising the ceiling is the owner's decision; the lead never edits it, and never routes to another provider just to get under it without telling the owner.
+
+| Adapter | `worker` | `review` | Why |
+| --- | --- | --- | --- |
+| `claude`, `claude-co` | no flag, `workspace-write` | `--permission-mode manual`, `read-only` | Workers keep the account's `permissions.defaultMode`, as before. Reviewers pin manual mode, so a looser `defaultMode` (such as `acceptEdits`) never reaches them; Claude then asks before each edit and command, the report write included, and the owner answers. Allow rules in Claude's settings still apply in manual mode. Manual mode is the most a Claude TUI reviewer can be narrowed and still write its report. |
+| `codex` | `-s workspace-write -a on-request`, `workspace-write` | the same | A TUI reviewer must write its report. Under `-s read-only` that write, and any check that writes a cache, would wait for an approval, so review runs the worker's sandbox and only the review contract keeps it to its report. |
+| `cursor` | no flag, `workspace-write` | the same | Edits apply without asking; commands ask unless Cursor's own config allows them (Fleet never passes `--force`). No checked interactive mode both stops edits and lets a reviewer write its report. |
+| `agy` | `--mode accept-edits`, `workspace-write` | the same | Edits are approved automatically, shell commands ask. No other mode was checked. |
+| `opencode` | no flag, `full-access` | the same | Its default build agent runs every tool without asking, so the default ceiling refuses it ([below](#opencode)). |
+
+Levels are what the launch Fleet builds asks for over the CLI's own default settings. A CLI's own configuration can still widen or narrow that (Claude's settings, Cursor's CLI config, `opencode.json`), and doctor does not read it. If you widen a CLI there, raise its profile's `level` to match; if you narrow it, you may lower it. No level loosens the worker rules: whatever the level, a worker never makes network calls, installs packages, reads secrets or touches Git, and a reviewer writes only its report. Those are instructions, not OS isolation; read-only reviewers by mechanism (headless runs, Claude hooks) will come through the review profile.
+
+An owner override of `launch` written before profiles, with no `{profile}` slot, keeps working: every role runs that line as written, and it counts at the worker profile's level. An adapter that declares no profiles counts as `workspace-write`. To change one field, override just that key:
+
+```toml
+[providers.opencode.profiles.worker]
+level = "workspace-write"   # only after setting `permission` in opencode.json so bash and webfetch ask
+```
+
+Doctor prints, for each enabled adapter, the binary it found, each profile's level and the ceiling. It also runs `<bin> --help` (and the launch's subcommand help, when the launch line runs one) with a 10-second timeout and warns, naming the adapter and flag, when a flag the launch line, its session fragments or its profiles use is missing from that text. A warning never fails doctor: help text is not a contract, so check the flag against the CLI's docs and a real launch. Help that exits non-zero, prints nothing or times out shows `flags unverified`. A missing binary still fails; for Cursor, doctor also names `agent` if that is what is installed (`bin_aliases`), and the owner then sets `bin`, `login` and `models` to it.
+
 ## Keeping models current
 
 Tier models are pinned on purpose: plans record the exact model and cross-family review needs a known family. When a provider ships new models, `fleet models <provider> [filter]` lists what the account offers, then override the tier in the user config (with `family` for a mixed adapter) and run `fleet doctor`. No Fleet release is needed. Shipped defaults are refreshed in releases and noted in the changelog.
@@ -94,7 +139,7 @@ Codex's list comes from `codex debug models`, a debug command that refreshes its
 
 ## Claude Code
 
-The default `claude` adapter uses the normal account and interactive permission controls. `opus`, `sonnet` and `fable` are aliases for the newest model of each line; pin a full ID such as `claude-opus-5-5` when the plan must record an exact version. Effort support depends on the installed CLI and model. Do not respond to a permission denial by switching account or bypassing the host's controls.
+The default `claude` adapter uses the normal account and interactive permission controls. Its reviewers and investigators launch with `--permission-mode manual`, so they ask before writing even their report when the account's settings would accept edits; expect a `STALLED` reviewer at a permission prompt that the owner answers ([profiles](#permission-profiles)). `opus`, `sonnet` and `fable` are aliases for the newest model of each line; pin a full ID such as `claude-opus-5-5` when the plan must record an exact version. Effort support depends on the installed CLI and model. Do not respond to a permission denial by switching account or bypassing the host's controls.
 
 `claude-co` is a disabled example of a second account using `CLAUDE_CONFIG_DIR=~/.claude-co`. Turn it on with `fleet provider enable claude-co` only after the owner has signed that account in. It must receive a self-contained prompt; do not assume the same plugins exist under both configurations. Both accounts use Anthropic-family models, so switching between them does not satisfy cross-family review.
 
@@ -117,14 +162,16 @@ max = 1
 
 ## Codex
 
-The example adapter uses `workspace-write` with `on-request` approval. Effective network and filesystem permissions still come from the host configuration; neither the adapter nor the preamble guarantees OS isolation. Fleet's worker contract prohibits network calls and package installation regardless of those capabilities. Request owner help for a necessary permission instead of weakening the sandbox.
+Both of the example adapter's [profiles](#permission-profiles) use `workspace-write` with `on-request` approval. Effective network and filesystem permissions still come from the host configuration; neither the adapter nor the preamble guarantees OS isolation. Fleet's worker contract prohibits network calls and package installation regardless of those capabilities. Request owner help for a necessary permission instead of weakening the sandbox.
 
 A Codex worker that needs an approval waits in its pane until the owner answers, because the lead never accepts a prompt for them. Codex 0.159+ can route those prompts to its own reviewer instead: `approvals_reviewer = "auto_review"` (`--approve-for-me` on the command line). It reviews sandbox escalations against the policy and does not widen what the sandbox allows. It is the owner's choice, made once in the user config rather than per run, and it is not a way past a decision the owner owes:
 
 ```toml
 [providers.codex]
-launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c check_for_update_on_startup=false -c approvals_reviewer=auto_review -s workspace-write -a on-request {prompt}"
+launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c check_for_update_on_startup=false -c approvals_reviewer=auto_review {profile} {prompt}"
 ```
+
+An older copy of this line that spells out `-s workspace-write -a on-request` instead of `{profile}` still works; both roles then run it as written.
 
 This is approval routing inside Codex. It is unrelated to Fleet's cross-family review of a ticket's diff, which `review=` controls.
 
@@ -132,7 +179,7 @@ Use model IDs and effort levels supported by the authenticated account. The ship
 
 ## Cursor
 
-The default launches `cursor-agent` with the chosen model and repository trust, retaining interactive permission handling; it does not use `--force`. `--trust` is in the shipped launch line, so Cursor is trusted with or without `auto_trust`. A trusted workspace is not permission for an arbitrary command. Inspect trust or command prompts as part of launch verification.
+The default launches `cursor-agent` with the chosen model and repository trust, retaining interactive permission handling; it does not use `--force`. `--trust` is in the shipped launch line, so Cursor is trusted with or without `auto_trust`; that the interactive TUI honours it is [unverified](#profile-flags-checked). A trusted workspace is not permission for an arbitrary command. Inspect trust or command prompts as part of launch verification.
 
 Cursor can serve several families. The example tiers identify xAI (`grok-…`), Moonshot (`kimi-…`) and Meta (`muse-…`) separately. The lead may choose any model `cursor-agent --list-models` offers (`fleet models cursor gemini` filters them); `family_prefixes` names each one's family. Parameterized IDs must remain a single argument. A model whose name hides its base model needs an exact family entry, especially for cross-family review. A different CLI name alone is not evidence of a different family.
 
@@ -153,7 +200,7 @@ Cursor can serve several families. The example tiers identify xAI (`grok-…`), 
 - Model IDs are `provider/model`. The shipped tiers and login check assume OpenRouter (`opencode auth login`). `opencode models` lists only providers with credentials, so `login = "opencode models openrouter"` with `login_ok = "openrouter/"` is a real sign-in check; point both at the provider you use.
 - It serves many families, so the adapter is `mixed`: every tier carries its family, and `family_prefixes` names the rest by vendor path. Every model `opencode models` lists may be chosen. The shipped tiers use Zhipu, Alibaba and DeepSeek models, which gives cross-family review options outside Anthropic, OpenAI and Google.
 - Effort: the TUI takes no `--variant` (only `opencode run` does), so tiers carry no effort.
-- Permissions: OpenCode's default build agent allows every tool without asking, except paths outside the workspace and repeated identical calls (`opencode debug agent build` shows the resolved rules). Fleet's worker contract is the only limit unless your `opencode.json` sets `permission`; tighten it there, not in the adapter.
+- Permissions: OpenCode's default build agent allows every tool without asking, except paths outside the workspace and repeated identical calls (`opencode debug agent build` shows the resolved rules). Fleet's worker contract is the only limit unless your `opencode.json` sets `permission`; tighten it there, not in the adapter. So both its [profiles](#permission-profiles) are `full-access`, and with the default `permission_ceiling` launch refuses OpenCode and `fleet doctor opencode` fails. The owner chooses one: set `permission` in `opencode.json` (edits allowed, `bash` and `webfetch` set to `ask`) and then `level = "workspace-write"` on its profiles, or raise `permission_ceiling` to `full-access`. Fleet ships no narrower profile because it cannot see `opencode.json` from the launch line, and no read-only agent for reviewers was checked against a real OpenCode.
 - Its sessions get IDs OpenCode picks, so `fleet launch --resume` does not apply.
 
 ## Placeholder adapters
@@ -173,7 +220,8 @@ To turn a placeholder into a working adapter, the owner fills it in under `[prov
 4. Set `login` and `login_ok` to a command that spends no model call and prints a known string only when signed in.
 5. Set `models` if the CLI can list models; otherwise set `models_allow`.
 6. Add `tiers.heavy`, `tiers.standard`, `tiers.light` and `tiers.review` with models the account offers, plus `efforts` if the CLI takes one and `family` (on each tier for a mixed adapter).
-7. Set `placeholder = false`, then run `fleet provider enable <name>` and `fleet doctor <name>`.
+7. Put a `{profile}` slot in `launch` and set `profiles.worker` and `profiles.review`, each with its permission flags in `args` and an honest `level` ([permission profiles](#permission-profiles)). Without them it counts as `workspace-write`.
+8. Set `placeholder = false`, then run `fleet provider enable <name>` and `fleet doctor <name>`.
 
 Then test it as below before routing real work to it.
 

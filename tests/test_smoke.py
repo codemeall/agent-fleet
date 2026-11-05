@@ -48,7 +48,15 @@ def expectation(name: str) -> dict:
     p = SHIPPED["providers"][name]
     heavy, review = fleet.resolve_model(p, "heavy", None, None), fleet.resolve_model(p, "review", None, None)
     assert heavy == review, f"{name}: the smoke tests assume one model for writer and reviewer"
-    return {"model": heavy[0], "effort": heavy[1], "session": "new" if fleet.resumable(p) else None, "account_dir": None}
+    modes = {profile_mode(p, role) for role in ("worker", "review")}  # one fake serves the writer and the reviewer
+    return {"model": heavy[0], "effort": heavy[1], "session": "new" if fleet.resumable(p) else None, "account_dir": None,
+            **({"permission_modes": sorted(modes, key=str)} if modes != {None} else {})}
+
+
+def profile_mode(p: dict, role: str) -> str | None:
+    """The --permission-mode a shipped profile passes, or None when it passes none."""
+    args = p.get("profiles", {}).get(role, {}).get("args", "").split()
+    return args[args.index("--permission-mode") + 1] if "--permission-mode" in args else None
 
 
 class SmokeConfig(unittest.TestCase):

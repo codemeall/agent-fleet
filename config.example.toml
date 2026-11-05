@@ -16,6 +16,9 @@ review = "cross-heavy"
 # Mark the repo trusted in Claude, Codex and Antigravity before each launch, so their first-run
 # "trust this folder?" screen does not stall a worker. Off by default; only the owner turns it on.
 # auto_trust = true
+# The widest launch profile Fleet will start: "read-only", "workspace-write" (the default) or "full-access".
+# Launch refuses, and doctor fails, a provider profile above it; OpenCode's build agent is full-access.
+# permission_ceiling = "workspace-write"
 # Where workers run: "cmux" (visible panes beside the lead, macOS), "tmux" (headless windows in a detached
 # session; watch them with `fleet agents`) or "auto" (the default: cmux inside cmux, else tmux).
 # backend = "tmux"

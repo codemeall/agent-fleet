@@ -23,13 +23,15 @@ from pathlib import Path
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")  # `claude --help`
+CLAUDE_MODES = ("acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan")  # `claude --help` 2.1.318
 AGY_EFFORTS = ("low", "medium", "high", "xhigh", "max")  # `agy --help`
 CODEX_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
 # Per CLI: the flags it is launched with (name -> takes a value), where the prompt goes, the quit command and
 # the account-directory variable its adapter clears or sets.
 GRAMMAR = {
-    "claude": {"flags": {"--session-id": True, "--resume": True, "--model": True, "--effort": True},
+    "claude": {"flags": {"--session-id": True, "--resume": True, "--model": True, "--effort": True,
+                         "--permission-mode": True},
                "prompt": "positional", "quit": "/exit", "account": "CLAUDE_CONFIG_DIR"},
     "codex": {"flags": {"-m": True, "-c": True, "-s": True, "-a": True},
               "prompt": "positional", "quit": "/quit", "account": "CODEX_HOME"},
@@ -89,6 +91,16 @@ def check(cli: str, flags: dict, positional: list[str], want: dict) -> str:
     if cli == "claude":
         one(flags, "--model", model)
         one(flags, "--effort", effort, CLAUDE_EFFORTS)
+        mode = want.get("permission_mode")  # the review profile pins one; a worker gets none
+        roles = want.get("permission_modes")  # one fake shared by a writer and a reviewer: either role's mode
+        if roles is not None:
+            given = flags.get("--permission-mode", [None])[0]
+            if given not in roles:
+                raise Refused(f"--permission-mode {given!r}, expected one of {roles!r}")
+        elif mode is None and "--permission-mode" in flags:
+            raise Refused("unexpected --permission-mode")
+        elif mode is not None:
+            one(flags, "--permission-mode", mode, CLAUDE_MODES)
         session = want.get("session")  # "new", "resume" or None (no session fragment at all)
         given = [f for f in ("--session-id", "--resume") if f in flags]
         if session is None and given:

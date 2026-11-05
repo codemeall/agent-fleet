@@ -178,7 +178,7 @@ class AdapterSmoke(FleetCase):
         self.assertEqual(len(self.calls("agy")), 1)
 
     def test_opencode(self):
-        self.launch_report_stop("opencode")
+        self.launch_report_stop("opencode", 'permission_ceiling = "full-access"')  # its build agent asks nothing
         self.assertEqual(self.calls("opencode")[0]["argv"][2], "--prompt")
 
     def test_claude_resume(self):
