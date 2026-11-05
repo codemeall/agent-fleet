@@ -161,7 +161,7 @@ class AdapterSmoke(FleetCase):
         self.assertEqual(len(self.calls("claude-co")), 1)
 
     def test_codex(self):
-        self.launch_report_stop("codex")
+        self.launch_report_stop("codex", notify=True)  # the fake requires Fleet's exact -c notify program
         self.assertEqual(len(self.calls("codex")), 1)
 
     def test_codex_with_auto_trust(self):

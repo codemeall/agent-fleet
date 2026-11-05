@@ -14,6 +14,11 @@ Claude's `--settings <file>` must name a file that parses to a settings object; 
 Claude Code would: PreToolUse (Write) before each file it writes, refusing to write when a hook exits 2, and Stop
 after its report. An expectation with "settings": true also requires the flag.
 
+Codex's `-c notify=[...]` must parse as TOML to Fleet's exact program (`<python> <fleet> _notify <this ticket's events
+file> <token>`); the fake runs it after its turn as Codex does, with the agent-turn-complete JSON as the last
+argument. "notify": true requires it, false refuses it. "turn_message" makes the turn end with that message and no
+report, as a worker that asks a question in its pane instead of handing back.
+
 A warm worker (`fleet launch --after`) gets Fleet's continuation line instead of the worker line; the fake accepts it
 only when the expectation's "warm_after" names that earlier ticket, the line names this ticket's own prompt, inbox
 and report, and the session is resumed (--resume), and it refuses a warm line nobody expected. A --resume of a
@@ -28,6 +33,7 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 import uuid
 from pathlib import Path
 
@@ -146,6 +152,43 @@ def fake_write(path: Path, text: str) -> bool:
     return True
 
 
+NOTIFY = []  # codex's notify program, once its -c override parsed
+
+
+def codex_notify(value: str) -> list[str]:
+    """Codex parses a -c value as TOML (codex-rs/utils/cli/src/config_override.rs) and `notify` must be an array of
+    strings (config_toml.rs). Fleet's is exactly <python> <fleet> _notify <events file> <token>, with absolute paths
+    to files that exist (the events file's folder) and an events file named <ticket>.jsonl under events/."""
+    try:
+        argv = tomllib.loads("notify = " + value)["notify"]
+    except tomllib.TOMLDecodeError as e:
+        raise Refused(f"-c notify value {value!r} is not TOML: {e}") from None
+    if not (isinstance(argv, list) and len(argv) == 5 and all(isinstance(a, str) for a in argv)):
+        raise Refused(f"-c notify {argv!r} is not [python, fleet, _notify, events file, token]")
+    python, fleet, sub, events, token = argv
+    if sub != "_notify" or not re.fullmatch(r"[0-9a-f]{32}", token):
+        raise Refused(f"-c notify {argv!r} does not run `fleet _notify <events file> <token>`")
+    for path in (python, fleet):
+        if not (os.path.isabs(path) and os.path.isfile(path)):
+            raise Refused(f"-c notify program {path!r} is not an absolute path to a file")
+    if not (os.path.isabs(events) and Path(events).parent.name == "events" and Path(events).parent.is_dir()
+            and events.endswith(".jsonl")):
+        raise Refused(f"-c notify events file {events!r} is not under an events/ folder")
+    return argv
+
+
+def codex_turn_complete(message: str, ticket: str) -> None:
+    """Run the notify program as Codex does after a turn (legacy_notify.rs): its argv plus the agent-turn-complete
+    JSON as one last argument, stdin, stdout and stderr null, and an environment Codex rebuilt (here a bare PATH)."""
+    if not NOTIFY:
+        return
+    payload = {"type": "agent-turn-complete", "thread-id": "b5f6c1c2-1111-2222-3333-444455556666",
+               "turn-id": "1", "cwd": os.getcwd(), "client": "codex-tui",
+               "input-messages": [f"Read the prompt for {ticket}."], "last-assistant-message": message}
+    subprocess.run([*NOTIFY, json.dumps(payload)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, env={"PATH": "/usr/bin:/bin"}, timeout=30)
+
+
 def check(cli: str, flags: dict, positional: list[str], want: dict) -> str:
     """The prompt argument, once every flag matches what the adapter should have built."""
     model, effort = want["model"], want.get("effort")
@@ -192,6 +235,12 @@ def check(cli: str, flags: dict, positional: list[str], want: dict) -> str:
         expected = {"model_reasoning_effort": effort, "check_for_update_on_startup": "false"}
         if want.get("trust_repo"):
             expected["projects"] = "{" + json.dumps(want["trust_repo"]) + '={trust_level="trusted"}}'
+        if "notify" in overrides:
+            if want.get("notify") is False:
+                raise Refused("unexpected -c notify")
+            NOTIFY[:] = codex_notify(overrides.pop("notify"))
+        elif want.get("notify"):
+            raise Refused("missing -c notify=[...]")
         if overrides != expected:
             raise Refused(f"-c overrides {overrides}, expected {expected}")
         if effort not in CODEX_EFFORTS:
@@ -218,7 +267,8 @@ def check(cli: str, flags: dict, positional: list[str], want: dict) -> str:
 def prompt_file(prompt: str) -> tuple[str, Path, bool, str | None]:
     """The ticket ID, its Fleet prompt file, whether this is a resume, and the earlier ticket a warm worker
     continues after (launch --after), from the launch prompt argument."""
-    m = re.fullmatch(r"Read (\S+) and follow it exactly\. You are fleet worker (\S+)\. .*", prompt, re.S)
+    # The prompt file's path may hold spaces (tests/test_signals.py runs in such a repo).
+    m = re.fullmatch(r"Read (\S.*?) and follow it exactly\. You are fleet worker (\S+)\. .*", prompt, re.S)
     resumed = re.fullmatch(r"Continue as fleet worker (\S+) from where you stopped;.* Check the end of (\S+) for .*",
                            prompt, re.S)
     warm = re.fullmatch(r"Fleet ticket (\S+) is closed: it was verified, so leave its work as it is\. You are now "
@@ -267,6 +317,8 @@ def main() -> int:
             raise Refused(f"warm line after {after!r}, expected {want.get('warm_after')!r}")
         if after and "--resume" not in flags:
             raise Refused("a warm line without --resume would start a new session")
+        if NOTIFY and Path(NOTIFY[3]).name != f"{ticket}.jsonl":
+            raise Refused(f"-c notify events file {NOTIFY[3]!r} is not ticket {ticket}'s")
         account = GRAMMAR[cli].get("account")
         if account and os.environ.get(account) != want.get("account_dir"):
             raise Refused(f"{account}={os.environ.get(account)!r}, expected {want.get('account_dir')!r}")
@@ -288,6 +340,9 @@ def main() -> int:
         return 1
     if cli in os.environ.get("FAKE_CLI_STALL", "").split(","):
         print(f"fake {cli} is waiting at a sign-in prompt", flush=True)
+    elif want.get("turn_message"):  # a turn that ends with a question in the pane instead of a hand-back
+        print(f"fake {cli}: {want['turn_message']}", flush=True)
+        codex_turn_complete(want["turn_message"], ticket)
     else:
         smoke_edit(ticket, text)
         how = " (resumed)" if resume else f" (warm, after {after})" if after else ""
@@ -297,6 +352,7 @@ def main() -> int:
         run_hooks("Stop", {"session_id": "fake", "hook_event_name": "Stop", "stop_hook_active": False,
                            "last_assistant_message": f"Report written for {ticket}.", "background_tasks": [],
                            "session_crons": []})
+        codex_turn_complete(f"Report written for {ticket}.", ticket)
         print(f"fake {cli} working on {ticket}", flush=True)
     quit_word = GRAMMAR[cli]["quit"]
     for line in sys.stdin:
