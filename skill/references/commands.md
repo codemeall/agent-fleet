@@ -25,6 +25,7 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`send`](#send) | Saves a message in the ticket's inbox and points the worker to it | Answering a blocked worker or requesting changes |
 | [`wait`](#wait) | Blocks until something needs the lead; with `--gate`, sends failing checks back to the worker first | Between actions, while workers run |
 | [`status`](#status) | Lists workers and report statuses | You need a snapshot after `EXITED` or a recovery |
+| [`cost`](#cost) | Shows each ticket's worker launches, wall time and tokens, and the run's caps | Reporting a wave's outcome, or a launch refused at a cap |
 | [`review`](#review) | Stops the writer, saves its diff and launches a reviewer from another family | A writer hands back on a ticket that needs review |
 | [`accept`](#accept) | Stops the ticket's workers, verifies the reviewer then the writer, and lists what that unblocks | Your checks and any review are done and the evidence is written |
 | [`stop`](#stop) | Quits workers and confirms they exited | Before review or verification, or before shutdown |
@@ -114,7 +115,7 @@ Adds a provider that reuses an adapter (`claude`, `codex`) with its own account 
 fleet init <run> [--backend auto|cmux|tmux] [--workspace <ref>] [--routing <mode>] [--review off|cross-heavy|cross-all] [--reason "<owner's words>"]
 ```
 
-Creates `.fleet/runs/<run>/`, adds it to `.fleet/.gitignore`, and records the HEAD and index baseline. It picks the run's terminal backend, which the run keeps: `--backend`, else `defaults.backend`, else `auto`, which uses cmux inside cmux or when a workspace is named, and headless tmux otherwise. A tmux run gets its own detached session (`fleet-<checkout>-<run>-<hash>`) on Fleet's tmux server (`tmux -L fleet`; `defaults.tmux_socket` changes it) and init prints the `fleet agents` line to relay to the owner. For a cmux run it validates the workspace (`--workspace`, the config default, or the current one) and stores its UUID, because cmux renumbers refs like `workspace:2` when it restarts. It refuses if the run already exists, or if another run in this checkout still has live workers. Under `cross-all` it also refuses when the routing pool alone shows no reviewer could ever differ from a writer's family, for example `single:<provider>` with a single-family adapter; under `cross-heavy` it warns that plan will refuse heavy tickets. `--review off` while the config asks for review needs `--reason` with the owner's words, which the run's decisions keep: review is never turned off silently.
+Creates `.fleet/runs/<run>/`, adds it to `.fleet/.gitignore`, and records the HEAD and index baseline. It picks the run's terminal backend, which the run keeps: `--backend`, else `defaults.backend`, else `auto`, which uses cmux inside cmux or when a workspace is named, and headless tmux otherwise. A tmux run gets its own detached session (`fleet-<checkout>-<run>-<hash>`) on Fleet's tmux server (`tmux -L fleet`; `defaults.tmux_socket` changes it) and init prints the `fleet agents` line to relay to the owner. For a cmux run it validates the workspace (`--workspace`, the config default, or the current one) and stores its UUID, because cmux renumbers refs like `workspace:2` when it restarts. It refuses if the run already exists, or if another run in this checkout still has live workers. Under `cross-all` it also refuses when the routing pool alone shows no reviewer could ever differ from a writer's family, for example `single:<provider>` with a single-family adapter; under `cross-heavy` it warns that plan will refuse heavy tickets. `--review off` while the config asks for review needs `--reason` with the owner's words, which the run's decisions keep: review is never turned off silently. The run's options keep the config's `[defaults]` as they were at init, the [caps](#caps) `max_workers` and `max_wall_minutes` among them.
 
 **Use:** once per run. Map the owner's `backend=`, `workspace=`, routing (`auto`, `single:<provider>`, `agents=…`) and `review=` options to these flags. For an existing run, use `resume` instead.
 
@@ -209,7 +210,7 @@ fleet launch <run> <id> <provider> --tier heavy|standard|light|review
 fleet launch <run> --ready [--pane <ref|uuid|index>]
 ```
 
-Starts the worker in its own cmux pane, or its own window of the run's tmux session, with the prompt. The provider, tier and pins must match the saved plan; a steer (see `steer`) may change the provider and model, and launch prints `steered (<tier>): …`. Launch enforces blockers, file ownership, capacity, any hold and the ticket's [review rounds](#review-rounds). If a blocker was verified after the ticket's prompt was written, launch still starts the worker but warns on stderr that the prompt does not hand down that blocker's work; regenerate it with `fleet prompt <run> <id> --force` before the next launch. `--ready` writes a missing prompt itself, so that one is current; it does not rewrite one you wrote earlier.
+Starts the worker in its own cmux pane, or its own window of the run's tmux session, with the prompt. The provider, tier and pins must match the saved plan; a steer (see `steer`) may change the provider and model, and launch prints `steered (<tier>): …`. Launch enforces blockers, file ownership, capacity, any hold, the run's [caps](#caps) and the ticket's [review rounds](#review-rounds). Each launch, `--resume` included, adds an entry to the run's [ledger](#cost). If a blocker was verified after the ticket's prompt was written, launch still starts the worker but warns on stderr that the prompt does not hand down that blocker's work; regenerate it with `fleet prompt <run> <id> --force` before the next launch. `--ready` writes a missing prompt itself, so that one is current; it does not rewrite one you wrote earlier.
 
 Under tmux each worker gets a new window, with no limit; the window stays after the worker exits, so its screen and scrollback stay readable until `stop --close`. Fleet strips the lead's session variables (such as `CLAUDECODE`) from the worker's environment.
 
@@ -324,9 +325,38 @@ Other tickets' events are picked up as soon as a gate finishes, and wake you tog
 fleet status <run> [--json]
 ```
 
-Reconciles exit receipts, then lists each worker's provider and model, pane, state and report status.
+Reconciles exit receipts, then lists each worker's provider and model, pane, state and report status, and how long its latest launch has run (`ran 12m`; to its confirmed exit once it has stopped).
 
 **Use:** after `EXITED`, after a recovery, or when you need a current table. `wait` covers routine watching.
+
+### cost
+
+```text
+fleet cost <run> [--json]
+```
+
+Prints one line per ticket from the run's ledger: worker launches (writers, investigators, and reviewers, which count toward the ticket they review), how many still run, wall time, and tokens. Then a `total:` line and the [caps](#caps) used against their limits:
+
+```text
+run demo cost, per ticket (a reviewer counts toward the ticket it reviews):
+  api-client   2 workers, wall 34m, tokens in 41.2K out 9.8K cache-read 2100K cache-write 88.0K (unknown for 1 of 2 workers)
+  settings     1 worker, 1 running, wall 6.5m, tokens unknown
+total: 3 workers, 1 running, wall 41m, tokens in 41.2K out 9.8K cache-read 2100K cache-write 88.0K (unknown for 2 of 3 workers)
+caps: max_workers 3/10, max_wall_minutes 41m (no cap)
+```
+
+The ledger lives in `run.json`, one entry per launch: ticket, role (`writer`, `reviewer` or `investigator`), provider, model, effort, tier, start, end and wall seconds. A relaunch or `--resume` adds an entry and never changes an earlier one. The end is the exit receipt's time, or the time of a `recover`; a running worker's wall time counts up to now. Tokens are read once the exit is confirmed, for a Claude worker only: from its own session log (found by its session ID under the adapter's `CLAUDE_CONFIG_DIR`, else `~/.claude`), its subagents included, summing input, output, cache-read and cache-write counts; a resumed session counts only the calls made during that launch. Every other worker's tokens are `unknown`, never zero, unless its CLI reported usage itself. A run started before the ledger gets an entry for each worker's latest launch. `--json` prints the per-ticket groups, totals, caps and every ledger entry.
+
+**Use:** when reporting a wave's outcome to the owner, and when a launch is refused at a cap.
+
+#### Caps
+
+Two keys under `[defaults]` in the owner's config limit a run; `fleet init` saves them with the run's options, so a run keeps the values it was started with. Both are whole numbers; 0, the default, or a missing key means no cap.
+
+- `max_workers`: worker launches per run, counting every writer, reviewer and investigator launch, relaunches and `--resume` included.
+- `max_wall_minutes`: the run's total worker wall time, summed over launches, running workers counted up to now.
+
+Once either is reached, `launch`, `launch --ready`, `review` (before it stops the writer) and `accept --launch-ready` refuse a new worker, naming the cap and the use so far. Running workers are never stopped. The ways out are the owner's: raise the key in their config, which applies to new runs, or start a follow-up run with `fleet init <new-run>` for the remaining work. Tell the owner; don't work around a cap.
 
 ## Review and acceptance
 
@@ -498,7 +528,7 @@ Reviewers and investigators own no files, so any change during their run counts.
 fleet resume <run> [--json]
 ```
 
-Reconciles exit receipts and prints the run's options, any active steer or hold, one line per ticket (with `rounds=<used>/<cap>` for a ticket that needs review or has had one, see [review rounds](#review-rounds)), the decisions, each worker's state, report and `pid`, and the path to `notes.md`. `--json` prints the full records. A run created before init stored the workspace's UUID gets a `workspace: … is a cmux ref` line: after a cmux restart, confirm the ref still names the run's workspace before launching.
+Reconciles exit receipts and prints the run's options, any active steer or hold, one line per ticket (with `rounds=<used>/<cap>` for a ticket that needs review or has had one, see [review rounds](#review-rounds)), the decisions, each worker's state, report and `pid`, a `cost:` totals line and the [caps](#caps) line from [`cost`](#cost), and the path to `notes.md`. `--json` prints the full records. A run created before init stored the workspace's UUID gets a `workspace: … is a cmux ref` line: after a cmux restart, confirm the ref still names the run's workspace before launching.
 
 **Use:** when the named run already exists, after a compaction (`LEAD compacted …`), and when starting as a fresh lead. Then read `notes.md` and handle what the latest `## Handoff` entry lists as awaiting you. Never `init` a replacement run.
 
