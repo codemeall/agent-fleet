@@ -97,6 +97,14 @@ Add `--launch-ready` to launch them at once, and `--gate` to run the ticket's pl
 
 **Findings to fix:** repair the writer within its assignment (example 6); when it reports `needs-verification` again, check it and run `fleet review settings api-client` again. That round's diff still runs from the writer's first launch, so it covers both rounds; until then, `accept` refuses the first review as stale. Then accept as above.
 
+**Out of rounds:** after `review_rounds` reviews (default 2), the next repair or review is refused with an `ESCALATE` block: the rounds used, the last reviewer's open findings and the owner's ways out ([review rounds](commands.md#review-rounds)). Stop and ask the owner. To accept as is, record the open findings and their decision in the evidence and `fleet accept`; to give up, `fleet drop settings api-client --reason "<owner's words>"`; to try once more, add their words to the refused command:
+
+```sh
+fleet launch settings api-client codex --tier heavy --extra-round "Owner: one more try at the 404 case"
+```
+
+That allows one more repair and its review; the next refusal needs the owner again.
+
 **The long form.** `review` and `accept` run these commands, which you can still use one at a time, for example to read the reviewer prompt before it launches:
 
 ```sh
@@ -143,7 +151,7 @@ Use this after `EXITED api-client`, or when a stopped worker needs fixes within 
    ## Repair
    Your earlier edits to src/api.ts are in place; keep them. Remaining: the 404 case and its test (review finding 1).
    ```
-3. `fleet launch settings api-client codex --tier heavy`. The previous report is kept as `reports/api-client.<hex>.previous`, and the diff baseline stays at the first launch.
+3. `fleet launch settings api-client codex --tier heavy`. The previous report is kept as `reports/api-client.<hex>.previous`, and the diff baseline stays at the first launch. Once the ticket's review rounds are used up, this launch is refused with the escalation for the owner (example 4, out of rounds).
 
 If the worker stopped on a usage limit and its adapter can resume (Claude), relaunch after the limit resets and add `--resume`: the worker continues its own session, so step 2 is only needed for new instructions.
 

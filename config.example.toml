@@ -5,6 +5,9 @@ routing = "auto"
 prefer = ["claude", "codex", "cursor"]
 max_parallel = 3
 review = "cross-heavy"
+# Reviewer launches per ticket (1 to 5). Past them, Fleet refuses the next repair or review and the lead brings
+# you the open findings: accept as is, drop the ticket, or allow one more round (--extra-round "<your words>").
+# review_rounds = 2
 # Mark the repo trusted in Claude, Codex and Antigravity before each launch, so their first-run
 # "trust this folder?" screen does not stall a worker. Off by default; only the owner turns it on.
 # auto_trust = true
