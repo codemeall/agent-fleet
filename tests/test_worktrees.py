@@ -241,6 +241,111 @@ class Isolation(WorktreeCase):
         self.assertIn("changed in the checkout since Fleet last merged this ticket", out)
         self.assertEqual((self.repo / "a.txt").read_text(), "the owner's own change\n")
 
+    def test_a_repair_after_the_owner_put_a_merged_file_back_conflicts_instead_of_recording_it(self):
+        """Final review, 3: a merged file the repair leaves alone must still hold what the merge recorded."""
+        (self.repo / "a.txt").write_text("a base\n")
+        (self.repo / "b.txt").write_text("b base\n")
+        self.git("add", "a.txt", "b.txt")
+        self.git("commit", "-qm", "files")
+        self.start([{"id": "t", "files": ["a.txt", "b.txt"]}])
+        self.launch("t")
+        self.work("t", {"a.txt": "a by t\n", "b.txt": "b by t\n"})
+        self.stop_with_receipt("t")
+        self.call("merge", "demo", "t")
+        self.git("checkout", "--", "a.txt")  # the owner puts a.txt back
+        self.launch("t")                     # a repair round that touches b.txt only
+        self.work("t", {"b.txt": "b by t, repaired\n"})
+        self.stop_with_receipt("t")
+        out = self.accept("t", expected=1)
+        self.assertIn("CONFLICT t: a.txt", out)
+        self.assertIn("a.txt: changed in the checkout since Fleet last merged this ticket", out)
+        self.assertIn("nothing was applied or verified", out)
+        self.assertEqual((self.repo / "a.txt").read_text(), "a base\n")
+        self.assertEqual((self.repo / "b.txt").read_text(), "b by t\n")  # nothing half-applied
+        self.assertEqual(self.state()["tickets"]["t"]["status"], "pending")
+        # Its base copy is the tree's as it was made, so the git merge-file line brings t's change back.
+        self.assertEqual((self.repo / ".fleet/runs/demo/merge/t/a.txt.base").read_text(), "a base\n")
+        for line in out.splitlines():
+            if line.strip().startswith("git merge-file"):
+                subprocess.run(shlex.split(line.strip()), cwd=self.repo, check=True)
+        self.call("merge", "demo", "t", "--resolved", "ran the git merge-file lines")
+        self.accept("t")
+        self.assertEqual(((self.repo / "a.txt").read_text(), (self.repo / "b.txt").read_text()),
+                         ("a by t\n", "b by t, repaired\n"))
+
+    def test_a_merged_file_that_differs_from_the_tree_after_git_apply_is_refused_not_recorded(self):
+        """Final review, 3: once applied, a file whose copy differs from the tree (a filter, line endings) is a
+        refusal, and no later merge takes it as merged."""
+        self.start([{"id": "a", "files": ["a.txt"]}])
+        self.launch("a")
+        self.work("a", {"a.txt": "from a\n"})
+        self.stop_with_receipt("a")
+        real = fleet.tree_git
+
+        def filtering(cwd, *args, **kwargs):
+            res = real(cwd, *args, **kwargs)
+            if args[:1] == ("apply",) and "--check" not in args:
+                (self.repo / "a.txt").write_text("from a\r\n")  # what a line-ending filter could leave
+            return res
+        with patch.object(fleet, "tree_git", side_effect=filtering):
+            out = self.accept("a", expected=1)
+        self.assertIn("a: after git apply, a.txt in the checkout differ from a's worktree", out)
+        self.assertIn("Its diff is in the checkout's working tree now; nothing was verified", out)
+        self.assertNotIn("nothing was applied", out)
+        self.assertEqual(self.state()["tickets"]["a"]["status"], "pending")
+        self.assertEqual(self.state()["tickets"]["a"]["merged"]["off"], ["a.txt"])  # the run says it reached the checkout
+        out = self.accept("a", expected=1)
+        self.assertIn("CONFLICT a: a.txt", out)
+        self.assertIn("differs from its worktree's copy after git apply", out)
+        self.call("merge", "demo", "a", "--resolved", "the owner checked the line endings")
+        self.assertIn("a: verified", self.accept("a"))
+
+    def test_merge_resolved_needs_a_reported_conflict(self):
+        """Final review, 4: with no CONFLICT reported, there is no merge by hand to record."""
+        self.start([{"id": "a", "files": ["a.txt"]}])
+        self.launch("a")
+        self.work("a", {"a.txt": "a's reviewed work\n"})
+        self.stop_with_receipt("a")
+        out = self.call("merge", "demo", "a", "--resolved", "merged it by hand", expected=1)
+        self.assertIn("a: fleet merge reported no CONFLICT for a's diff as it is now, so there is no merge by hand to "
+                      "record", out)
+        self.assertNotIn("merged", self.state()["tickets"]["a"])
+        self.assertFalse((self.repo / "a.txt").exists())
+        self.accept("a")
+        self.assertEqual((self.repo / "a.txt").read_text(), "a's reviewed work\n")
+
+    def test_merge_resolved_refuses_while_a_file_of_the_diff_holds_its_content_from_before_the_merge(self):
+        """Final review, 4: the CONFLICT lists every file the diff touches, and --resolved records none of them while
+        one still lacks the ticket's change; the tree's change is saved as a patch."""
+        (self.repo / "a.txt").write_text("".join(f"line{n}\n" for n in range(1, 11)))
+        (self.repo / "b.txt").write_text("b base\n")
+        self.git("add", "a.txt", "b.txt")
+        self.git("commit", "-qm", "files")
+        self.start([{"id": "t", "files": ["a.txt", "b.txt"]}])
+        self.launch("t")
+        self.work("t", {"a.txt": "".join(f"line{n}\n" for n in range(1, 10)) + "line10 by t\n", "b.txt": "b by t\n"})
+        self.stop_with_receipt("t")
+        (self.repo / "a.txt").write_text("line1 by owner\n" + "".join(f"line{n}\n" for n in range(2, 11)))
+        out = self.accept("t", expected=1)
+        self.assertIn("CONFLICT t: a.txt", out)
+        self.assertIn("b.txt: applies cleanly; merge it with the rest", out)
+        lines = [x.strip() for x in out.splitlines() if x.strip().startswith("git merge-file")]
+        self.assertEqual(len(lines), 2)
+        subprocess.run(shlex.split(lines[0]), cwd=self.repo, check=True)  # a.txt's line only
+        out = self.call("merge", "demo", "t", "--resolved", "merged a.txt by hand", expected=1)
+        self.assertIn("t: b.txt in the checkout still hold their content from before this merge", out)
+        self.assertNotIn("merged", self.state()["tickets"]["t"])
+        subprocess.run(shlex.split(lines[1]), cwd=self.repo, check=True)
+        out = self.call("merge", "demo", "t", "--resolved", "ran both git merge-file lines")
+        self.assertIn("MERGED t by hand: recorded the checkout's a.txt, b.txt as its merge", out)
+        patch_file = self.repo / ".fleet/runs/demo/worktrees/t.patch"
+        self.assertIn(f"its worktree's changes are saved in {patch_file}", out)
+        self.assertIn("+line10 by t", patch_file.read_text())
+        self.accept("t")
+        self.assertEqual((self.repo / "b.txt").read_text(), "b by t\n")
+        self.assertEqual((self.repo / "a.txt").read_text(),
+                         "line1 by owner\n" + "".join(f"line{n}\n" for n in range(2, 10)) + "line10 by t\n")
+
     def test_accept_says_the_diff_is_applied_when_verify_then_refuses(self):
         self.start([{"id": "a", "files": ["a.txt"]}])
         self.launch("a")
@@ -280,7 +385,7 @@ class Isolation(WorktreeCase):
         t = self.state()["tickets"]["a"]
         self.assertEqual(fleet.header_file_problems(self.repo, t, False, [str(tree / "a.txt")], tree), [])
         self.assertEqual(fleet.header_file_problems(self.repo, t, False, [str(tree / "b.txt")], tree),
-                         ["b.txt outside scope"])
+                         ['"b.txt" outside scope'])  # the header's path is quoted: the worker's text
 
     def test_verify_refuses_an_unmerged_worktree_ticket(self):
         self.start([{"id": "a", "files": ["a.txt"]}])
@@ -375,7 +480,7 @@ class Reads(WorktreeCase):
         """A file the gate's own commands write in the tree while its worker is stopped is not blamed on it."""
         state = self.state()
         state["tickets"]["a"]["commands"] = [{"run": "echo out > made-by-check.txt", "cwd": ".", "timeout": 30}]
-        (self.repo / ".fleet/runs/demo/run.json").write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
         (self.tree("a") / "cache.tmp").unlink()
         self.assertIn("GATE a 1/1 passed, scope ok", self.call("gate", "demo", "a"))
         self.assertTrue((self.tree("a") / "made-by-check.txt").exists())
@@ -493,7 +598,7 @@ class Lifecycle(WorktreeCase):
         subprocess.run(["git", "worktree", "add", "--detach", str(stray), "HEAD"], cwd=self.repo, check=True,
                        capture_output=True)
         state["tickets"]["b"]["status"] = "dropped"             # as if drop could not remove its tree
-        (self.repo / ".fleet/runs/demo/run.json").write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
         out = self.call("check", "demo")
         self.assertIn(f"WORKTREE a {self.tree('a')}: in use", out)
         self.assertIn(f"WORKTREE b {self.tree('b')}: orphan: b is dropped", out)
@@ -526,7 +631,7 @@ class Lifecycle(WorktreeCase):
         self.assertNotIn(".setup-done", self.call("diff", "demo", "a"))  # setup output is the tree's base
         state = self.state()
         state["options"]["worktree_setup"] = "echo broken; exit 4"     # the run keeps the value saved at init
-        (self.repo / ".fleet/runs/demo/run.json").write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
         out = self.launch("b", expected=1)
         self.assertIn("worktree_setup `echo broken; exit 4` failed in b's new worktree (exit 4)", out)
         self.assertNotIn("b", self.state()["workers"])

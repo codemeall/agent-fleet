@@ -92,7 +92,7 @@ class ReportHeader(RuntimeCase):
         self.setup_checked()
         cases = [
             (header(files_changed=["owned.txt", "./src/x.py"]), "files_changed outside the scope",
-             "header: src/x.py outside scope"),
+             "header: \"src/x.py\" outside scope"),
             (header(checks=[]), "a planned command left out", "checks none, findings 0, questions 0, files in scope, "
                                                               "header: true not reported"),
             (header(checks=[{"run": "true", "exit": None}]), "a planned command without an exit",
@@ -106,7 +106,7 @@ class ReportHeader(RuntimeCase):
                 self.assertIn(want, line)
                 self.assertTrue(line.startswith("REPORT 01 [needs-verification] criteria "), line)
         line = self.wake(report(header(files_changed=["src/x.py"], checks=[])))
-        self.assertIn("header: src/x.py outside scope; true not reported ", line)  # several problems, one phrase
+        self.assertIn("header: \"src/x.py\" outside scope; true not reported ", line)  # several problems, one phrase
         self.assertNotIn("files in scope", line)
 
     def test_a_malformed_header_is_named_instead_of_a_summary(self):
@@ -163,7 +163,7 @@ class ReportHeader(RuntimeCase):
         out, err = self.split_call("verify", "demo", "01", "--evidence", str(self.evidence))
         self.assertIn("01: verified", out)
         self.assertNotIn("WARNING", out)
-        self.assertIn("WARNING 01 header: src/x.py outside scope (not a refusal", err)
+        self.assertIn("WARNING 01 header: \"src/x.py\" outside scope (not a refusal", err)
         self.assertEqual(self.state()["tickets"]["01"]["status"], "verified")
 
     def test_verify_names_a_missing_header_and_is_silent_for_a_good_one(self):

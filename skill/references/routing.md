@@ -16,7 +16,7 @@ An unavailable explicit choice is a blocker to explain, not permission for a sil
 
 The skill's step 2 says when to use `heavy`, `standard` and `light`. `review` is for a dedicated read-only review of a writer's captured diff.
 
-Take consequential work first, balance ready providers without exceeding global or provider caps, and queue remaining tickets. Never raise caps merely to avoid waiting. Waves require satisfied blockers and disjoint exact file scopes. A `needs-verification` report does not free a slot: the process must exit.
+Take consequential work first, balance ready providers without exceeding global or provider caps, and queue remaining tickets. Never raise caps merely to avoid waiting. Waves require satisfied blockers and disjoint exact file scopes (a worktree run allows overlapping files). A `needs-verification` report does not free a slot: the process must exit.
 
 ## Warm workers
 
@@ -38,13 +38,13 @@ A warm ticket still waits for the earlier one to be verified, and its reviewer i
 
 `cross-heavy` (default) requires a different-family reviewer for each heavy implementation ticket. `cross-all` requires one for every ticket; `off` means lead verification alone. Record the chosen mode at run creation.
 
-Family follows the resolved model, not the CLI. Use exact model-family mappings, matching tier metadata or the adapter's vendor prefixes (`family_prefixes`); a known single-family adapter can supply its family as a fallback. Mixed adapters require known model metadata. Use an explicit, accurate `family` in the plan or `--family` where necessary. Never invent a family solely to pass the gate.
+Family follows the resolved model, not the CLI. Use exact model-family mappings, matching tier metadata or the adapter's vendor prefixes (`family_prefixes`); a known single-family adapter can supply its family as a fallback. Mixed adapters require known model metadata. Use an explicit, accurate `family` in the plan or `--family` where necessary: only for a model the config puts in no family, since Fleet refuses one that contradicts what the config knows. Never invent a family solely to pass the gate.
 
 If the allowed pool cannot provide a known different-family reviewer, tell the owner before implementation. Fleet checks this before any worker launches: `init` refuses a `cross-all` run whose routing pool could review no writer (and warns under `cross-heavy`), and `plan` and `add` refuse each ticket whose required review no provider in the pool could give, using the same test as `fleet review` without capacity. The error names the writer's family, the routing and each provider's reason. The two ways out are the owner's: enable another provider or widen the routing (a new run with `--routing`), or explicitly choose `fleet init <run> --review off --reason "<owner's words>"`. Init refuses `--review off` without `--reason` while the config asks for review, and records the reason in the run's decisions; never silently downgrade the review policy. `fleet review` still checks again when the reviewer launches. In particular, a second Claude account remains Anthropic, while two Cursor models may belong to different families.
 
 The review sequence is in the skill's step 5. Review-only is a prompt contract in a shared checkout, not a security sandbox: inspect for unauthorized changes. Dependents remain blocked until the writer is verified.
 
-Under `acceptance = "strict"`, the default for new runs, accept also refuses a ticket whose latest review lists an open high or medium finding, until a re-review no longer lists it; only the owner's words accept it regardless ([the quality bar](commands.md#the-quality-bar)).
+Under `acceptance = "strict"`, the default for new runs, accept also refuses a ticket whose latest review lists an open high or medium finding, until a re-review no longer lists it or you accept the writer's rebuttal with `--accept-finding F<n> "<why>"`; only the owner's words accept it regardless ([the quality bar](commands.md#the-quality-bar)).
 
 ## Fan-out
 

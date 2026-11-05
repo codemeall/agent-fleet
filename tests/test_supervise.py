@@ -191,6 +191,27 @@ class Supervise(RuntimeCase):
         self.assertNotIn("verified", self.state()["workers"]["review-01"])
         self.assertIn("TIMEOUT", self.supervise("--auto", "gate,review", timeout="1", expected=2))  # once
 
+    def test_reports_that_are_not_utf8_are_gated_reviewed_and_judged_like_any_other(self):
+        """Final review, 2: supervise reads every report as wait does, so bytes that are not UTF-8 in a writer's or
+        a reviewer's report never stop it."""
+        self.handed_back()
+        report = self.run_file("reports", "01.md")
+        report.write_bytes(report.read_bytes() + b"\nNotes: caf\xe9\n")
+        real_launch = fleet.launch_one
+
+        def launch_one(a, cfg):
+            label, w = real_launch(a, cfg)
+            if w.get("role") == "review":
+                self.write_report(w["id"])
+                f = self.run_file("reports", f"{w['id']}.md")
+                f.write_bytes(f.read_bytes() + b"\n\xff\n")
+            return label, w
+
+        with patch.object(fleet, "launch_one", side_effect=launch_one):
+            out = self.supervise("--auto", "gate,review")
+        self.assertIn("REVIEWING 01: review-01 ", out)
+        self.assertIn("READY 01: gate passed (1/1), review clean (anthropic, findings 0)", out)
+
     def test_a_ticket_the_policy_does_not_review_wakes_ready_after_its_gate(self):
         self.handed_back(tier="standard")                                    # cross-heavy reviews heavy only
         out = self.supervise("--auto", "gate,review")
@@ -202,9 +223,35 @@ class Supervise(RuntimeCase):
         self.assertEqual(self.reviewers(), [])
         self.assertEqual(self.state()["workers"]["01"]["state"], "running")  # supervise stops nothing for it
 
+    def test_ready_and_accept_agree_on_a_review_the_lead_started_on_a_ticket_without_one(self):
+        """Final review, 4: a standard ticket under cross-heavy needs no review, but once the lead reviews it anyway
+        and sends the findings back, accept verifies that reviewer too and refuses one of an earlier diff. The
+        repaired hand-back is reviewed again, so READY comes only when accept would take it."""
+        medium = {"severity": "medium", "file": "owned.txt:1", "confidence": "confirmed"}
+        for acceptance in ("strict", "warn"):
+            with self.subTest(acceptance=acceptance):
+                self.reset()
+                self.reviewer_report = None
+                self.cfg["defaults"]["acceptance"] = acceptance
+                self.handed_back(tier="standard")
+                self.reviewer_report = {"findings": [medium], "prose": "## Findings\n- Medium: a line.\n"}
+                self.lead("review", "demo", "01", "--settle", "0")             # the lead's own choice
+                self.lead("send", "demo", "01", "--findings")                  # the writer relaunches
+                (self.repo / "owned.txt").write_text("repaired change\n")
+                self.write_report("01", files_changed=["owned.txt"], checks=[{"run": "true", "exit": 0}],
+                                  responses=[{"finding": "F1", "action": "fixed", "evidence": "the line is back"}])
+                self.assertIn("review-01 reviewed an earlier diff of 01", self.accept("--gate", expected=1))
+                self.reviewer_report = {}
+                out = self.supervise("--auto", "gate,review")
+                self.assertNotIn("no review required", out)
+                self.assertIn("REVIEWING 01: review-01 ", out)
+                [ready] = [x for x in out.splitlines() if x.startswith("READY 01: ")]
+                self.assertIn("review clean (anthropic, findings 0)", ready)
+                self.assertIn("01: verified", self.accept("--gate"))         # what READY said, accept does
+
     def test_a_header_problem_or_an_unmet_criterion_wakes_the_lead_without_a_review(self):
         for fields, why in (({"header": False}, "not reviewed: its report has no fleet header"),
-                            ({"files_changed": ["owned.txt", "other.txt"]}, "not reviewed: header: other.txt "
+                            ({"files_changed": ["owned.txt", "other.txt"]}, 'not reviewed: header: "other.txt" '
                                                                             "outside scope"),
                             ({"criteria": [{"id": 1, "met": False, "where": "-"}]}, "not reviewed: 1 criteria unmet"),
                             ({"questions": ["Should get() cache?"]}, "not reviewed: 1 open question(s)")):
@@ -242,10 +289,9 @@ class Supervise(RuntimeCase):
 
     def test_review_rounds_used_up_wake_the_lead_with_the_escalation(self):
         self.handed_back()
-        run = self.run_file("run.json")
         state = self.state()
         state["tickets"]["01"]["review_rounds"] = 2                          # both rounds used already
-        run.write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
         out = self.supervise("--auto", "gate,review")
         self.assertIn("REPORT 01 [needs-verification]", out)
         self.assertIn("REVIEW-REFUSED 01: fleet review refused: 01 has used 2 of 2 review rounds", out)
@@ -290,6 +336,18 @@ class Supervise(RuntimeCase):
         self.assertEqual(self.state()["tickets"]["01"]["review_rounds"], 1)
         self.write_report("review-01")
         self.assertIn("READY 01: gate passed (1/1), review clean", self.supervise("--auto", "gate,review"))
+
+    def test_pending_says_reviewed_once_the_running_reviewer_has_handed_back(self):
+        """Final review, 6: a reviewer that handed back keeps running until the lead acts, so PENDING no longer
+        says the writer is in review."""
+        self.handed_back()
+        self.reviewer_report = {}
+        self.assertIn("READY 01: gate passed (1/1), review clean", self.supervise("--auto", "gate,review"))
+        self.assertEqual(self.state()["workers"]["review-01"]["state"], "running")
+        out = self.supervise("--auto", "gate,review", timeout="1", expected=2)
+        self.assertIn("PENDING 01 [needs-verification] reviewed; see review-01's line\n", out)
+        self.assertIn("PENDING review-01 [needs-verification]\n", out)
+        self.assertNotIn("in review", out)
 
     def test_a_review_the_lead_starts_while_supervise_waits_for_the_lock_is_never_doubled(self):
         self.handed_back()
@@ -414,6 +472,37 @@ class Supervise(RuntimeCase):
         self.assertIn("max_workers", out)
         self.assertNotIn("02", self.state()["workers"])
         self.assertIn("TIMEOUT", self.supervise("--auto", "dispatch", timeout="1", expected=2))
+
+    def test_a_launch_that_fails_wakes_the_lead_once_per_error_and_lists_one_skipped_line(self):
+        """Final review, 7: a launch error that is not a wait for room (here, the provider was turned off) only
+        printed SKIPPED, was retried on every pass, never woke the lead, and piled one SKIPPED line per pass."""
+        self.dispatch_plan()
+        self.accept_01()
+        self.cfg["providers"]["writer"]["enabled"] = False                  # the owner turned it off since
+        out = self.supervise("--auto", "dispatch", timeout="3")
+        self.assertIn("DISPATCH-REFUSED 02: its launch failed: provider 'writer' is turned off in config; ", out)
+        self.assertIn("supervise tries it again on each pass and wakes you only for a new error", out)
+        self.assertNotIn("SKIPPED 02", out)                                 # the wake line says it
+        out = self.supervise("--auto", "dispatch", timeout="3", expected=2)  # several passes, the same error
+        self.assertIn("TIMEOUT", out)
+        self.assertNotIn("DISPATCH-REFUSED", out)
+        self.assertEqual(out.count("SKIPPED 02: provider 'writer' is turned off in config"), 1)
+        self.cfg["providers"]["writer"]["enabled"] = True
+        self.assertIn("LAUNCHED 02", self.supervise("--auto", "dispatch", timeout="1", expected=2))
+
+    def test_a_dispatch_failure_outside_the_launch_wakes_the_lead_once(self):
+        """Final review, 9: an error outside launch --ready (a ticket's provider gone from the config) woke every
+        supervise at once, again and again."""
+        self.dispatch_plan()
+        self.accept_01()
+        writer = self.cfg["providers"].pop("writer")
+        out = self.supervise("--auto", "dispatch", timeout="2")
+        self.assertIn("DISPATCH-FAILED: unknown provider 'writer'", out)
+        out = self.supervise("--auto", "dispatch", timeout="2", expected=2)
+        self.assertIn("TIMEOUT", out)
+        self.assertNotIn("DISPATCH-FAILED", out)
+        self.cfg["providers"]["writer"] = writer
+        self.assertIn("LAUNCHED 02", self.supervise("--auto", "dispatch", timeout="1", expected=2))
 
     def test_dispatch_skips_a_pass_while_the_lead_holds_the_lock(self):
         self.dispatch_plan()

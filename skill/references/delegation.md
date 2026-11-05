@@ -56,7 +56,7 @@ fleet launch desk-20261007 --ready
 
 - `task` is inline text; Fleet writes it to `.fleet/runs/<run>/tasks/<id>.md`. Give `context` and `checks` so the prompt is complete and `--ready` can write it. `checks` needs at least one `{"run": …}` command or `{"manual": "<one-line reason>"}` check, or `add` refuses the ticket ([plan](commands.md#plan)).
 - A GitHub issue comes in as a local file first, because a URL is not a `ticket` input: `fleet import owner/repo#N --dir .scratch/<feature>/issues` writes `<N>-<slug>.md`, to give as `ticket` with the file name as its `id` ([import](commands.md#import)).
-- `add` appends and never changes saved tickets. A new ticket touching files of an unverified ticket must list it in `blockers`.
+- `add` appends and never changes saved tickets. A new ticket touching files of an unverified ticket must list it in `blockers` (a worktree run allows the overlap).
 - `--ready` prints `LAUNCHED` or `SKIPPED <id>: <reason>` per ticket and no worker screens; `fleet wait` reports a worker stuck at a prompt as `STALLED`.
 
 Then run `fleet wait <run> --timeout 540` in the background and return to the owner's conversation.
@@ -81,4 +81,4 @@ Close it when the owner asks, or before they commit (a commit moves HEAD, so `fl
 
 ## 6. Abandoned work
 
-A ticket the owner gives up on stays pending: it keeps its run open and holds its files. When the owner says so, stop its worker, then `fleet drop <run> <id> --reason "<owner's words>"`. Drop its dependents first, or tell the owner which tickets wait on it. Point the owner at any edits it left in the checkout.
+A ticket the owner gives up on stays pending: it keeps its run open and holds its files. When the owner says so, stop its worker, then `fleet drop <run> <id> --reason "<owner's words>"`. Tell the owner which tickets wait on it, and drop them first only when the owner says so. Point the owner at any edits it left in the checkout.

@@ -274,6 +274,16 @@ class FanoutWake(FanoutCase):
         self.assertIn("not compared (fewer than two readable headers)", head)
         self.assertIn("q--reviewer header: invalid JSON; q--third header missing, so read those reports", head)
 
+    def test_an_investigators_report_that_is_not_utf8_still_wakes_fanout(self):
+        """Final review, 2: wait's fan-out step reads reports as the rest of wait does."""
+        self.launched()
+        self.all_back()
+        f = self.run_file("reports", "q--third.md")
+        f.write_bytes(f.read_bytes() + b"\ncaf\xe9\n")
+        out = self.wait()
+        self.assertIn("FANOUT q: 3 reports; ", out)
+        self.assertIn("  q--third (", out)
+
     def test_a_blocked_investigator_wakes_as_today_and_the_others_keep_running(self):
         self.launched()
         self.write_report("q--writer")
@@ -346,6 +356,16 @@ class FanoutJudge(FanoutCase):
         self.assertEqual({w["state"] for w in self.state()["workers"].values()}, {"running"})
         self.assertIn("no ticket 'nope' in this run", self.call("judge", "demo", "nope", expected=1))
         self.assertIn("name the ticket: fleet judge demo q", self.call("judge", "demo", "q--writer", expected=1))
+
+    def test_judge_refuses_a_family_flag_that_contradicts_the_config(self):
+        """Final review, 5: --family cannot relabel an investigator's family as one no investigator has."""
+        self.launched()
+        self.all_back()
+        out = self.call("judge", "demo", "q", "--provider", "reviewer", "--family", "xai", expected=1)
+        self.assertIn("reviewer cannot judge q: family xai contradicts the config, which puts reviewer-model in family "
+                      "anthropic", out)
+        self.assertEqual({w["state"] for w in self.state()["workers"].values()}, {"running"})
+        self.assertNotIn("judge-q", self.state()["workers"])
 
     def test_with_no_family_left_the_judge_is_the_leads_own_and_says_so(self):
         self.plan(self.ticket(fanout=["writer", "reviewer", "third", "fourth"]))
@@ -454,6 +474,23 @@ class FanoutVerify(FanoutCase):
         self.assertIn("q: verified with q--writer, q--reviewer, q--third", out)
         self.assertIn("UNBLOCKED none", out)
         self.assertTrue(all(w["state"] == "exited" for w in self.state()["workers"].values()))
+
+    def test_accept_refuses_a_change_outside_every_ticket_before_it_stops_anything(self):
+        """Final review, 8: the scope check is part of accept's one refusal, and an investigation cannot be granted."""
+        self.launched()
+        self.all_back()
+        (self.repo / "stray.txt").write_text("an investigator's edit\n")
+        out = self.call("accept", "demo", "q", "--evidence", str(self.evidence), expected=1)
+        self.assertIn("q not accepted; nothing was stopped or verified", out)
+        self.assertIn("stray.txt (created)", out)
+        self.assertIn("Fleet grant cannot add them: an investigation owns no files.", out)
+        self.assertNotIn("fleet grant adds them", out)
+        self.assertEqual({w["state"] for w in self.state()["workers"].values()}, {"running"})
+        self.assertIn("--unowned-ok needs the owner's reason",
+                      self.call("accept", "demo", "q", "--evidence", str(self.evidence), "--unowned-ok", " ",
+                                expected=1))
+        self.assertEqual({w["state"] for w in self.state()["workers"].values()}, {"running"})
+        self.assertEqual(self.state()["tickets"]["q"]["status"], "pending")
 
     def test_drop_parks_every_investigators_report(self):
         self.launched()

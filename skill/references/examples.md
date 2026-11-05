@@ -88,6 +88,7 @@ fleet accept settings api-client --evidence .fleet/runs/settings/evidence/api-cl
 
 ```text
 review-api-client: exited (surface:9)
+NOTE api-client: no accept_checks are set for this run, so the combined-tree checks (full suite, typecheck, build) are yours to run in the checkout
 review-api-client: verified; update the source ticket only after implementation acceptance
 api-client: verified; update the source ticket only after implementation acceptance
 UNBLOCKED settings-ui
@@ -97,7 +98,7 @@ Add `--launch-ready` to launch them at once, and `--gate` to run the ticket's pl
 
 **Findings to fix:** `fleet send settings api-client --findings` sends them to the writer, numbered, to fix or rebut, and relaunches it ([settling findings](commands.md#settling-findings)); or repair the writer within its assignment yourself (example 6). When it reports `needs-verification` again, check it and run `fleet review settings api-client` again. That round's diff still runs from the writer's first launch, so it covers both rounds; until then, `accept` refuses the first review as stale. Then accept as above.
 
-**Out of rounds:** after `review_rounds` reviews (default 2), the next repair or review is refused with an `ESCALATE` block: the rounds used, the last reviewer's open findings and the owner's ways out ([review rounds](commands.md#review-rounds)). Stop and ask the owner. To accept as is, record the open findings and their decision in the evidence and `fleet accept` with `--accept-anyway "<owner's words>"` ([the quality bar](commands.md#the-quality-bar)); to give up, `fleet drop settings api-client --reason "<owner's words>"`; to try once more, add their words to the refused command:
+**Out of rounds:** after `review_rounds` reviews (default 2), the next repair or review is refused with an `ESCALATE` block: the rounds used, the last reviewer's open findings and the owner's ways out ([review rounds](commands.md#review-rounds)). Stop and ask the owner. To accept as is, record the open findings and their decision in the evidence and `fleet accept`, with `--accept-anyway "<owner's words>"` when the block names it: something is below [the quality bar](commands.md#the-quality-bar); to give up, `fleet drop settings api-client --reason "<owner's words>"`; to try once more, add their words to the refused command:
 
 ```sh
 fleet launch settings api-client codex --tier heavy --extra-round "Owner: one more try at the 404 case"

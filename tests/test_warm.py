@@ -223,7 +223,7 @@ class Refusals(WarmCase):
         state = json.loads(f.read_text())
         state["workers"]["01"]["state"] = "unknown"
         state["workers"]["01"]["exit_file"] = str(self.run_path("exits", "gone.json"))
-        f.write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
         self.refused(self.warm(expected=1), "01's worker exit is not confirmed (unknown); stop it or recover it first")
 
     def test_an_adapter_that_cannot_resume(self):
@@ -462,7 +462,7 @@ class Cost(WarmCase):
         f = self.run_path("run.json")
         state = json.loads(f.read_text())
         state["ledger"][0]["start"] -= 3600                   # the first ticket ran an hour ago
-        f.write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
         start, session = state["ledger"][0]["start"], state["workers"]["01"]["session"]
         log = self.claude_home / "projects" / "-repo" / f"{session}.jsonl"
         log.parent.mkdir(parents=True)

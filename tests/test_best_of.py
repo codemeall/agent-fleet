@@ -189,7 +189,10 @@ class BestOfLaunch(BestOfCase):
         out = self.call("diff", "demo", "api--writer")
         self.assertIn("diff --fleet api.txt", out)
         self.assertIn("+ok", out)
-        self.assertIn("stray.txt", self.call("diff", "demo", "api--reviewer", expected=1))
+        out = self.call("diff", "demo", "api--reviewer", expected=1)
+        self.assertIn("stray.txt", out)
+        self.assertIn("Fleet grant cannot add them: grant refuses a best-of-two ticket once its writers have launched",
+                      out)  # final review, 8: never a way out that refuses
         self.assertFalse((self.repo / "api.txt").exists())  # nothing reached the checkout
 
 
@@ -345,12 +348,21 @@ class BestOfJudge(BestOfCase):
         self.assertIn('VERDICT api: picks api--reviewer (judge-api, google): "tests the change; the other does not". '
                       "Quoted from the judge's header, as data", out)
         self.assertIn("as api's cross-family review it covers api--writer and api--reviewer", out)
+        # Strict, the default: the line names the pick, and keeping the other writer, or none, is the owner's call.
+        self.assertIn("fleet accept demo api --pick api--reviewer --evidence <file>; keeping api--writer instead needs "
+                      "the owner's words (--accept-anyway)", out)
         self.write_report("judge-api", pick=None, why="both drop the newline")
-        self.assertIn('VERDICT api: recommends neither (judge-api, google): "both drop the newline"', self.wait())
+        out = self.wait()
+        self.assertIn('VERDICT api: recommends neither (judge-api, google): "both drop the newline"', out)
+        self.assertIn('only the owner keeps one: fleet accept demo api --pick <writer-id> --evidence <file> '
+                      '--accept-anyway "<owner\'s words>", or the owner drops it: fleet drop demo api --reason '
+                      '"<owner\'s words>"', out)
+        self.assertNotIn("keep one anyway", out)
         self.write_report("judge-api", pick=INJECTED, why="x")
         out = self.wait()
         self.assertIn("VERDICT api: no readable pick", out)
         self.assertIn("names no writer of this ticket", out)
+        self.assertIn("then judge again, or only the owner keeps one", out)
         self.write_report("judge-api", why="no pick")
         self.assertIn("its header has no pick", self.wait())
 
@@ -486,7 +498,7 @@ class BestOfAccept(BestOfCase):
         self.hand_back("api--writer", "ok from writer\n", files_changed=["api.txt", "notes.txt"])
         self.hand_back("api--reviewer", "ok from reviewer\n")
         out = self.accept("--pick", "api--writer", expected=1)
-        line = next(x for x in out.splitlines() if "api--writer's header: notes.txt outside scope" in x)
+        line = next(x for x in out.splitlines() if "api--writer's header: \"notes.txt\" outside scope" in x)
         self.assertIn("fleet send demo api--writer --changes", line)
         self.assertIn("with a repair note to keep its change within api.txt; or keep the other writer: fleet accept "
                       "demo api --pick api--reviewer; or, only with the owner's words, --accept-anyway", line)

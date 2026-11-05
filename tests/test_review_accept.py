@@ -2,6 +2,7 @@
 would refuse, before anything changes where it can."""
 import copy
 import fcntl
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -144,6 +145,35 @@ class ReviewAccept(RuntimeCase):
             self.assertIn("pass --provider with them", self.review(flag, "x", expected=1))
         out = self.review("--provider", "reviewer", "--effort", "low")
         self.assertIn("REVIEW review-01 reviewer:reviewer-model@low family=anthropic", out)
+
+    def test_a_family_flag_never_contradicts_the_config(self):
+        """Final review, 5: --family names a family only where the config knows none, so the writer's own provider
+        cannot review as another family; a plan's family pin is held to the same rule."""
+        self.setup_run(review="cross-all")
+        self.handed_back()
+        out = self.review("--provider", "writer", "--family", "anthropic", expected=1)
+        self.assertIn("writer cannot review 01: family anthropic contradicts the config, which puts writer-model in "
+                      "family openai", out)
+        self.assertEqual(self.state()["workers"]["01"]["state"], "running")  # refused before the writer stopped
+        self.assertNotIn("review-01", self.state()["workers"])
+        # A model the config places in no family takes the flag's.
+        self.cfg["providers"]["cursor"] = dict(copy.deepcopy(self.cfg["providers"]["reviewer"]), family="mixed")
+        for tier in self.cfg["providers"]["cursor"]["tiers"].values():
+            tier.update(model="auto")
+            del tier["family"]
+        out = self.review("--provider", "cursor", "--family", "google")
+        self.assertIn("REVIEW review-01 cursor:auto@high family=google", out)
+
+    def test_a_plans_family_pin_never_contradicts_the_config(self):
+        self.call("init", "demo", "--workspace", "workspace:1", "--review", "cross-all")
+        (self.repo / "01.md").write_text("# Ticket 01\nImplement owned change and verify its behavior.\n")
+        plan = self.repo / "plan.json"
+        plan.write_text(json.dumps({"tickets": [{"id": "01", "ticket": str(self.repo / "01.md"),
+                                                       "files": ["owned.txt"], "provider": "writer",
+                                                       "tier": "standard", "family": "anthropic"}]}))
+        out = self.call("plan", "demo", "--file", str(plan), expected=1)
+        self.assertIn("01: family anthropic contradicts the config, which puts writer-model in family openai", out)
+        self.assertEqual(self.state()["tickets"], {})
 
     def test_review_refuses_an_investigate_ticket_and_one_not_launched(self):
         self.setup_run(review="cross-all", tickets=[{"id": "look", "kind": "investigate", "files": []},

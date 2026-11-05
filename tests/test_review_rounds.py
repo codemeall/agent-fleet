@@ -144,7 +144,7 @@ class ReviewRounds(RuntimeCase):
         old = json.loads(path.read_text())
         del old["tickets"]["01"]["review_rounds"]
         del old["options"]["review_rounds"]
-        path.write_text(json.dumps(old))
+        fleet.save_run(self.repo, "demo", old)
         self.assertIn("rounds=1/2", self.call("resume", "demo"))  # the cap comes from the current config
         self.repair("second change\n")
         self.review()

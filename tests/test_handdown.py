@@ -143,7 +143,7 @@ class HandDown(RuntimeCase):
                                  "checks": {"manual": "k"}}])
         state = self.state()
         del state["prompts"]["02"]  # as if the plan alone had been saved: --ready writes 02's prompt itself
-        (self.repo / RUN / "run.json").write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
         (self.repo / RUN / "prompts/02.md").unlink()
         self.deliver_01("# Report 01\nStatus: needs-verification\n\n- parse() is in owned.txt\n")
         out = self.call("launch", "demo", "--ready")
@@ -155,7 +155,7 @@ class HandDown(RuntimeCase):
         self.setup_run()
         state = self.state()
         del state["prompts"]["02"]["verified_blockers"]
-        (self.repo / RUN / "run.json").write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
         self.deliver_01("# Report 01\nStatus: needs-verification\n\n- done\n")
         self.assertNotIn("was verified", self.launch("02"))
 

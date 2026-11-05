@@ -36,7 +36,7 @@ Right after the `Status:` line, add one `fleet` block: a single JSON object Flee
  "questions": []}
 ```
 
-List every file you changed (none for a review or an investigation), every check with its exit code (`null` when not run; give each Fleet-run check by its exact command), one criterion per acceptance criterion, severity `high`, `medium` or `low`, confidence `confirmed` or `suspected`, and open questions for the lead. The block only repeats facts: the sections below still carry everything a verifier needs. The `Status:` line stays the only status.
+List every file you changed (none for a review or an investigation), every check with its exit code (run each planned command: one reported with `null` refuses acceptance; give each Fleet-run check by its exact command), one criterion per acceptance criterion, severity `high`, `medium` or `low`, confidence `confirmed` or `suspected`, and open questions for the lead. The block only repeats facts: the sections below still carry everything a verifier needs. The `Status:` line stays the only status.
 
 Use one status only: `needs-verification` or `blocked`. The lead may request changes, but only `fleet verify` records acceptance. Do not copy the illustrative checkboxes as evidence.
 
