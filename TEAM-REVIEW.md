@@ -2,7 +2,7 @@
 
 How the lead and its workers collaborate, compared with Claude Code agent teams, Codex multi-agent and T3 Code's delegation. The goal: match their collaboration, beat them on quality, and spend fewer tokens.
 
-Reviewed 2026-11-04 at `0.1.0-preview.23`. **Release 1 (P1–P7) is implemented in `0.1.0-preview.24`** (spec #21; tickets #10 and #22–#27), and **release 2 in `0.1.0-preview.25`** (spec #31): P8 (gate loop) and P9 (report header), plus untrusted-data rules, plan-time review checks, a review-round cap and adapter smoke tests in CI. **Release 3 in `0.1.0-preview.26`** (spec #35) delivers P13 (Claude hooks), the read-only half of P15 (headless reviewers), P19's ledger, the permission ceiling of P14, and a live smoke kit. **Release 4 in `0.1.0-preview.27`** (spec #39) delivers P16 (worktree isolation, opt-in), P20's supervisor (`fleet supervise`) and a benchmark kit for F13 (the paid runs, #16, are the owner's). **Release 5 in `0.1.0-preview.28`** (spec #43) delivers P17's investigate fan-out with a judge, P18 (warm workers) and a read-only GitHub issue import (F4). **Release 6 in `0.1.0-preview.29`** (spec #47) delivers Phase 2's P10 (plan first), P11 (the team board) and P12 (writer and reviewer settle findings). **Release 7 in `0.1.0-preview.30`** (spec #51) completes P14's turn signals for Codex (Cursor's hooks are unchecked, so none), P17's best-of-two across vendors with a judge, and P19's `fleet usage`, and adds a strict quality bar at acceptance (#53). P21 (an MCP front door) and the writer half of P15 (structured transports) are optional and await a written decision. Claims about Fleet were checked against `skill/bin/fleet`, the skill and its templates; the defects below were reproduced with a fake worker CLI in headless tmux. Claims about other harnesses come from their current docs and source, cited in [Sources](#sources).
+Reviewed 2026-11-04 at `0.1.0-preview.23`. **Release 1 (P1–P7) is implemented in `0.1.0-preview.24`** (spec #21; tickets #10 and #22–#27), and **release 2 in `0.1.0-preview.25`** (spec #31): P8 (gate loop) and P9 (report header), plus untrusted-data rules, plan-time review checks, a review-round cap and adapter smoke tests in CI. **Release 3 in `0.1.0-preview.26`** (spec #35) delivers P13 (Claude hooks), the read-only half of P15 (headless reviewers), P19's ledger, the permission ceiling of P14, and a live smoke kit. **Release 4 in `0.1.0-preview.27`** (spec #39) delivers P16 (worktree isolation, opt-in), P20's supervisor (`fleet supervise`) and a benchmark kit for F13 (the paid runs, #16, are the owner's). **Release 5 in `0.1.0-preview.28`** (spec #43) delivers P17's investigate fan-out with a judge, P18 (warm workers) and a read-only GitHub issue import (F4). **Release 6 in `0.1.0-preview.29`** (spec #47) delivers Phase 2's P10 (plan first), P11 (the team board) and P12 (writer and reviewer settle findings). **Release 7 in `0.1.0-preview.30`** (spec #51) completes P14's turn signals for Codex (Cursor's hooks are unchecked, so none), P17's best-of-two across vendors with a judge, and P19's `fleet usage`, and adds a strict quality bar at acceptance (#53). P21 (an MCP front door) and the writer half of P15 (structured transports) were optional, and [Decisions on the optional items](#decisions-on-the-optional-items) records why neither is built now and what would reopen each. Claims about Fleet were checked against `skill/bin/fleet`, the skill and its templates; the defects below were reproduced with a fake worker CLI in headless tmux. Claims about other harnesses come from their current docs and source, cited in [Sources](#sources).
 
 ## Summary
 
@@ -171,6 +171,47 @@ Overlapping tickets can run in parallel, the build ban can lift, and combined ch
 2. **Release 2:** P8, P9 and P13. Failed checks go back to workers without waking the lead, and Claude workers' scope is enforced by the tool.
 3. **Release 3:** P10–P12, P14 and P15. Collaboration on par with agent teams, across vendors, over structured protocols.
 4. **Release 4:** P16–P21. Where Fleet pulls ahead of all three.
+
+## Decisions on the optional items
+
+Decided 2026-11-05, after release 7. The test for each was the owner's bar: fewer wrong results at the same or lower cost. Neither is built now. Each says what would reopen it.
+
+### P15, the writer half: structured transports for implementers
+
+**Not now.**
+
+The protocols would give implementers four things:
+- exact turn events;
+- approvals as structured requests;
+- messages without keystrokes;
+- exact token counts.
+
+Releases 3–7 already cover most of that over the TUI:
+- **Turn events:** Claude's hooks report `turn-ended`, `idle` and `permission-prompt`, and Codex's `notify` reports `turn-ended` (P13, #48).
+- **Messages:** they go through the durable inbox. The typed pointer is one short line, and `last_send` is taken before typing, so a fast hand-back is never lost.
+- **Exact tokens:** reviewers and investigators already get them through headless transports (P15's first half).
+
+What is left: Codex writers' token counts stay `unknown`, and an approval prompt shows in the pane rather than as a request. The owner answers it there, and the lead never does.
+
+Building it would cost more than that:
+- The owner loses the live pane that `fleet agents` and `fleet attach` give, which is the owner's direct control of a worker.
+- Every adapter gets a second transport to keep working, with its own launch, report, verify and stop tests.
+- The protocols move. Codex already marks `notify` legacy in its source, and an app-server client must track its JSON-RPC protocol across Codex releases.
+- A new transport is a new class of failures. Its live behaviour can't be checked in CI, since no paid sessions run there.
+
+**Reopen it when** `fleet usage` shows that the TUI's own failures cost measurable rework: stalls at a prompt, lost pointers, or Codex tokens that routing needs. Also reopen it if Codex drops `notify`.
+
+**If it is built,** start with an opt-in `transport = "app-server"` for Codex writers, with `tui` kept as the default. It must pass the same end-to-end run as the TUI first.
+
+### P21: Fleet as an MCP server
+
+**No.**
+
+- **Little to gain for the lead.** Claude Code and Codex, the supported lead hosts, run shell commands well. The lead already reads compact wake lines and `--json` where it needs records (`resume`, `usage`). Typed results would save few tokens: the lead reads the same facts either way.
+- **The workers are already narrowed.** A worker writes its report, and runs only its own `fleet note` command under `scope_permissions`. Claude's guard holds it to its files. That is what P21's per-worker tokens would give, with no server, no tokens to issue, and nothing listening.
+- **It would double the surface.** Two front doors must agree on every refusal, way out and owner-only rule, forever. A missed one is exactly the error this project works to remove.
+
+**Reopen it when** a lead host that can't run shell commands becomes a target. If leads misread wake lines in practice, a `--json` mode on `wait` and `supervise` is the cheaper fix, and it keeps one front door.
 
 ## Where the tokens go
 
