@@ -137,6 +137,34 @@ class GateLoop(RuntimeCase):
         self.assertEqual(self.typed, [])
         self.assertFalse(self.inbox().exists())
 
+    def test_a_report_that_is_not_utf8_never_breaks_a_wait(self):
+        """Final review, 2: one report with bytes that are not UTF-8 used to stop every wait, and with it every
+        other worker's hand-back. It wakes like any other report, and so do the rest."""
+        self.cfg["defaults"]["max_parallel"] = 2
+        self.cfg["providers"]["writer"]["max"] = 2
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"]}, {"id": "02", "files": ["next.txt"]}])
+        self.launch("01")
+        self.launch("02")
+        self.run_file("reports", "01.md").write_bytes(b"# Worker report\nStatus: needs-verification\n\ncaf\xe9 \xff\n")
+        self.report("02")
+        out = self.wait()
+        self.assertIn("REPORT 01 [needs-verification] ", out)
+        self.assertIn("REPORT 02 [needs-verification] ", out)
+        out = self.wait(expected=2)
+        self.assertIn("PENDING 01 [needs-verification]", out)
+        self.assertIn("PENDING 02 [needs-verification]", out)
+
+    def test_the_gate_loop_sends_back_a_report_that_is_not_utf8_and_keeps_its_bytes(self):
+        self.gated(FAILING)
+        self.run_file("reports", "01.md").write_bytes(b"# Worker report\nStatus: needs-verification\n\ncaf\xe9 \xff\n")
+        self.assertNotIn("REPORT", self.wait("--gate", expected=2))
+        self.assertEqual(self.run_file("reports", "01.md").read_bytes(),
+                         b"# Worker report\nStatus: changes-requested\n\ncaf\xe9 \xff\n")
+        self.assertIn("Fleet gate, round 1 of 2", self.inbox().read_text())
+        self.run_file("reports", "01.md").write_bytes(b"# Worker report\nStatus: needs-verification\n\n\xff again\n")
+        self.assertNotIn("REPORT", self.wait("--gate", expected=2))
+        self.assertIn("Fleet gate, round 2 of 2", self.inbox().read_text())
+
     def test_a_failed_pointer_wakes_the_lead_with_the_message_on_record(self):
         self.gated(FAILING)
         with patch.object(fleet, "send_keys", side_effect=fleet.FleetError("socket unavailable")):

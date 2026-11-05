@@ -151,6 +151,48 @@ class Mentions(BoardCase):
         self.assertIn("TIMEOUT", self.wait(expected=2))  # each note wakes once
         self.assertEqual(len(self.keystrokes()), sent)
 
+    def test_a_ticket_named_board_keeps_its_own_marker_and_wakes_once(self):
+        """Final review, 3: the board's .seen marker was `board`, which a ticket named board's report shares, so the
+        two overwrote each other and every wait woke again with the same REPORT and NOTE lines."""
+        self.setup_run(tickets=[{"id": "board", "files": ["owned.txt"]}])
+        self.launch("board")
+        self.note("@lead the schema moved", who="board")
+        self.report("board")
+        out = self.wait()
+        self.assertIn("REPORT board [needs-verification]", out)
+        self.assertIn('NOTE board: "@lead the schema moved"', out)
+        out = self.wait(expected=2)
+        self.assertNotIn("REPORT", out)
+        self.assertNotIn("NOTE", out)
+        self.assertIn("PENDING board [needs-verification]", out)
+        # A run the old Fleet left mid-collision (its board offset in the report's marker) wakes once more, then
+        # never again: the upgrade's one repeated wake.
+        seen = self.run_file(".seen")
+        (seen / "board").write_text((seen / fleet.BOARD_MARKER).read_text())
+        (seen / fleet.BOARD_MARKER).unlink()
+        out = self.wait()
+        self.assertIn("REPORT board [needs-verification]", out)
+        self.assertEqual(out.count("NOTE board"), 1)
+        out = self.wait(expected=2)
+        self.assertNotIn("REPORT", out)
+        self.assertNotIn("NOTE", out)
+
+    def test_an_upgrade_keeps_how_far_wait_read_the_board(self):
+        """Final review, 3: a run whose wait wrote the old `.seen/board` marker shows no note again."""
+        self.setup_run()
+        self.launch()
+        self.note("@lead first")
+        self.assertIn("NOTE 01", self.wait())
+        seen = self.run_file(".seen")
+        (seen / "board").write_text((seen / fleet.BOARD_MARKER).read_text())  # as the old Fleet left it
+        (seen / fleet.BOARD_MARKER).unlink()
+        self.assertNotIn("NOTE", self.wait(expected=2))
+        self.assertTrue((seen / fleet.BOARD_MARKER).exists())
+        self.note("@lead second")
+        out = self.wait()
+        self.assertIn('NOTE 01: "@lead second"', out)
+        self.assertNotIn("first", out)
+
     def test_lead_mention_wakes_supervise(self):
         self.setup_run()
         self.launch()

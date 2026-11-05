@@ -347,6 +347,35 @@ class WaitEvents(HookCase):
         self.assertNotIn("IDLE", out)
         self.assertIn("TIMEOUT", self.wait(2))
 
+    def test_an_idle_from_before_send_changes_wakes_nothing(self):
+        """Final review, 1: Claude's idle lands about a minute after the hand-back. When the lead parks the report
+        with send --changes after it, that idle belongs to the answered turn and wakes no IDLE while the worker
+        works; an idle after the message still wakes."""
+        self.setup_run()
+        self.launch()
+        self.report()
+        self.hook("Stop", stop("Report written."))
+        self.assertIn("REPORT 01 [needs-verification]", self.wait())
+        self.hook("Notification", notification("idle_prompt", "Claude is waiting for your input"))
+        self.call("send", "demo", "01", "--changes", "Rename the helper too.")
+        self.assertIn("TIMEOUT", self.wait(2))
+        self.hook("Stop", stop("Which helper?"))
+        self.hook("Notification", notification("idle_prompt", "Claude is waiting for your input"))
+        self.assertIn('IDLE 01: Claude reports it idle with no hand-back; its turn ended with "Which helper?"',
+                      self.wait())
+
+    def test_an_idle_from_before_an_answer_to_a_blocked_report_wakes_nothing(self):
+        self.setup_run()
+        self.launch()
+        (self.repo / ".fleet/runs/demo/reports/01.md").write_text("# Worker report\nStatus: blocked\n\nWhich file?\n")
+        self.hook("Stop", stop("Which file?"))
+        self.assertIn("REPORT 01 [blocked]", self.wait())
+        self.hook("Notification", notification("idle_prompt", "Claude is waiting for your input"))
+        self.call("send", "demo", "01", "Use api.txt.")
+        out = self.wait(2)
+        self.assertNotIn("IDLE", out)
+        self.assertNotIn("PENDING 01", out)  # answered (final review, 10)
+
     def test_other_notifications_and_other_launches_are_ignored(self):
         self.setup_run()
         self.launch()
