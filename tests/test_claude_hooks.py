@@ -413,6 +413,7 @@ class ScopePermissions(HookCase):
         report = (self.repo / ".fleet/runs/demo/reports/01.md").resolve()
         self.assertEqual(self.settings()["permissions"],
                          {"allow": [f"Edit(/{self.repo.resolve()}/owned.txt)", f"Edit(/{report})",
+                                    fleet.note_rule("demo", "01"),  # its own fleet note (#45)
                                     "Bash(python3 -m unittest discover -s tests)"]})  # `*` would be a wildcard
         self.assertEqual(self.guard("Write", self.repo / "owned.txt").returncode, 0)
         self.assertEqual(self.guard("Write", self.repo / "other.txt").returncode, 2)
