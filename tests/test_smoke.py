@@ -54,10 +54,8 @@ def expectation(name: str) -> dict:
 
 
 def profile_mode(p: dict, role: str) -> str | None:
-    """The --permission-mode a shipped profile passes, or None when it passes none (with hooks on, a guarded role's)."""
-    args = p.get("profiles", {}).get(role, {}).get("args", "")
-    mode = fleet.hook_mode(SHIPPED, p, role)
-    args = (fleet.with_mode(args, mode) if mode else args).split()
+    """The --permission-mode a shipped profile passes, or None when it passes none; hooks never change it."""
+    args = p.get("profiles", {}).get(role, {}).get("args", "").split()
     return args[args.index("--permission-mode") + 1] if "--permission-mode" in args else None
 
 

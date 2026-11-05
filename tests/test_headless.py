@@ -23,7 +23,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "fixtures"))
 from test_runtime import RuntimeCase, fleet  # noqa: E402
-from fleet_harness import FIXTURES, HAS_TMUX, FleetCase  # noqa: E402
+from fleet_harness import FIXTURES, FLEET, HAS_TMUX, FleetCase  # noqa: E402
 
 FAKE = FIXTURES / "fake_headless.py"
 SHIPPED = fleet.load_config(Path("/nonexistent/fleet-config.toml"))["providers"]
@@ -71,6 +71,24 @@ class ShippedHeadlessLines(unittest.TestCase):
             self.assertEqual(fleet.adapter_profile(SHIPPED[name], fleet.HEADLESS), {"args": "", "level": "read-only"})
             self.assertIsNone(fleet.ceiling_problem(cfg, name, SHIPPED[name], fleet.HEADLESS))
         self.assertIn("above permission_ceiling", fleet.ceiling_problem(cfg, "codex", SHIPPED["codex"], "review"))
+
+    def test_review_fit_and_doctor_judge_a_headless_reviewer_by_its_headless_line(self):
+        cfg = fleet.load_config(Path("/nonexistent/fleet-config.toml"))
+        cfg["defaults"]["permission_ceiling"] = "read-only"
+        why, _ = fleet.review_fit(cfg, "all", None, "codex", "anthropic")
+        self.assertIn("codex's review profile is workspace-write, above permission_ceiling read-only", why)
+        codex = cfg["providers"]["codex"]
+        codex["review_transport"] = "headless"  # what launch would run: read-only by its own flags
+        self.assertEqual(fleet.role_profiles(cfg, codex), ("worker", fleet.HEADLESS))
+        why, route = fleet.review_fit(cfg, "all", None, "codex", "anthropic")
+        self.assertIsNone(why)
+        self.assertEqual(route["provider"], "codex")
+        lines, ok = fleet.profile_report(cfg, "codex", dict(codex, bin="/nonexistent/codex"), "/nonexistent/codex")
+        text = "\n".join(lines)
+        self.assertIn("profiles worker workspace-write, headless read-only", text)
+        self.assertEqual([x for x in lines if "ABOVE CEILING" in x],
+                         [x for x in lines if "ABOVE CEILING: codex's worker profile" in x])  # only the worker's
+        self.assertFalse(ok)
 
     def test_transport_defaults_to_tui_and_needs_a_headless_line(self):
         tui = {"defaults": dict(fleet.DEFAULTS)}
@@ -129,6 +147,11 @@ class ShippedHeadlessLines(unittest.TestCase):
         self.assertEqual(fleet.usage_totals(codex["usage"]), {"input": 2000, "output": 600, "cache_read": 3000})
         self.assertEqual(fleet.headless_output("plain words\n")["message"], "plain words\n")
         self.assertIsNone(fleet.headless_output("")["message"])
+        # Plain text is all message even when a line of it, or all of it, is JSON that is no CLI event.
+        header = '{"fleet": {"status": "needs-verification"}}\nStatus: needs-verification\n'
+        self.assertEqual(fleet.headless_output(header)["message"], header)
+        self.assertEqual(fleet.headless_output('{"fleet": 1}')["message"], '{"fleet": 1}')
+        self.assertEqual(fleet.headless_output(json.dumps([{"a": 1}]))["message"], '[{"a": 1}]')
 
     def test_the_report_is_the_final_message_or_a_blocked_one(self):
         parsed = {"message": "```markdown\n# Report r\n\nStatus: needs-verification\n\nok\n```", "usage": None,
@@ -418,6 +441,38 @@ class HeadlessRuntime(RuntimeCase):
         self.assertIn("had not finished after 0 minutes (headless_timeout_minutes)", text)
         self.assertEqual(json.loads(receipt.read_text())["token"], "tok")
         self.assertNotEqual(code, 0)
+
+
+    def test_an_interrupt_after_the_cli_exits_still_leaves_its_report_and_receipt(self):
+        work = Path(self.temp.name)
+        receipt, report, usage = work / "exit.json", work / "r1.md", work / "usage" / "r1.tok.json"
+        # The CLI prints its message and exits; a process it left holds stderr open, so the runner is still
+        # finishing (reading the rest of stderr) when the stop arrives.
+        cli = "printf 'Status: needs-verification\\n'; (sleep 3 >&2 &)"
+        proc = subprocess.Popen([sys.executable, str(FLEET), "_headless", str(receipt), "tok", str(report), str(usage), cli],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        deadline = time.monotonic() + 20
+        while not receipt.with_suffix(".started.json").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(1)
+        proc.send_signal(signal.SIGTERM)
+        out, _ = proc.communicate(timeout=20)
+        self.assertNotIn("Traceback", out)
+        self.assertEqual(json.loads(receipt.read_text()), {"token": "tok", "returncode": 0})
+        self.assertEqual(fleet.parse_status(report.read_text()), "needs-verification")
+        self.assertFalse(json.loads(usage.read_text())["interrupted"])
+
+    def test_a_hooks_adapter_runs_its_headless_reviewer_without_hooks(self):
+        self.cfg["providers"]["reviewer"].update(hooks="claude-settings",
+                                                 launch=self.cfg["providers"]["reviewer"]["launch"] + " {settings}")
+        self.use_headless()
+        self.reviewed()
+        reviewer = self.state()["workers"]["review-01"]
+        self.assertEqual(reviewer["transport"], "headless")
+        self.assertNotIn("hooks", reviewer)
+        self.assertNotIn("--settings", reviewer["command"])
+        self.assertFalse((self.repo / ".fleet/runs/demo/settings/review-01.json").exists())
 
 
 @unittest.skipUnless(HAS_TMUX, "tmux is not installed")

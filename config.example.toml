@@ -21,8 +21,9 @@ review = "cross-heavy"
 # permission_ceiling = "workspace-write"
 # Claude workers launch with Fleet's hooks: a guard that refuses edits outside the ticket's files and the worker's
 # report, and events that wake the lead on a permission prompt (PERMISSION) or an idle worker (IDLE). With
-# scope_permissions on, Claude workers also auto-accept edits (acceptEdits: the guard keeps them in scope) and run
-# their ticket's planned check commands without asking; nothing else is allowed. Off by default; only you turn it on.
+# scope_permissions on, Claude workers may also edit their own files and run their ticket's planned check commands
+# without asking (allow rules for exactly those; the permission mode is unchanged), and nothing else is allowed.
+# Off by default; only you turn it on.
 # scope_permissions = true
 # Reviewers and investigators on Claude or Codex can run headless and read-only by the CLI's own flags: their
 # final message becomes the report, they never stall at a prompt, and their token use goes to `fleet cost`.

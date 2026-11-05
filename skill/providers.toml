@@ -57,11 +57,11 @@ bin = "claude"
 launch = "{bin} {session} --model {model} --effort {effort} {profile} {settings} {prompt}"
 hooks = "claude-settings"
 # Workers get no mode flag, so the account's permissions.defaultMode applies, as before profiles, unless the owner
-# sets [defaults] scope_permissions = true (then acceptEdits, with the guard and their planned checks allowed).
-# Without hooks, reviewers pin manual mode (`claude --help` 2.1.318: Claude asks before each edit and command, its
-# own report included), so a looser defaultMode never reaches them. With hooks on, the guard lets a reviewer write
-# only its report, so launch swaps manual for acceptEdits and the report write needs no answer; the level stays
-# read-only, since that is still all it can change. Allow rules in Claude's settings apply in either mode.
+# sets [defaults] scope_permissions = true (then allow rules for their own files and planned checks, same mode).
+# Reviewers pin manual mode (`claude --help` 2.1.318: Claude asks before each edit and command), so a looser
+# defaultMode never reaches them. With hooks on, the guard lets a reviewer write only its report and its settings
+# allow that one file, so the report write needs no answer. Hooks never change the mode, so a guard that cannot run
+# leaves every other edit asking: the level stays read-only either way.
 profiles.worker = { args = "", level = "workspace-write" }
 profiles.review = { args = "--permission-mode manual", level = "read-only" }
 # Headless (review_transport = "headless"): `-p` with nobody to answer (`--permission-prompts none`) in manual mode,

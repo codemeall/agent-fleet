@@ -119,30 +119,28 @@ class Shipped(unittest.TestCase):
         for name in ("codex", "cursor", "agy", "opencode"):
             with self.subTest(name):
                 self.assertFalse(fleet.hooks_on(p[name]))
-                self.assertIsNone(fleet.hook_mode(SHIPPED, p[name], "review"))
-                self.assertNotIn("--settings", fleet.build_launch(p[name], "m", "high", "go", settings="/x.json",
-                                                                  mode="acceptEdits"))
+                self.assertNotIn("--settings", fleet.build_launch(p[name], "m", "high", "go", settings="/x.json"))
         # Without a settings file the shipped Claude lines are the ones from before hooks.
         self.assertEqual(fleet.build_launch(p["claude"], "opus", "high", "go", profile="review"),
                          "env -u CLAUDE_CONFIG_DIR claude --model opus --effort high --permission-mode manual go")
-        self.assertEqual(fleet.build_launch(p["claude"], "opus", "high", "go", settings="/r/s.json",
-                                            mode="acceptEdits", profile="review"),
-                         "env -u CLAUDE_CONFIG_DIR claude --model opus --effort high --permission-mode acceptEdits "
+        # With one, a reviewer keeps manual mode: the settings add hooks and allow rules, never a looser mode.
+        self.assertEqual(fleet.build_launch(p["claude"], "opus", "high", "go", settings="/r/s.json", profile="review"),
+                         "env -u CLAUDE_CONFIG_DIR claude --model opus --effort high --permission-mode manual "
                          "--settings /r/s.json go")
         # An owner's launch line without {settings} runs as written: no hooks, and reviewers stay in manual mode.
         old = dict(p["claude"], launch="{bin} {session} --model {model} --effort {effort} {profile} {prompt}")
         self.assertFalse(fleet.hooks_on(old))
-        self.assertIsNone(fleet.hook_mode(SHIPPED, old, "review"))
-        self.assertEqual(fleet.build_launch(old, "opus", "high", "go", settings="/r/s.json", mode="acceptEdits",
-                                            profile="review"),
+        self.assertEqual(fleet.build_launch(old, "opus", "high", "go", settings="/r/s.json", profile="review"),
                          "env -u CLAUDE_CONFIG_DIR claude --model opus --effort high --permission-mode manual go")
         self.assertFalse(fleet.hooks_on(dict(p["claude"], hooks="")))
+        self.assertFalse(fleet.hooks_on(p["claude"], fleet.HEADLESS))  # a headless run has its own line, no hooks
 
-    def test_with_mode_replaces_only_a_manual_mode(self):
-        self.assertEqual(fleet.with_mode("--permission-mode manual", "acceptEdits"), "--permission-mode acceptEdits")
-        self.assertEqual(fleet.with_mode("--permission-mode=default --x", "acceptEdits"), "--permission-mode=acceptEdits --x")
-        self.assertEqual(fleet.with_mode("", "acceptEdits"), "--permission-mode acceptEdits")
-        self.assertEqual(fleet.with_mode("--permission-mode plan", "acceptEdits"), "--permission-mode plan")
+    def test_an_edit_rule_matches_exactly_one_literal_path(self):
+        self.assertEqual(fleet.edit_rule("/r/a.py"), "Edit(//r/a.py)")
+        self.assertEqual(fleet.edit_rule("/r/[x]*?.py"), r"Edit(//r/\[x\]\*\?.py)")
+        self.assertEqual(fleet.edit_rule("/r/a\\b"), r"Edit(//r/a\\b)")
+        self.assertEqual(fleet.edit_rule("/r/odd  "), r"Edit(//r/odd\ \ )")  # gitignore drops unescaped trailing spaces
+        self.assertEqual(fleet.edit_rule("/r/Finance (2024)/a.md"), "Edit(//r/Finance (2024)/a.md)")
 
     def test_config_checks_the_new_keys(self):
         self.assertIs(SHIPPED["defaults"]["scope_permissions"], False)
@@ -246,14 +244,12 @@ class Guard(HookCase):
         self.review_prompt()
         self.launch("review-01", "reviewer", "review")
         w = self.worker_rec("review-01")
-        self.assertIn("--permission-mode acceptEdits --settings ", w["command"])
-        self.assertNotIn("manual", w["command"])
+        self.assertIn("--permission-mode manual --settings ", w["command"])  # the guard never loosens the mode
+        self.assertNotIn("acceptEdits", w["command"])
         self.assertEqual(fleet.adapter_profile(self.cfg["providers"]["reviewer"], "review")["level"], "read-only")
-        settings = self.settings("review-01")
-        self.assertEqual(settings["permissions"]["ask"],
-                         [f"Bash({c} *)" for c in ("mkdir", "touch", "rm", "rmdir", "mv", "cp", "sed")])
-        self.assertNotIn("allow", settings["permissions"])
         report = self.repo / ".fleet/runs/demo/reports/review-01.md"
+        # Its one file needs no answer; any other edit asks in manual mode even if the guard cannot run.
+        self.assertEqual(self.settings("review-01")["permissions"], {"allow": [f"Edit(/{report.resolve()})"]})
         self.assertEqual(self.guard("Write", report, "review-01").returncode, 0)
         res = self.guard("Edit", self.repo / "owned.txt", "review-01")
         self.assertEqual(res.returncode, 2)
@@ -262,8 +258,10 @@ class Guard(HookCase):
     def test_an_investigator_writes_only_its_report(self):
         self.setup_run(tickets=[{"id": "look", "files": [], "kind": "investigate"}])
         self.launch("look")
-        self.assertIn("--permission-mode acceptEdits", self.worker_rec("look")["command"])
-        self.assertEqual(self.guard("Write", self.repo / ".fleet/runs/demo/reports/look.md", "look").returncode, 0)
+        self.assertIn("--permission-mode manual", self.worker_rec("look")["command"])
+        report = self.repo / ".fleet/runs/demo/reports/look.md"
+        self.assertEqual(self.settings("look")["permissions"], {"allow": [f"Edit(/{report.resolve()})"]})
+        self.assertEqual(self.guard("Write", report, "look").returncode, 0)
         self.assertEqual(self.guard("Write", self.repo / "owned.txt", "look").returncode, 2)
 
     def test_a_grant_widens_the_running_guard(self):
@@ -373,8 +371,8 @@ class WaitEvents(HookCase):
         marker.write_text(f"{key}|{float(since) - 61}|{flagged}")
         self.assertEqual(fleet.scan_workers(self.repo, self.state(), seen, 60), [])  # already told: no STALLED
         events = seen / "01.events"  # as if the line was shown before the screen last changed, which then stuck
-        token, done, told = events.read_text().split("|")
-        events.write_text(f"{token}|{done}|{float(since) - 62}")
+        token, done, told, words = events.read_text().split("|", 3)
+        events.write_text(f"{token}|{done}|{float(since) - 62}|{words}")
         marker.write_text(f"{key}|{float(since) - 61}|0")
         [stalled] = fleet.scan_workers(self.repo, self.state(), seen, 60)
         self.assertIn("STALLED 01 screen unchanged for", stalled)
@@ -406,16 +404,35 @@ class ScopePermissions(HookCase):
         self.assertNotIn("--permission-mode", self.worker_rec()["command"])
         self.assertNotIn("permissions", self.settings())
 
-    def test_on_a_worker_auto_accepts_edits_and_runs_only_its_planned_checks(self):
+    def test_on_a_worker_may_edit_its_own_files_and_run_only_its_planned_checks_unasked(self):
         self.cfg["defaults"]["scope_permissions"] = True
         self.setup_run(tickets=[dict(t) for t in self.TICKETS])
         self.launch()
-        self.assertIn("--permission-mode acceptEdits --settings ", self.worker_rec()["command"])
-        perms = self.settings()["permissions"]
-        self.assertEqual(perms["allow"], ["Bash(python3 -m unittest discover -s tests)"])  # `*` would be a wildcard
-        self.assertIn("Bash(mv *)", perms["ask"])
+        command = self.worker_rec()["command"]
+        self.assertNotIn("--permission-mode", command)  # the account's own mode; only the rules below are added
+        report = (self.repo / ".fleet/runs/demo/reports/01.md").resolve()
+        self.assertEqual(self.settings()["permissions"],
+                         {"allow": [f"Edit(/{self.repo.resolve()}/owned.txt)", f"Edit(/{report})",
+                                    "Bash(python3 -m unittest discover -s tests)"]})  # `*` would be a wildcard
         self.assertEqual(self.guard("Write", self.repo / "owned.txt").returncode, 0)
-        self.assertEqual(self.guard("Write", self.repo / "other.txt").returncode, 2)  # acceptEdits stays in scope
+        self.assertEqual(self.guard("Write", self.repo / "other.txt").returncode, 2)
+
+    def test_a_grant_extends_a_scoped_workers_rules(self):
+        self.cfg["defaults"]["scope_permissions"] = True
+        self.setup_run(tickets=[dict(t) for t in self.TICKETS])
+        self.launch()
+        self.call("grant", "demo", "01", "extra.txt", "--reason", "the helper lives there")
+        allow = self.settings()["permissions"]["allow"]
+        root = self.repo.resolve()
+        self.assertEqual(allow[:2], [f"Edit(/{root}/extra.txt)", f"Edit(/{root}/owned.txt)"])
+        self.assertEqual(allow[-1], "Bash(python3 -m unittest discover -s tests)")
+        self.assertEqual(self.guard("Write", self.repo / "extra.txt").returncode, 0)
+
+    def test_without_scope_permissions_a_grant_adds_no_rules(self):
+        self.setup_run()
+        self.launch()
+        self.call("grant", "demo", "01", "extra.txt", "--reason", "the helper lives there")
+        self.assertNotIn("permissions", self.settings())
 
 
 if __name__ == "__main__":

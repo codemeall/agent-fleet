@@ -100,10 +100,7 @@ HOOK_METHODS = ("claude-settings",)  # an adapter's `hooks`: how launch gives a 
 # Claude Code's file-editing tools, by their hook matcher names (code.claude.com/docs/en/hooks, tools-reference;
 # MultiEdit is legacy but harmless to match). Each names its file in tool_input.file_path, NotebookEdit in notebook_path.
 CLAUDE_EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
-CLAUDE_GUARDED_MODE = "acceptEdits"  # edits apply unasked; the guard keeps them to the worker's own files
-# acceptEdits also auto-approves these Bash commands in the working directory (permission-modes docs), where the
-# guard cannot see them, so a guarded launch asks for them as manual mode would.
-CLAUDE_ASK_COMMANDS = ("mkdir", "touch", "rm", "rmdir", "mv", "cp", "sed")
+GITIGNORE_SPECIAL_RE = re.compile(r"([\\*?\[\]])")  # Claude's Edit rules are gitignore patterns (permissions docs)
 HOOK_TIMEOUT_S = 10  # seconds Claude gives a hook; a hook that times out or fails lets the action go ahead
 PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
 TEMPLATE_KEYS = {"id", "ticket", "report", "repo", "files", "diff", "review_of", "handdown", "inbox", "transport",
@@ -126,8 +123,6 @@ class PaneLimit(FleetError):
 # ---------- config ----------
 
 REPLACE_KEYS = {"models_allow"}  # a user's list replaces the shipped one instead of merging into it
-# Keys load_config knows besides DEFAULTS'. An unknown key only warns in this version; the next one refuses it.
-DEFAULTS_EXTRA_KEYS = ("scope_permissions", "review_transport")
 ADAPTER_FIELDS = (  # every adapter field the providers.toml header documents, plus bin, max, plugins and env
     "enabled", "placeholder", "extends", "bin", "bin_aliases", "launch", "profiles", "session", "resume", "quit",
     "login", "login_ok", "account_env", "env", "trust", "models", "model_config", "default_home", "model_note",
@@ -154,7 +149,7 @@ def config_schema() -> dict:
     adapter = dict.fromkeys(ADAPTER_FIELDS)
     adapter["tiers"] = {"*": dict.fromkeys(TIER_FIELDS)}
     adapter["profiles"] = {p: dict.fromkeys(PROFILE_FIELDS) for p in PROFILES}
-    return {"defaults": dict.fromkeys([*DEFAULTS, *DEFAULTS_EXTRA_KEYS]),
+    return {"defaults": dict.fromkeys(DEFAULTS),
             "providers": {"*": adapter},
             "lead_context": {host: {"warn_at": None, "dumb_at": None} for host in LEAD_HOSTS}}
 
@@ -381,6 +376,12 @@ def review_transport(cfg: dict, pcfg: dict) -> str:
     return HEADLESS if want == HEADLESS and pcfg.get(HEADLESS) else "tui"
 
 
+def role_profiles(cfg: dict, pcfg: dict) -> tuple[str, str]:
+    """The profiles this adapter's workers and its reviewers and investigators launch with, as launch picks them:
+    what review_fit, doctor and the ceiling check must judge."""
+    return "worker", HEADLESS if review_transport(cfg, pcfg) == HEADLESS else "review"
+
+
 def adapter_profile(pcfg: dict, profile: str) -> dict:
     """A profile's launch fragment and level. A launch line without a {profile} slot (an owner's override from before
     profiles) runs as written for every role, so it counts at the worker level; an adapter that declares no profiles
@@ -415,10 +416,10 @@ def check_ceiling(cfg: dict, name: str, pcfg: dict, profile: str) -> None:
 
 def build_launch(pcfg: dict, model: str, effort: str | None, prompt: str,
                  session: str | None = None, resume: bool = False, trust: str = "", profile: str = "worker",
-                 settings: str | None = None, mode: str | None = None) -> str:
+                 settings: str | None = None) -> str:
     """The worker's command line. `settings`, a hooks adapter's per-worker settings file, fills the {settings} slot;
-    `mode` is the permission mode its guard lets the role run in (hook_mode). Without them, and for a launch line
-    without the slot, the line is the one launch built before hooks."""
+    without it, and for a launch line without the slot, the line is the one launch built before hooks. The
+    profile's permission mode is never changed: the settings file only adds hooks and allow rules."""
     template = pcfg[HEADLESS] if profile == HEADLESS else pcfg["launch"]
     if "{effort}" in template and not effort:
         raise FleetError("this provider's launch needs an effort: pass --effort or set it on the tier")
@@ -430,8 +431,6 @@ def build_launch(pcfg: dict, model: str, effort: str | None, prompt: str,
     if not slot:
         template = template.replace(" {settings}", "").replace("{settings}", "")
     args = adapter_profile(pcfg, profile)["args"]  # trusted adapter config, like bin, so not quoted
-    if slot and mode and "{profile}" in template:  # the mode leans on the guard, so only with the settings file
-        args = with_mode(args, mode)
     if not args:
         template = template.replace(" {profile}", "").replace("{profile}", "")
     return env_prefix(pcfg) + template.format(bin=pcfg["bin"] + (" " + trust if trust else ""), session=flag, model=shlex.quote(model),
@@ -443,35 +442,33 @@ def build_launch(pcfg: dict, model: str, effort: str | None, prompt: str,
 # An adapter with hooks = "claude-settings" launches each worker with its own Claude settings file (--settings):
 # a PreToolUse guard on the file-editing tools that refuses any path outside the worker's own files and report,
 # and Notification and Stop hooks that append events for wait. The hooks run `fleet _hook`, which reads a small
-# scope file written at launch (never run.json or its lock) and fails safe: when it cannot decide, it allows the
-# action and logs why. Fleet never answers a prompt, and the guard only narrows what a worker may do.
+# scope file written at launch (never run.json or its lock). The settings never change a role's permission mode,
+# so the guard fails closed: a hook that errs, times out or cannot run lets Claude's own prompt decide, as it
+# would without hooks. What the settings may allow without asking is exactly a reviewer's or investigator's report
+# and, with the owner's scope_permissions, a worker's own files and planned check commands. Fleet never answers a
+# prompt, and the hooks only narrow what a worker may do.
 
-def hooks_on(pcfg: dict) -> bool:
-    """True when launch gives this adapter's workers Fleet's settings file: `hooks` set and a {settings} slot. An
-    owner's launch line without the slot runs as written, without hooks."""
-    return pcfg.get("hooks") in HOOK_METHODS and "{settings}" in pcfg.get("launch", "")
-
-
-def hook_mode(cfg: dict, pcfg: dict, profile: str) -> str | None:
-    """The permission mode a guarded role runs in, or None to keep its profile's. A reviewer or investigator may
-    write only its report, which the guard enforces, so it no longer needs manual mode to keep other edits from
-    happening. A worker keeps the account's own mode unless the owner turned on scope_permissions."""
-    if not hooks_on(pcfg):
-        return None
-    if profile == "review" or cfg.get("defaults", DEFAULTS).get("scope_permissions"):
-        return CLAUDE_GUARDED_MODE
-    return None
+def hooks_on(pcfg: dict, profile: str = "worker") -> bool:
+    """True when launch gives this role Fleet's settings file: the adapter's `hooks` set, a {settings} slot in its
+    launch line, and a role that runs that line. An owner's launch line without the slot runs as written, without
+    hooks; a headless run uses its own line and has no hooks."""
+    return (profile != HEADLESS and pcfg.get("hooks") in HOOK_METHODS
+            and "{settings}" in pcfg.get("launch", ""))
 
 
-def with_mode(args: str, mode: str) -> str:
-    """Profile args with Claude's permission mode set to `mode`: a manual mode is replaced, a missing one added, and
-    any other mode the owner chose is kept as written."""
-    found = re.search(r"--permission-mode(?:=|\s+)(\S+)", args)
-    if not found:
-        return f"{args} --permission-mode {mode}".strip()
-    if found.group(1) not in ("manual", "default"):
-        return args
-    return args[:found.start(1)] + mode + args[found.end(1):]
+def edit_rule(path: str) -> str:
+    """A Claude allow rule for exactly one absolute path. `//` anchors it at the filesystem root and gitignore's
+    pattern characters, and trailing spaces, are escaped, so it matches that file and nothing else (permissions
+    docs: Edit rules cover every built-in editing tool). A rule Claude cannot read approves nothing, so the edit
+    still asks."""
+    body = GITIGNORE_SPECIAL_RE.sub(r"\\\1", path)
+    stripped = body.rstrip(" ")
+    return "Edit(/" + stripped + "\\ " * (len(body) - len(stripped)) + ")"
+
+
+def edit_rules(scope: dict) -> list[str]:
+    """Allow rules for a scope's own files and its report, the paths its guard lets it write."""
+    return [edit_rule(os.path.join(scope["repo"], f)) for f in scope["files"]] + [edit_rule(scope["report"])]
 
 
 def allow_rules(commands: list[dict]) -> list[str]:
@@ -486,7 +483,7 @@ def hook_command(kind: str, scope: Path, events: Path, token: str) -> str:
     return shlex.join([sys.executable, str(Path(__file__).resolve()), "_hook", kind, str(scope), str(events), token])
 
 
-def hook_settings(scope: Path, events: Path, token: str, mode: str | None, allow: list[str]) -> dict:
+def hook_settings(scope: Path, events: Path, token: str, allow: list[str]) -> dict:
     """The worker's Claude settings. --settings layers them above the account's and the project's own files, and
     list keys merge (settings docs): these hooks and rules add to the owner's, never replace them."""
     def run(kind: str) -> list[dict]:
@@ -499,13 +496,8 @@ def hook_settings(scope: Path, events: Path, token: str, mode: str | None, allow
             "Stop": [{"hooks": run("stop")}],
         },
     }
-    permissions = {}
-    if mode == CLAUDE_GUARDED_MODE:  # ask rules come before the mode's own approvals (deny, ask, then allow)
-        permissions["ask"] = [f"Bash({c} *)" for c in CLAUDE_ASK_COMMANDS]
     if allow:
-        permissions["allow"] = allow
-    if permissions:
-        settings["permissions"] = permissions
+        settings["permissions"] = {"allow": allow}
     return settings
 
 
@@ -516,20 +508,36 @@ def hook_files(d: Path, wid: str) -> tuple[Path, Path, Path]:
     return d / "settings" / f"{wid}.json", d / "settings" / f"{wid}.scope.json", d / "events" / f"{wid}.jsonl"
 
 
-def write_hooks(repo: Path, d: Path, wid: str, files: list[str], token: str, mode: str | None,
-                allow: list[str]) -> dict:
-    """Write a launch's settings and scope files; returns the paths the worker record keeps."""
+def write_hooks(repo: Path, d: Path, wid: str, files: list[str], token: str, scoped: bool,
+                commands: list[dict]) -> dict:
+    """Write a launch's settings and scope files; returns the paths the worker record keeps. A reviewer or
+    investigator (no files) may write its report unasked. A worker gets allow rules for its files, report and
+    planned checks only when `scoped` (the owner's scope_permissions); otherwise every edit asks as the account's
+    mode says."""
     settings, scope, events = hook_files(d, wid)
-    atomic_json(scope, {"id": wid, "token": token, "repo": str(repo.resolve()), "files": sorted(files),
-                        "report": str((d / "reports" / f"{wid}.md").resolve())})
-    atomic_json(settings, hook_settings(scope, events, token, mode, allow))
-    return {"settings": str(settings), "scope": str(scope), "events": str(events)}
+    held = {"id": wid, "token": token, "repo": str(repo.resolve()), "files": sorted(files),
+            "report": str((d / "reports" / f"{wid}.md").resolve())}
+    atomic_json(scope, held)
+    if scoped:
+        allow = edit_rules(held) + allow_rules(commands)
+    else:
+        allow = [] if files else [edit_rule(held["report"])]
+    atomic_json(settings, hook_settings(scope, events, token, allow))
+    return {"settings": str(settings), "scope": str(scope), "events": str(events), **({"scoped": True} if scoped else {})}
 
 
 def refresh_scope(w: dict, files: list[str]) -> None:
-    """After a grant, a running worker's guard allows its new files from its next edit."""
+    """After a grant, a running worker's guard allows its new files from its next edit. A scoped worker's allow
+    rules follow; Claude may read its settings only at start, and then a granted file asks until a relaunch."""
     scope = Path(w["hooks"]["scope"])
-    atomic_json(scope, dict(json.loads(scope.read_text()), files=sorted(files)))
+    held = dict(json.loads(scope.read_text()), files=sorted(files))
+    atomic_json(scope, held)
+    if w["hooks"].get("scoped"):
+        path = Path(w["hooks"]["settings"])
+        settings = json.loads(path.read_text())
+        allow = settings.setdefault("permissions", {}).get("allow", [])
+        settings["permissions"]["allow"] = edit_rules(held) + [r for r in allow if not r.startswith("Edit(")]
+        atomic_json(path, settings)
 
 
 def hook_log(events: str, token: str, event: str, **fields) -> None:
@@ -1077,14 +1085,18 @@ def safe_file(repo: Path, value: str) -> str:
     return path.as_posix()
 
 
-def atomic_json(path: Path, data: dict) -> None:
-    contained(path.parent, path)
+def write_text_atomic(path: Path, text: str) -> None:
     temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
     try:
-        temp.write_text(json.dumps(data, indent=2) + "\n")
+        temp.write_text(text)
         temp.replace(path)
     finally:
         temp.unlink(missing_ok=True)
+
+
+def atomic_json(path: Path, data: dict) -> None:
+    contained(path.parent, path)
+    write_text_atomic(path, json.dumps(data, indent=2) + "\n")
 
 
 @contextmanager
@@ -1588,6 +1600,7 @@ def run_child(args: list[str]) -> int:
 
 HEADLESS_TAIL = 20  # stderr lines a blocked report quotes
 HEADLESS_KILL_S = 5  # after an interrupt, how long the CLI gets to exit before it is killed
+HEADLESS_EVENT_TYPES = {"result", "system", "assistant", "user", "stream_event", "error"}  # plus thread./turn./item.
 REPORT_FENCE_RE = re.compile(r"\A\s*(`{3,}|~{3,})[ \t]*(?:markdown|md)?[ \t]*\n(.*)\n[ \t]*\1[ \t]*\Z", re.S)
 
 
@@ -1614,6 +1627,14 @@ def codex_usage(u: dict) -> dict:
     return out
 
 
+def headless_event(e) -> bool:
+    """A JSON value is one of the CLIs' own events only by its type: Claude's result, system, assistant, user and
+    stream_event, or Codex's error and thread., turn. and item. events. Any other JSON (a report's own `fleet`
+    header on one line, say) is part of a plain-text message."""
+    kind = e.get("type") if isinstance(e, dict) else None
+    return isinstance(kind, str) and (kind in HEADLESS_EVENT_TYPES or kind.startswith(("thread.", "turn.", "item.")))
+
+
 def headless_output(text: str) -> dict:
     """The final message, usage, denied tool calls and errors in a headless CLI's stdout: Claude's
     `--output-format json` result object (or stream-json's closing `result` line), Codex's `exec --json` events, or
@@ -1629,10 +1650,9 @@ def headless_output(text: str) -> dict:
                     events.append(json.loads(line))
                 except ValueError:
                     pass
+    events = [e for e in events if headless_event(e)]
     out = {"message": None, "usage": None, "denials": [], "errors": []}
     for e in events:
-        if not isinstance(e, dict):
-            continue
         kind = e.get("type")
         item = e.get("item") if isinstance(e.get("item"), dict) else {}
         if kind == "result":  # Claude: the run's last message, its usage and every call its permissions denied
@@ -1707,18 +1727,10 @@ def headless_report(wid: str, code: int, parsed: dict, tail: list[str]) -> str:
     return text
 
 
-def write_text_atomic(path: Path, text: str) -> None:
-    temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    try:
-        temp.write_text(text)
-        temp.replace(path)
-    finally:
-        temp.unlink(missing_ok=True)
-
-
 def headless_child(args: list[str]) -> int:
     """`fleet _headless`: runs inside the worker terminal. Writes the report, the usage sidecar and the exit receipt,
-    never the shared run state. An interrupt (`fleet stop` sends Ctrl-C) stops the CLI and leaves no report."""
+    never the shared run state. An interrupt (`fleet stop` sends Ctrl-C) stops the CLI and leaves no report; one that
+    comes after the CLI has exited is ignored, so the report, usage and receipt are always written."""
     if len(args) not in (5, 6):
         raise FleetError("internal headless runner expects receipt, token, report, usage file, command[, seconds]")
     receipt, token, report, usage_file, command = Path(args[0]), args[1], Path(args[2]), Path(args[3]), args[4]
@@ -1729,6 +1741,8 @@ def headless_child(args: list[str]) -> int:
     # closed window or a TERM ends it the same way. stdin is empty: the CLI takes its prompt from the command line.
     def interrupt(signum, frame):
         raise KeyboardInterrupt
+    caught = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    previous = {sig: signal.getsignal(sig) for sig in caught}  # put back on return: ignored ones would be inherited
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, interrupt)
     child = subprocess.Popen(command, shell=True, executable="/bin/sh", stdin=subprocess.DEVNULL, text=True,
@@ -1780,9 +1794,11 @@ def headless_child(args: list[str]) -> int:
                 kill = threading.Timer(HEADLESS_KILL_S, end, (signal.SIGKILL,))
                 kill.daemon = True
                 kill.start()
-    errs.join(timeout=5)
+    for sig in caught:  # the CLI is done; finish its files whatever comes
+        signal.signal(sig, signal.SIG_IGN)
     parsed = {"message": None, "usage": None, "denials": [], "errors": []}
     try:
+        errs.join(timeout=5)
         text = "".join(out)
         usage_file.parent.mkdir(parents=True, exist_ok=True)
         usage_file.with_suffix(".out").write_text(text)  # the CLI's own output, for the lead to inspect
@@ -1797,6 +1813,8 @@ def headless_child(args: list[str]) -> int:
                                  "usage": parsed["usage"], "denials": parsed["denials"], "errors": parsed["errors"]})
     finally:
         atomic_json(receipt, {"token": token, "returncode": code})  # last: reconcile reads the rest once it exists
+        for sig, handler in previous.items():
+            signal.signal(sig, signal.SIG_DFL if handler is None else handler)
     status = "stopped" if interrupted else parse_status(report.read_text()) if report.exists() else None
     print(f"fleet: {wid} exited {code}; report {status or 'missing'}"
           + (f"; {len(parsed['denials'])} call(s) denied" if parsed["denials"] else ""), flush=True)
@@ -3118,13 +3136,14 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     token = uuid.uuid4().hex
     line = (resume_prompt_line(prompt_path, a.id, report, inbox_path(repo, a.run, a.id)) if a.resume
             else worker_prompt_line(prompt_path, a.id))
-    hooks, mode = None, hook_mode(cfg, pcfg, profile)
-    if hooks_on(pcfg):  # a worker writes its own files; a reviewer or investigator only its report
-        scoped = profile == "worker" and cfg["defaults"].get("scope_permissions")
-        hooks = write_hooks(repo, d, a.id, t["files"] if profile == "worker" else [], token, mode,
-                            allow_rules(t.get("commands", [])) if scoped else [])
+    hooks = None
+    if hooks_on(pcfg, profile):  # a worker writes its own files; a reviewer or investigator only its report
+        worker_role = profile == "worker"
+        hooks = write_hooks(repo, d, a.id, t["files"] if worker_role else [], token,
+                            worker_role and bool(cfg["defaults"].get("scope_permissions")),
+                            t.get("commands", []) if worker_role else [])
     command = build_launch(pcfg, model, effort, line, session, a.resume, prepare_trust(cfg, a.provider, pcfg, repo),
-                           profile, hooks and hooks["settings"], mode)
+                           profile, hooks and hooks["settings"])
     exit_file = d / "exits" / f"{a.id}.{token}.json"
     headless = {}
     if profile == HEADLESS:  # its runner writes the report, usage and receipt; reconcile records the usage
@@ -3146,6 +3165,8 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         token=token, exit_file=str(exit_file), launched=time.strftime("%Y-%m-%dT%H:%M:%S"),
         launched_at=time.time(),
         **({"session": session} if session else {}), **headless, **({"hooks": hooks} if hooks else {}))
+    # Counted before the terminal opens: a failed open is an uncertain launch that may be running, so it holds a
+    # launch and wall time, as it holds capacity, until the lead stops or recovers it.
     state.setdefault("ledger", []).append(ledger_entry(state, a.id, state["workers"][a.id], a.resume,
                                                        usage_home(pcfg) if session else None))
     save_run(repo, a.run, state)
@@ -4015,35 +4036,37 @@ def hook_events(state: dict, w: dict, seen: Path, handed_back: bool, now: float)
 
     permission-prompt wakes PERMISSION; idle wakes IDLE unless the worker has handed back; turn-ended never wakes on
     its own (a hand-back already does) but gives IDLE the worker's last words. Events from an earlier launch of the
-    same ticket carry another token and are skipped."""
+    same ticket carry another token and are skipped. Each pass reads only what was appended since the last one; the
+    marker keeps the last turn-ended words, since an idle event comes about a minute after them."""
     path, token = (w.get("hooks") or {}).get("events"), w.get("token", "")
     if not path:
         return [], 0.0
     marker = seen / f"{w['id']}.events"
     try:
-        kept, done, told = marker.read_text().split("|")
-        done, told = (int(done), float(told)) if kept == token else (0, 0.0)
+        kept, done, told, *words = marker.read_text().split("|", 3)
+        done, told, last_words = ((int(done), float(told), str(json.loads(words[0])) if words else "")
+                                  if kept == token else (0, 0.0, ""))
     except (FileNotFoundError, ValueError):
-        done, told = 0, 0.0
+        done, told, last_words = 0, 0.0, ""
     try:
-        data = contained(run_dir(Path(state["repo"]), state["run"]), Path(path)).read_bytes()
+        with contained(run_dir(Path(state["repo"]), state["run"]), Path(path)).open("rb") as fh:
+            if done > os.fstat(fh.fileno()).st_size:  # a file replaced since: read it from the start
+                done, last_words = 0, ""
+            fh.seek(done)
+            data = fh.read()
     except (OSError, FleetError):
         return [], told
     data = data[:data.rfind(b"\n") + 1]  # a line a hook is still writing waits for the next pass
-    done = done if done <= len(data) else 0  # a file replaced since: read it from the start
-    lines, run, i, at, last_words = [], state["run"], w["id"], 0, ""
-    for raw in data.splitlines(keepends=True):
-        fresh, at = at >= done, at + len(raw)
+    lines, run, i = [], state["run"], w["id"]
+    for raw in data.splitlines():
         try:
             e = json.loads(raw)
         except ValueError:
             continue
         if not isinstance(e, dict) or e.get("token") != token:
             continue
-        if e.get("event") == "turn-ended":  # read again on every pass: an idle event comes about a minute later
+        if e.get("event") == "turn-ended":
             last_words = one_line(e.get("message"), 160)
-        elif not fresh:
-            continue
         elif e.get("event") == "permission-prompt":
             lines.append(f"PERMISSION {i}: {one_line(e.get('message')) or 'a permission prompt'}; the owner answers "
                          "it in the worker's pane (fleet agents); the lead never does")
@@ -4052,7 +4075,7 @@ def hook_events(state: dict, w: dict, seen: Path, handed_back: bool, now: float)
             lines.append(f"IDLE {i}: Claude reports it idle with no hand-back{said}; fleet peek {run} {i}, then "
                          f"answer a question for the lead with fleet send {run} {i} (a prompt is the owner's)")
     told = now if lines else told
-    marker.write_text(f"{token}|{len(data)}|{told}")
+    marker.write_text(f"{token}|{done + len(data)}|{told}|{json.dumps(last_words)}")
     return lines, told
 
 
@@ -4983,7 +5006,7 @@ def review_fit(cfg: dict, routing: str, pool: dict | None, name: str, writer_fam
         check_allowed(pcfg, name, model)
         check_effort(pcfg, name, effort)
         check_pool(pool, name, model, "reviewer")
-        check_ceiling(cfg, name, pcfg, "review")
+        check_ceiling(cfg, name, pcfg, role_profiles(cfg, pcfg)[1])  # headless where launch would run it so
     except FleetError as e:
         return str(e), {}
     family = model_family(pcfg, "review", model, family)
@@ -5403,17 +5426,20 @@ def profile_report(cfg: dict, name: str, p: dict, found: str) -> tuple[list[str]
     it; flag drift only warns, because help text is not a contract."""
     pad = " " * 14
     ceiling = cfg.get("defaults", DEFAULTS).get("permission_ceiling", DEFAULTS["permission_ceiling"])
-    levels = ", ".join(f"{role} {adapter_profile(p, role)['level']}" for role in PROFILES)
+    roles = role_profiles(cfg, p)  # a headless reviewer is judged by its headless line, as launch runs it
+    levels = ", ".join(f"{role} {adapter_profile(p, role)['level']}" for role in roles)
     note = "" if p.get("profiles") else " (none declared, so counted as workspace-write)"
     if "{profile}" not in p.get("launch", "{profile}"):
         note += " (the launch line has no {profile} slot, so every role runs it as written)"
     lines = [f"{pad}bin {found}; profiles {levels}{note}; ceiling {ceiling}"]
-    above = [why for why in (ceiling_problem(cfg, name, p, role) for role in PROFILES) if why]
+    above = [why for why in (ceiling_problem(cfg, name, p, role) for role in roles) if why]
     lines += [f"{pad}ABOVE CEILING: {why}" for why in above]
     if hooks_on(p):
         scoped = cfg.get("defaults", DEFAULTS).get("scope_permissions")
-        lines.append(f"{pad}hooks {p['hooks']}: edits outside a worker's files refused; reviewers {CLAUDE_GUARDED_MODE}; "
-                     f"workers {CLAUDE_GUARDED_MODE + ' with their planned checks allowed' if scoped else 'in the account mode'}"
+        reviewers = ("reviewers headless, without hooks" if not hooks_on(p, roles[1])
+                     else "reviewers in their profile's mode with only their report allowed")
+        lines.append(f"{pad}hooks {p['hooks']}: edits outside a worker's files or report refused; {reviewers}; "
+                     f"workers in the account mode{', their files and planned checks allowed' if scoped else ''}"
                      f" (scope_permissions {'on' if scoped else 'off'})")
     missing, where = flag_drift(p)
     if missing is None:
@@ -5497,12 +5523,7 @@ def cmd_doctor(a, cfg):
             print(f"{name:<13} installed (no login check defined)")
             print(*launch_lines, sep="\n")
             continue
-        try:
-            res = subprocess.run(p["login"], shell=True, capture_output=True, text=True, timeout=60, env=child_env(p))
-            output = res.stdout + res.stderr  # codex prints its status to stderr
-            ready = res.returncode == 0 and bool(p.get("login_ok")) and p["login_ok"] in output
-        except subprocess.TimeoutExpired:
-            ready, output = False, ""
+        ready, output = login_check(p)
         ok &= ready
         m = ACCOUNT_RE.search(output)
         if ready and m:
@@ -5894,15 +5915,17 @@ def smoke_line(name: str) -> str:
     return f"fleet smoke {name} ok"
 
 
-def login_ready(p: dict) -> bool:
-    """doctor's login test for one provider: its login command's output holds login_ok (no check counts as ready)."""
+def login_check(p: dict) -> tuple[bool, str]:
+    """doctor's login test for one provider: whether its login command's output holds login_ok, and that output
+    (Codex prints its status to stderr). A provider with no login command counts as ready."""
     if "login" not in p:
-        return True
+        return True, ""
     try:
         res = subprocess.run(p["login"], shell=True, capture_output=True, text=True, timeout=60, env=child_env(p))
     except subprocess.TimeoutExpired:
-        return False
-    return res.returncode == 0 and bool(p.get("login_ok")) and p["login_ok"] in res.stdout + res.stderr
+        return False, ""
+    output = res.stdout + res.stderr
+    return res.returncode == 0 and bool(p.get("login_ok")) and p["login_ok"] in output, output
 
 
 def named_providers(cfg: dict, named: str) -> list[str]:
@@ -5931,7 +5954,7 @@ def smoke_providers(cfg: dict, named: str | None) -> list[str]:
         binary = first_binary(p.get("bin", ""))
         if not p.get("enabled", True) or p.get("placeholder") or binary in bins:
             continue
-        if shutil.which(binary) and login_ready(p):
+        if shutil.which(binary) and login_check(p)[0]:
             names.append(name)
             bins.add(binary)
     if not names:
