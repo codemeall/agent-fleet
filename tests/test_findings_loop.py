@@ -213,6 +213,33 @@ class Loop(RuntimeCase):
         self.assertIn("review-01's findings already went to 01 as message 1, and 01 relaunched since",
                       self.call("send", "demo", "01", "--findings", expected=1))
 
+    def test_a_relaunch_that_never_reached_a_terminal_can_be_retried(self):
+        self.reviewed()
+        with patch.object(fleet.Cmux, "open", side_effect=fleet.FleetError("uncertain launch; inspect cmux")):
+            self.call("send", "demo", "01", "--findings", expected=1)
+        self.assertEqual(self.state()["workers"]["01"]["surface"], "unknown")
+        evidence = self.repo / "gone.txt"
+        evidence.write_text("pid checked: no such process\n")
+        self.call("recover", "demo", "01", "--evidence", str(evidence))
+        out = self.call("send", "demo", "01", "--findings")
+        self.assertIn("as message 1 in", out)
+        self.assertEqual(self.inbox().count("## Message"), 1)
+
+    def test_an_earlier_rounds_repair_note_is_marked_settled(self):
+        prompt = self.repo / "p.md"
+        prompt.write_text("# Fleet worker 01\n\n## Repair: review round 1 findings\n\nYour earlier edits are in place; "
+                          "keep them. review-01's findings F1 are message 1 in x. Read it now, settle each finding as it "
+                          "says. Then hand back with Status: needs-verification.\n")
+        text = fleet.REPAIR_NOTE_RE.sub(lambda m: f"## Repair: review round {m.group(1)} findings (settled)\n",
+                                        prompt.read_text())
+        self.assertIn("## Repair: review round 1 findings (settled)", text)
+        self.assertNotIn("settle each finding", text)
+
+    def test_a_first_round_reviewers_own_ids_are_no_header_problem(self):
+        self.reviewed(findings=[dict(HIGH, id=1)])
+        line, problems = self.summary("review-01")
+        self.assertFalse([p for p in problems if "id" in p], problems)
+
     def test_send_findings_counts_as_a_repair_against_the_review_rounds(self):
         self.reviewed()
         run = self.run_file("run.json")

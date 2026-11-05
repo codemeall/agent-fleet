@@ -217,7 +217,43 @@ class Wake(PlanFirstCase):
         self.assertNotIn("SCOPE", out)
 
 
+    def test_a_plan_from_a_ticket_that_is_not_plan_first_says_so_instead_of_asking_for_approve(self):
+        self.launched([{"id": "01", "files": ["owned.txt"]}])
+        self.write_plan()
+        out = self.wait()
+        self.assertIn("REPORT 01 [plan-ready]", out)
+        self.assertIn("it is not a plan-first ticket; tell it to implement with fleet send demo 01", out)
+        self.assertNotIn("PLAN 01", out)
+
+
 class Approve(PlanFirstCase):
+    def test_a_plan_reviewer_is_never_gated_or_verified_and_drop_parks_its_report(self):
+        self.launched()
+        self.write_plan()
+        self.wait()
+        self.call("approve", "demo", "01", "--review")
+        self.write_report("plan-review-01")
+        self.call("stop", "demo", "plan-review-01")
+        self.assertIn("reviews 01's plan, which has no diff to gate",
+                      self.call("gate", "demo", "plan-review-01", expected=1))
+        self.assertIn("reviewed 01's plan: answering the plan settles its report",
+                      self.call("verify", "demo", "plan-review-01", "--evidence", str(self.evidence), expected=1))
+        self.call("stop", "demo", "01")
+        self.call("drop", "demo", "01", "--reason", "owner changed course")
+        self.assertEqual(fleet.parse_status(self.run_file("reports", "plan-review-01.md").read_text()), "dropped")
+        self.assertNotIn("PENDING plan-review-01", self.wait(expected=2))
+
+    def test_a_blocked_plan_reviewer_is_settled_with_the_plan(self):
+        self.launched()
+        self.write_plan()
+        self.wait()
+        self.call("approve", "demo", "01", "--review")
+        self.write_report("plan-review-01", status="blocked", prose="Cannot read the ticket.\n")
+        self.wait()
+        self.call("approve", "demo", "01")
+        self.assertEqual(fleet.parse_status(self.run_file("reports", "plan-review-01.md").read_text()), "verified")
+        self.assertNotIn("PENDING plan-review-01", self.wait(expected=2))
+
     def test_approve_delivers_through_the_inbox_saves_the_plan_and_records_the_decision(self):
         self.launched()
         self.write_plan()
