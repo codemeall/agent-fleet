@@ -217,6 +217,21 @@ class Policy(QualityCase):
         self.assertEqual(bar.call_count, 2)
 
 
+class Encoding(QualityCase):
+    def test_a_report_with_bytes_from_another_encoding_is_accepted_and_keeps_them(self):
+        """A pasted Latin-1 byte in a worker's prose never breaks verify or accept, and Fleet's status rewrite keeps
+        the worker's bytes as they are."""
+        self.plan()
+        self.launch()
+        self.hand_back()
+        report = self.run_file("reports", "01.md")
+        report.write_bytes(report.read_bytes() + b"\nPasted test output: caf\xe9\n")
+        self.assertIn("01: verified", self.accept())
+        data = report.read_bytes()
+        self.assertIn(b"caf\xe9", data)
+        self.assertIn(b"Status: verified", data)
+
+
 class Override(QualityCase):
     def test_accept_anyway_records_the_owners_words_and_each_item_it_overrode(self):
         self.plan()

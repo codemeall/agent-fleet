@@ -2330,7 +2330,7 @@ def headless_child(args: list[str]) -> int:
         atomic_json(receipt, {"token": token, "returncode": code})  # last: reconcile reads the rest once it exists
         for sig, handler in previous.items():
             signal.signal(sig, signal.SIG_DFL if handler is None else handler)
-    status = "stopped" if interrupted else parse_status(report.read_text()) if report.exists() else None
+    status = "stopped" if interrupted else parse_status(report.read_text(errors="replace")) if report.exists() else None
     print(f"fleet: {wid} exited {code}; report {status or 'missing'}"
           + (f"; {len(parsed['denials'])} call(s) denied" if parsed["denials"] else ""), flush=True)
     return code
@@ -3763,7 +3763,7 @@ def blocker_handdown(repo: Path, state: dict, b: str) -> list[str]:
         lines += ["Changed files: " + ("unknown (no launch baseline)" if changed is None
                                        else ", ".join(changed) or "none"), ""]
     report = run_dir(repo, state["run"]) / "reports" / f"{kept or b}.md"
-    summary = report_summary(report.read_text()) if report.exists() else []
+    summary = report_summary(report.read_text(errors="replace")) if report.exists() else []
     if not summary:
         return lines + [f"Its report has no summary; read `{report}` if you need it."]
     lines += [f"Its report, down to the appendix (full report: `{report}`):", ""]
@@ -5245,7 +5245,7 @@ def report_rows(repo: Path, state: dict) -> list[dict]:
     for i in sorted(ids):
         w = state["workers"].get(i, {})
         f = d / f"{i}.md"
-        status = parse_status(f.read_text()) if f.exists() else None
+        status = parse_status(f.read_text(errors="replace")) if f.exists() else None
         age = int(time.time() - f.stat().st_mtime) if f.exists() else None
         rows.append({"id": i, "worker": f"{w.get('provider', '?')}:{w.get('model', '?')}",
                      "surface": w.get("surface", "-"), "state": w.get("state", "-"),
@@ -6926,7 +6926,7 @@ def cmd_verify(a, cfg):
     evidence = read_evidence_files(a.evidence)
     report = run_dir(repo, a.run) / "reports" / f"{a.id}.md"
     took = REVIEWED_STATUSES if w["role"] == "review" else ("needs-verification",)  # findings-sent: still its review
-    if not report.exists() or parse_status(report.read_text()) not in took:
+    if not report.exists() or parse_status(report.read_text(errors="replace")) not in took:
         raise FleetError("report must have Status: needs-verification")
     for f in a.evidence:
         note_lead_file(repo, state, f)
@@ -6971,7 +6971,7 @@ def mark_verified(repo: Path, state: dict, wid: str, evidence: str, now: str | N
     w = state["workers"][wid]
     w["verified"], w["verified_at"] = True, now or time.strftime("%Y-%m-%dT%H:%M:%S")
     w["verification_evidence"] = evidence
-    warn_header(repo, state, wid, report.read_text())
+    warn_header(repo, state, wid, report.read_text(errors="replace"))
     set_report_status(report, "verified", "\n## Lead verification\n" + evidence + "\n")
 
 
@@ -7268,7 +7268,7 @@ def review_history(repo: Path, state: dict, i: str) -> tuple[str, dict | None]:
     if not sent or not last or sent.get("reviewer_at") != last.get("launched_at"):
         return "", None
     report = run_dir(repo, state["run"]) / "reports" / f"{i}.md"
-    data = parse_header(report.read_text())[0] if report.exists() else None
+    data = parse_header(report.read_text(errors="replace"))[0] if report.exists() else None
     answers = responses_by_id(data, sent["ids"]) if findings_sent_to(state, i, state["workers"].get(i)) else {}
     history = {"reviewer": sent["reviewer"], "round": sent.get("round"), "known": sent["known"], "sent": sent["ids"],
                "responses": answers}
@@ -7401,11 +7401,11 @@ def send_findings(a, cfg):
     f = run_dir(repo, a.run) / "reports" / f"{rid}.md"
     sent = t.get("findings_sent")
     again = sent if sent and sent.get("reviewer_at") == review.get("launched_at") else None
-    status = parse_status(f.read_text()) if f.exists() else None
+    status = parse_status(f.read_text(errors="replace")) if f.exists() else None
     if (status or "").lower() not in ("needs-verification",) + ((FINDINGS_SENT,) if again else ()):
         raise FleetError(f"{rid}'s report says {status or 'nothing yet'}; send its findings once it hands back with "
                          "Status: needs-verification")
-    numbered = numbered_findings(review, parse_header(f.read_text())[0])
+    numbered = numbered_findings(review, parse_header(f.read_text(errors="replace"))[0])
     if not numbered:
         raise FleetError(f"{rid}'s fleet header lists no findings, or cannot be read, so there is nothing to number "
                          f"and send; read its report, and repair {a.id} yourself if it found something")
@@ -7761,7 +7761,7 @@ def handback_problems(repo: Path, state: dict, ids: list[str | None], reviewer: 
     reports, out = run_dir(repo, state["run"]) / "reports", []
     for wid in filter(None, ids):
         f = reports / f"{wid}.md"
-        status = parse_status(f.read_text()) if f.exists() else None
+        status = parse_status(f.read_text(errors="replace")) if f.exists() else None
         if status not in (REVIEWED_STATUSES if reviewer and wid == reviewer else ("needs-verification",)):
             said = f"Status: {status}" if status else "no status line" if f.exists() else "nothing (no report yet)"
             out.append(f"{wid}'s report says {said}; it must say Status: needs-verification")
@@ -7914,7 +7914,7 @@ def acceptance_mode(state: dict) -> str:
 
 def report_text(repo: Path, state: dict, wid: str) -> str | None:
     f = run_dir(repo, state["run"]) / "reports" / f"{wid}.md"
-    return f.read_text() if f.exists() else None
+    return f.read_text(errors="replace") if f.exists() else None  # bytes from another encoding never stop a check
 
 
 def send_back(run: str, wid: str) -> str:
@@ -8750,7 +8750,7 @@ def cmd_approve(a, cfg):
     state = stop_plan_reviewers(a, cfg, repo, state, reviewers, f"{a.id}'s plan is not approved")
     t = state["tickets"][a.id]
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
-    text = report.read_text()
+    text = report.read_text(errors="replace")
     out = plan_file(repo, a.run, a.id)
     out.parent.mkdir(exist_ok=True)
     record = [text.rstrip("\n"), "", "## Lead approval", "", f"Approved by the lead at {stamp}."]
@@ -9427,7 +9427,7 @@ def cmd_judge(a, cfg):
 
 def report_status(f: Path) -> str | None:
     """A report's status, lowercased, or None when it has no file or no status line."""
-    return (parse_status(f.read_text()) or "").lower() or None if f.exists() else None
+    return (parse_status(f.read_text(errors="replace")) or "").lower() or None if f.exists() else None
 
 
 def fanout_problems(repo: Path, state: dict, i: str, live_ok: bool = False) -> tuple[list[str], list[str], list[str]]:
@@ -9469,12 +9469,12 @@ def set_report_status(f: Path, status: str, append: str = "") -> None:
     """Rewrite a report's first status line (drop, verify), appending `append`; a missing report is left alone."""
     if not f.exists():
         return
-    lines = f.read_text().splitlines()
+    lines = f.read_text(errors="surrogateescape").splitlines()  # a worker's bytes in another encoding stay as they are
     for n, line in enumerate(lines):
         if STATUS_RE.match(line):
             lines[n] = f"Status: {status}"
             break
-    f.write_text("\n".join(lines) + "\n" + append)
+    f.write_text("\n".join(lines) + "\n" + append, errors="surrogateescape")
 
 
 def verify_fanout(repo: Path, state: dict, a) -> None:
@@ -9909,12 +9909,12 @@ def verify_pick(repo: Path, a, wid: str, evidence: list[str]) -> None:
                       f"writer's change is {'saved in ' + patch if patch else 'not in the checkout'}.\n")
     for j in judges(state, i):  # an earlier judge's verdict was replaced by the one verified: it waits on no one
         f = reports / f"{j['id']}.md"
-        if j["id"] != jid and f.exists() and (parse_status(f.read_text()) or "").lower() in WAKE_STATUSES:
+        if j["id"] != jid and f.exists() and (parse_status(f.read_text(errors="replace")) or "").lower() in WAKE_STATUSES:
             set_report_status(f, SUPERSEDED, f"\n## Lead decision\nThe lead kept {wid}'s diff and verified "
                               f"{jid or 'no judge'}; this judge's verdict was not the one used.\n")
     verdict, why = None, ""
     if jid:
-        verdict, why, bad = pick_verdict(*parse_header((reports / f"{jid}.md").read_text()), pick_writers(t))
+        verdict, why, bad = pick_verdict(*parse_header((reports / f"{jid}.md").read_text(errors="replace")), pick_writers(t))
         verdict = "no readable pick" if bad else verdict or "neither"
     close_ticket(repo, state, i, "verified")
     t["picked"] = {"writer": wid, "over": other, "judge": jid, "verdict": verdict, "patch": patch, "at": now}
