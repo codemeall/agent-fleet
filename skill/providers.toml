@@ -50,16 +50,21 @@
 # review_transport: "tui" (default) or "headless", here or under [defaults]; headless needs a `headless` line, and
 #   an adapter without one keeps its TUI under a [defaults] headless. Implementation workers always run in a TUI.
 #   See references/providers.md#headless-reviewers.
-# hooks: how launch gives each worker Fleet's hooks, through the launch line's {settings} slot (dropped without them).
-#   claude-settings writes .fleet/runs/<run>/settings/<id>.json and passes --settings <path>: a guard that refuses
-#   edits outside the worker's own files and report, and events `fleet wait` reads (a permission prompt, idle).
-#   "" turns them off; so does a launch line without {settings}. See references/providers.md#claude-hooks.
+# signals: how a worker tells `fleet wait` about its turns. Without one, wait watches the screen (STALLED).
+#   claude-settings, through the launch line's {settings} slot, writes .fleet/runs/<run>/settings/<id>.json and passes
+#   --settings <path>: a guard that refuses edits outside the worker's own files and report, and events wait reads
+#   (a permission prompt, idle). See references/providers.md#claude-hooks.
+#   codex-notify, through the {signals} slot, passes -c notify=[...]: Codex runs `fleet _notify` after each turn, and
+#   a turn that ends without a hand-back wakes IDLE. It replaces the account's own notify for that worker.
+#   "" turns signals off; so does a launch line without the slot. There is no cursor-hooks: Cursor's hooks were not
+#   checked against cursor-agent. See references/providers.md#turn-signals.
+# hooks: the older name for signals; it takes only claude-settings or "". An owner's `hooks = ""` still turns them off.
 
 [providers.claude]
 enabled = true
 bin = "claude"
 launch = "{bin} {session} --model {model} --effort {effort} {profile} {settings} {prompt}"
-hooks = "claude-settings"
+signals = "claude-settings"
 # Workers get no mode flag, so the account's permissions.defaultMode applies, as before profiles, unless the owner
 # sets [defaults] scope_permissions = true (then allow rules for their own files and planned checks, same mode).
 # Reviewers pin manual mode (`claude --help` 2.1.318: Claude asks before each edit and command), so a looser
@@ -105,7 +110,10 @@ max = 1
 enabled = true
 bin = "codex"
 # check_for_update_on_startup=false: an "Update available" screen would stall a worker before its prompt runs.
-launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c check_for_update_on_startup=false {profile} {prompt}"
+launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c check_for_update_on_startup=false {signals} {profile} {prompt}"
+# notify (openai/codex, codex-rs/hooks/src/legacy_notify.rs): runs in the TUI and in exec, after each turn, with an
+# agent-turn-complete JSON as its last argument. Any -c also keeps the TUI off a shared app-server daemon.
+signals = "codex-notify"
 # A TUI reviewer must write its report; under -s read-only that write, and any check that writes a cache, would wait
 # for the owner's approval. So review runs the worker's sandbox, and only Fleet's review contract keeps it to its report.
 profiles.worker = { args = "-s workspace-write -a on-request", level = "workspace-write" }
@@ -141,6 +149,7 @@ bin_aliases = ["agent"]   # Cursor's newer name for the same CLI, per its docs; 
 launch = "{bin} --model {model} --trust {profile} {prompt}"
 # Edits apply without asking; commands ask unless the owner's Cursor config allows them (Fleet never passes --force).
 # No interactive mode Fleet has checked both stops edits and lets a reviewer write its report, so review runs as the worker.
+# No signals: Cursor's hooks (stop, afterFileEdit) were not checked against cursor-agent, so wait watches the screen.
 profiles.worker = { args = "", level = "workspace-write" }
 profiles.review = { args = "", level = "workspace-write" }
 quit = ["/quit", "enter"]

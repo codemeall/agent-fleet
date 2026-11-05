@@ -112,6 +112,10 @@ TRANSPORTS = ("tui", HEADLESS)
 UNDECLARED_PROFILE = {"args": "", "level": "workspace-write"}  # an adapter written before profiles existed
 HELP_TIMEOUT_S = 10  # doctor's `<bin> --help`; a CLI that takes longer leaves its flags unverified
 HOOK_METHODS = ("claude-settings",)  # an adapter's `hooks`: how launch gives a worker Fleet's guard and event hooks
+# An adapter's `signals`: how a worker tells wait about its turns. `hooks`, the older field, names claude-settings only.
+# An adapter without one, and every run from before it, keeps the screen-hash STALLED (references/providers.md).
+SIGNAL_METHODS = ("claude-settings", "codex-notify")
+SIGNAL_FLAGS = {"claude-settings": "--settings", "codex-notify": "-c"}  # the CLI flag each one's launch slot passes
 # Claude Code's file-editing tools, by their hook matcher names (code.claude.com/docs/en/hooks, tools-reference;
 # MultiEdit is legacy but harmless to match). Each names its file in tool_input.file_path, NotebookEdit in notebook_path.
 CLAUDE_EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
@@ -142,7 +146,7 @@ ADAPTER_FIELDS = (  # every adapter field the providers.toml header documents, p
     "enabled", "placeholder", "extends", "bin", "bin_aliases", "launch", "profiles", "session", "resume", "quit",
     "login", "login_ok", "account_env", "env", "trust", "models", "model_config", "default_home", "model_note",
     "models_allow", "model_families", "family_prefixes", "efforts", "family", "plugins", "max", "tiers",
-    "hooks", "headless", "review_transport", "add_dir")
+    "hooks", "signals", "headless", "review_transport", "add_dir")
 TIER_FIELDS = ("model", "effort", "family")
 PROFILE_FIELDS = ("args", "level")
 
@@ -281,6 +285,7 @@ def load_config(user_path: Path | None = None) -> dict:
             raise FleetError(f"{name}.trust must be one of {', '.join(TRUST_METHODS)}")
         if adapter.get("hooks") not in (None, "", *HOOK_METHODS):
             raise FleetError(f"{name}.hooks must be one of {', '.join(HOOK_METHODS)}, or \"\" for none")
+        check_signals(name, adapter)
         profiles = adapter.get("profiles", {})
         if not (isinstance(profiles, dict) and all(isinstance(v, dict) and isinstance(v.get("args", ""), str)
                                                    and v.get("level") in PERMISSION_LEVELS for v in profiles.values())):
@@ -448,10 +453,11 @@ def check_ceiling(cfg: dict, name: str, pcfg: dict, profile: str) -> None:
 
 def build_launch(pcfg: dict, model: str, effort: str | None, prompt: str,
                  session: str | None = None, resume: bool = False, trust: str = "", profile: str = "worker",
-                 settings: str | None = None) -> str:
+                 settings: str | None = None, signals: str | None = None) -> str:
     """The worker's command line. `settings`, a hooks adapter's per-worker settings file, fills the {settings} slot;
     without it, and for a launch line without the slot, the line is the one launch built before hooks. The
-    profile's permission mode is never changed: the settings file only adds hooks and allow rules."""
+    profile's permission mode is never changed: the settings file only adds hooks and allow rules. `signals`, a
+    ready fragment such as Codex's `-c notify=[…]` (notify_args), fills the {signals} slot the same way."""
     template = pcfg[HEADLESS] if profile == HEADLESS else pcfg["launch"]
     if "{effort}" in template and not effort:
         raise FleetError("this provider's launch needs an effort: pass --effort or set it on the tier")
@@ -462,12 +468,15 @@ def build_launch(pcfg: dict, model: str, effort: str | None, prompt: str,
     slot = f"--settings {shlex.quote(settings)}" if settings and "{settings}" in template else ""
     if not slot:
         template = template.replace(" {settings}", "").replace("{settings}", "")
+    notify = signals if signals and "{signals}" in template else ""  # trusted: Fleet builds and quotes it
+    if not notify:
+        template = template.replace(" {signals}", "").replace("{signals}", "")
     args = adapter_profile(pcfg, profile)["args"]  # trusted adapter config, like bin, so not quoted
     if not args:
         template = template.replace(" {profile}", "").replace("{profile}", "")
     return env_prefix(pcfg) + template.format(bin=pcfg["bin"] + (" " + trust if trust else ""), session=flag, model=shlex.quote(model),
                                               effort=shlex.quote(effort or ""), prompt=shlex.quote(prompt), profile=args,
-                                              settings=slot)
+                                              settings=slot, signals=notify)
 
 
 # ---------- Claude hooks ----------
@@ -481,10 +490,10 @@ def build_launch(pcfg: dict, model: str, effort: str | None, prompt: str,
 # prompt, and the hooks only narrow what a worker may do.
 
 def hooks_on(pcfg: dict, profile: str = "worker") -> bool:
-    """True when launch gives this role Fleet's settings file: the adapter's `hooks` set, a {settings} slot in its
-    launch line, and a role that runs that line. An owner's launch line without the slot runs as written, without
-    hooks; a headless run uses its own line and has no hooks."""
-    return (profile != HEADLESS and pcfg.get("hooks") in HOOK_METHODS
+    """True when launch gives this role Fleet's settings file: signals (or the older hooks) claude-settings, a
+    {settings} slot in its launch line, and a role that runs that line. An owner's launch line without the slot runs
+    as written, without hooks; a headless run uses its own line and has no hooks."""
+    return (profile != HEADLESS and signal_method(pcfg) == "claude-settings"
             and "{settings}" in pcfg.get("launch", ""))
 
 
@@ -646,6 +655,97 @@ def run_hook(args: list[str]) -> int:
         hook_log(events, token, "hook-error", hook=kind, error=f"{type(e).__name__}: {str(e)[:300]}")
         print(f"fleet _hook {kind}: could not decide ({e}); allowed", file=sys.stderr)
         return 0
+
+
+# ---------- turn signals ----------
+# An adapter's `signals` names how its workers tell wait that a turn ended: claude-settings (the hooks above) or
+# codex-notify, Codex's `notify` program. That one is passed per launch as `-c notify=[…]` in the {signals} slot and
+# runs `fleet _notify <events file> <token> <JSON>` after each turn; it appends a turn-ended event, with the last
+# message, to the same events file Claude's hooks write, and wait wakes IDLE when no hand-back came with it. Like
+# _hook it reads no config, run state or lock, and it always exits 0. Adapters without signals, and runs from before
+# them, keep the screen hash. Cursor has none: its hooks were not checked against cursor-agent (providers.md).
+
+def signal_method(pcfg: dict) -> str:
+    """The adapter's mechanism, "" for none. `hooks` is the older spelling of claude-settings, so old configs load
+    as before. An empty value in either field turns signals off, so an owner's `hooks = ""` still does; otherwise
+    `signals` wins (an old `hooks = "claude-settings"` on Codex never had a {settings} slot to fill)."""
+    signals, hooks = pcfg.get("signals"), pcfg.get("hooks")
+    if signals == "" or hooks == "":
+        return ""
+    return signals or hooks or ""
+
+
+def check_signals(name: str, adapter: dict) -> None:
+    signals = adapter.get("signals")
+    if signals == "cursor-hooks":
+        raise FleetError(f"{name}.signals: cursor-hooks is not available; Cursor's hooks were not checked against "
+                         "cursor-agent, so Cursor keeps the screen hash (references/providers.md#turn-signals)")
+    if signals not in (None, "", *SIGNAL_METHODS):
+        raise FleetError(f"{name}.signals must be one of {', '.join(SIGNAL_METHODS)}, or \"\" for none")
+
+
+def notify_on(pcfg: dict, profile: str = "worker") -> bool:
+    """True when launch passes Codex's notify program: signals codex-notify and a {signals} slot in the launch line.
+    An owner's line without the slot runs as written; a headless run has its own line and no signals."""
+    return (profile != HEADLESS and signal_method(pcfg) == "codex-notify"
+            and "{signals}" in pcfg.get("launch", ""))
+
+
+def toml_string(text: str) -> str:
+    """A TOML basic string: quote, backslash and control characters escaped (toml.io, "String"). A lone surrogate,
+    from a path that is not UTF-8, has no TOML form, so it is refused."""
+    out = []
+    for ch in text:
+        code = ord(ch)
+        if 0xD800 <= code <= 0xDFFF:
+            raise ValueError(f"{text!r} is not valid UTF-8")
+        out.append('\\"' if ch == '"' else "\\\\" if ch == "\\"
+                   else f"\\u{code:04x}" if code < 0x20 or code == 0x7F else ch)
+    return '"' + "".join(out) + '"'
+
+
+def notify_args(events: str, token: str) -> str:
+    """Codex's `-c notify=[…]` for one worker. Codex parses the value as TOML (an array of strings, the program
+    and its arguments), runs it after each turn with the notification JSON as one more argument, and waits for
+    nothing. The whole key=value is one shell word, so paths with spaces or quotes stay intact."""
+    argv = [sys.executable, str(Path(__file__).resolve()), "_notify", events, token]
+    return "-c " + shlex.quote("notify=[" + ", ".join(toml_string(a) for a in argv) + "]")
+
+
+def notify_launch(d: Path, wid: str, token: str) -> tuple[dict | None, str | None]:
+    """The worker record's `signals` and the launch fragment; neither when a path has no TOML form, so the worker
+    launches as before and wait keeps its screen hash."""
+    (d / "events").mkdir(exist_ok=True)
+    events = str(d / "events" / f"{wid}.jsonl")
+    try:
+        return {"method": "codex-notify", "events": events}, notify_args(events, token)
+    except ValueError as e:
+        print(f"{wid}: no notify program ({e}); wait watches its screen instead", file=sys.stderr)
+        return None, None
+
+
+def run_notify(args: list[str]) -> int:
+    """`fleet _notify <events file> <token> <JSON>`, run by Codex after each turn. An agent-turn-complete
+    notification logs turn-ended with its last-assistant-message; other types are ignored. It never blocks or
+    fails the worker: every error is logged, and it exits 0."""
+    if len(args) < 2:
+        print("fleet _notify: expects events file, token and the notification JSON; ignored", file=sys.stderr)
+        return 0
+    events, token = args[0], args[1]
+    try:
+        if len(args) != 3:
+            raise ValueError(f"expected one notification argument after the token, got {len(args) - 2}")
+        data = json.loads(args[2])
+        if not isinstance(data, dict):
+            raise ValueError("the notification is not a JSON object")
+        if data.get("type") != "agent-turn-complete":
+            return 0
+        ids = {key: str(data[field])[:100] for key, field in (("turn", "turn-id"), ("thread", "thread-id"))
+               if data.get(field)}
+        hook_log(events, token, "turn-ended", message=str(data.get("last-assistant-message") or "")[:500], **ids)
+    except Exception as e:  # noqa: BLE001 - whatever went wrong, the worker keeps working
+        hook_log(events, token, "notify-error", error=f"{type(e).__name__}: {str(e)[:300]}")
+    return 0
 
 
 # ---------- folder trust ----------
@@ -3450,10 +3550,11 @@ def launch_one(a, cfg) -> tuple[str, dict]:
                                 t.get("commands", []) if worker_role else [])
             if planning:
                 mark_plan_scope(hooks)
+        signals, notify = notify_launch(d, a.id, token) if notify_on(pcfg, profile) else (None, None)
         trust = prepare_trust(cfg, a.provider, pcfg, repo, () if work == repo else (work,))
         trust = " ".join(x for x in (trust, tree_launch_args(repo, state, cfg, a.provider, pcfg, profile, work)) if x)
         command = build_launch(pcfg, model, effort, line, session, a.resume or bool(warm), trust, profile,
-                               hooks and hooks["settings"])
+                               hooks and hooks["settings"], notify)
         exit_file = d / "exits" / f"{a.id}.{token}.json"
         headless = {}
         if profile == HEADLESS:  # its runner writes the report, usage and receipt; reconcile records the usage
@@ -3477,6 +3578,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
             token=token, exit_file=str(exit_file), launched=time.strftime("%Y-%m-%dT%H:%M:%S"),
             launched_at=time.time(),
             **({"session": session} if session else {}), **headless, **({"hooks": hooks} if hooks else {}),
+            **({"signals": signals} if signals else {}),
             # a warm launch's place in its session's chain; --resume keeps the same session, so it keeps the mark
             **({"warm_after": warm["after"], "warm_chain": warm["chain"]} if warm else
                {k: w[k] for k in ("warm_after", "warm_chain") if a.resume and k in w}))
@@ -4582,8 +4684,12 @@ def hook_events(state: dict, w: dict, seen: Path, handed_back: bool, now: float)
     permission-prompt wakes PERMISSION; idle wakes IDLE unless the worker has handed back; turn-ended never wakes on
     its own (a hand-back already does) but gives IDLE the worker's last words. Events from an earlier launch of the
     same ticket carry another token and are skipped. Each pass reads only what was appended since the last one; the
-    marker keeps the last turn-ended words, since an idle event comes about a minute after them."""
-    path, token = (w.get("hooks") or {}).get("events"), w.get("token", "")
+    marker keeps the last turn-ended words, since an idle event comes about a minute after them.
+
+    A Codex worker's notify program (its record's `signals`) sends no idle event: its turn-ended is the idle, so one
+    without a hand-back wakes IDLE at once, once per pass however many turns ended in it."""
+    path, token = (w.get("hooks") or w.get("signals") or {}).get("events"), w.get("token", "")
+    turn_wakes = (w.get("signals") or {}).get("method") == "codex-notify"
     if not path:
         return [], 0.0
     marker = seen / f"{w['id']}.events"
@@ -4602,7 +4708,7 @@ def hook_events(state: dict, w: dict, seen: Path, handed_back: bool, now: float)
     except (OSError, FleetError):
         return [], told
     data = data[:data.rfind(b"\n") + 1]  # a line a hook is still writing waits for the next pass
-    lines, run, i = [], state["run"], w["id"]
+    lines, run, i, ended = [], state["run"], w["id"], False
     for raw in data.splitlines():
         try:
             e = json.loads(raw)
@@ -4612,6 +4718,7 @@ def hook_events(state: dict, w: dict, seen: Path, handed_back: bool, now: float)
             continue
         if e.get("event") == "turn-ended":
             last_words = one_line(e.get("message"), 160)
+            ended = ended or turn_wakes and not handed_back
         elif e.get("event") == "permission-prompt":
             lines.append(f"PERMISSION {i}: {one_line(e.get('message')) or 'a permission prompt'}; the owner answers "
                          "it in the worker's pane (fleet agents); the lead never does")
@@ -4619,6 +4726,10 @@ def hook_events(state: dict, w: dict, seen: Path, handed_back: bool, now: float)
             said = f'; its turn ended with "{last_words}"' if last_words else ""
             lines.append(f"IDLE {i}: Claude reports it idle with no hand-back{said}; fleet peek {run} {i}, then "
                          f"answer a question for the lead with fleet send {run} {i} (a prompt is the owner's)")
+    if ended:
+        said = f' with "{last_words}"' if last_words else ""
+        lines.append(f"IDLE {i}: Codex ended its turn{said} and has not handed back; fleet peek {run} {i}, then "
+                     f"answer a question for the lead with fleet send {run} {i} (a prompt is the owner's)")
     told = now if lines else told
     marker.write_text(f"{token}|{done + len(data)}|{told}|{json.dumps(last_words)}")
     return lines, told
@@ -8435,9 +8546,25 @@ def flag_drift(pcfg: dict) -> tuple[list[str] | None, str]:
             return None, f"`{command}` " + (f"exited {res.returncode}" if res.returncode else "printed nothing")
         texts.append(res.stdout + res.stderr)
     text = "\n".join(texts)
-    flags = launch_flags(pcfg) + (["--settings"] if hooks_on(pcfg) else [])  # what the {settings} slot passes
+    flags = launch_flags(pcfg)
+    if hooks_on(pcfg) or notify_on(pcfg):  # what the {settings} or {signals} slot passes
+        flags += [f for f in [SIGNAL_FLAGS[signal_method(pcfg)]] if f not in flags]
     missing = [f for f in flags if not re.search(r"(?<![\w-])" + re.escape(f) + r"(?![\w-])", text)]
     return missing, " and ".join(f"`{c}`" for c in commands)
+
+
+def signals_line(p: dict) -> str:
+    """Doctor's line naming how this adapter's workers wake wait, and what is left to the screen hash."""
+    method = signal_method(p)
+    if hooks_on(p):
+        return "signals claude-settings (--settings): a permission prompt wakes PERMISSION, an idle worker IDLE"
+    if notify_on(p):
+        return ("signals codex-notify (-c notify): a turn that ends without a hand-back wakes IDLE; an approval "
+                "prompt still shows as STALLED")
+    if method:
+        slot = "{settings}" if method == "claude-settings" else "{signals}"
+        return f"signals {method} off: the launch line has no {slot} slot, so wait watches the screen (STALLED)"
+    return "signals none: wait watches the screen (STALLED)"
 
 
 def profile_report(cfg: dict, name: str, p: dict, found: str) -> tuple[list[str], bool]:
@@ -8458,14 +8585,18 @@ def profile_report(cfg: dict, name: str, p: dict, found: str) -> tuple[list[str]
         scoped = cfg.get("defaults", DEFAULTS).get("scope_permissions")
         reviewers = ("reviewers headless, without hooks" if not hooks_on(p, roles[1])
                      else "reviewers in their profile's mode with only their report allowed")
-        lines.append(f"{pad}hooks {p['hooks']}: edits outside a worker's files or report refused; {reviewers}; "
+        lines.append(f"{pad}hooks claude-settings: edits outside a worker's files or report refused; {reviewers}; "
                      f"workers in the account mode{', their files and planned checks allowed' if scoped else ''}"
                      f" (scope_permissions {'on' if scoped else 'off'})")
+    lines.append(pad + signals_line(p))
     missing, where = flag_drift(p)
+    signal_flag = SIGNAL_FLAGS[signal_method(p)] if hooks_on(p) or notify_on(p) else None
     if missing is None:
         lines.append(f"{pad}flags unverified: {where}")
     elif missing:
-        lines += [f"{pad}WARNING: {flag} is not in {where}; check {name}'s launch line against this CLI version"
+        lines += [f"{pad}WARNING: signals {signal_method(p)} passes {flag}, which {where} does not list; wait may "
+                  f"fall back to the screen hash on this CLI version" if flag == signal_flag else
+                  f"{pad}WARNING: {flag} is not in {where}; check {name}'s launch line against this CLI version"
                   for flag in missing]
     else:
         lines.append(f"{pad}flags listed by {where}")
@@ -9561,6 +9692,8 @@ def main(argv: list[str] | None = None) -> int:
         return headless_child(argv[1:])
     if argv and argv[0] == "_hook":  # Claude Code runs it on each edit: no config, no run state, no lock
         return run_hook(argv[1:])
+    if argv and argv[0] == "_notify":  # Codex runs it after each turn: no config, no run state, no lock
+        return run_notify(argv[1:])
     ap = argparse.ArgumentParser(prog="fleet", description=__doc__.splitlines()[0])
     ap.add_argument("--version", action="version", version=f"fleet {VERSION}")
     sub = ap.add_subparsers(dest="cmd", required=True)
