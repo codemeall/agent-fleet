@@ -108,6 +108,11 @@ PROMPT_FIELDS = {  # optional per-ticket plan fields that complete a worker prom
     "checks": "exact bounded commands, working directory and success criteria; say explicitly if manual prose review is sufficient",
 }
 TICKET_KINDS = ("implement", "investigate")  # investigate: read-only research or debugging; owns no files
+# What a plan or add entry may give (`commands` only to be refused with its way out). Fleet records the rest on a
+# ticket itself (status, launch and close times, review rounds, grants, a plan's approval), so a ticket copied from
+# `resume --json` starts fresh instead of carrying another run's counts.
+PLAN_KEYS = frozenset({"id", "ticket", "task", "kind", "tier", "provider", "model", "effort", "family", "fanout",
+                       "files", "blockers", "checks", "context", "after", "plan_first", "commands"})
 TIER_ORDER = ("heavy", "standard", "light")  # launch --ready takes consequential work first
 # What a launch lets a CLI do without the owner answering in its pane, narrowest first:
 # read-only changes nothing unasked, workspace-write edits the checkout, full-access runs anything.
@@ -1262,11 +1267,21 @@ def atomic_json(path: Path, data: dict) -> None:
     write_text_atomic(path, json.dumps(data, indent=2) + "\n")
 
 
+def ignore_runs(repo: Path) -> None:
+    """Keep .fleet/runs/ (runs, the checkout's lock, a hold) out of Git: `runs/` in .fleet/.gitignore."""
+    gi = repo / ".fleet" / ".gitignore"
+    previous = gi.read_text() if gi.exists() else ""
+    if "runs/" not in previous.splitlines():
+        gi.parent.mkdir(parents=True, exist_ok=True)
+        gi.write_text(previous + ("\n" if previous and not previous.endswith("\n") else "") + "runs/\n")
+
+
 @contextmanager
 def try_lock(repo: Path):
     """The checkout's lock, taken without waiting: yields True while held, or False when another command holds
     it. wait --gate uses it to change run state briefly, and skips that change for now rather than block or fail."""
     root = contained(repo.resolve(), repo / ".fleet" / "runs")
+    ignore_runs(repo)  # the lock may be the first thing Fleet makes here, before any init (a hold, a refused plan)
     root.mkdir(parents=True, exist_ok=True)
     with contained(root, root / ".lock").open("a") as lock:
         try:
@@ -2715,10 +2730,7 @@ def cmd_init(a, cfg):
         options.update(init_worktrees(repo, cfg, a.run))
     for sub in ("prompts", "reports", ".seen", "exits", "snapshots", "evidence"):
         (d / sub).mkdir(parents=True, exist_ok=True)
-    gi = repo / ".fleet" / ".gitignore"
-    previous = gi.read_text() if gi.exists() else ""
-    if "runs/" not in previous.splitlines():
-        gi.write_text(previous + ("\n" if previous and not previous.endswith("\n") else "") + "runs/\n")
+    ignore_runs(repo)
     state = {"schema": 2, "run": a.run, "repo": str(repo), "workspace": workspace, **extra,
              "created": time.strftime("%Y-%m-%dT%H:%M:%S"), "baseline": git_snapshot(repo),
              "options": options, "tickets": {}, "workers": {}, "prompts": {}, "decisions": init_decisions(options)}
@@ -2890,8 +2902,13 @@ def validate_ticket(repo: Path, d: Path, state: dict, cfg: dict, pool: dict | No
                     raw: dict) -> tuple[dict, str | None]:
     """One `plan` or `add` entry, checked and normalized. Returns the ticket and, for an inline `task`, the text
     to write to tasks/<id>.md once every entry has passed; nothing is written here."""
-    t = dict(raw)
-    i = valid_id(t["id"])
+    if not isinstance(raw, dict):
+        raise FleetError("each ticket must be a JSON object, such as {\"id\": \"copy\", \"task\": \"…\", …}")
+    i = valid_id(raw.get("id"))
+    if ignored := sorted(set(raw) - PLAN_KEYS):
+        print(f"note: {i}: ignored {', '.join(ignored)}, which no plan sets: Fleet keeps a ticket's status, times, "
+              "rounds and grants itself, so a copied ticket starts fresh", file=sys.stderr)
+    t = {k: v for k, v in raw.items() if k in PLAN_KEYS}
     t["kind"] = t.get("kind", "implement")
     if t["kind"] not in TICKET_KINDS:
         raise FleetError(f"{i}: kind must be implement or investigate")
@@ -3017,9 +3034,14 @@ def cmd_plan(a, cfg):
         raise FleetError("plan is frozen after the first launch; add new tickets with fleet add, record decisions "
                          "in run notes, or start another run after stopping workers")
     data = json.loads(Path(a.file).read_text())
+    decisions = plan_decisions(data)
     d = run_dir(repo, a.run)
     pool = routing_pool(state["options"]["routing"], cfg)
     note_lead_file(repo, state, a.file)
+    # Nothing has launched, so every prompt was written for the plan this one replaces: its scope, context and
+    # hand-down may all have changed. Dropped in memory first, so a refused plan keeps them.
+    stale = sorted(state["prompts"])
+    state["prompts"] = {}
     tickets, texts = {}, {}
     for raw in data["tickets"]:
         t, text = validate_ticket(repo, d, state, cfg, pool, raw)
@@ -3032,14 +3054,48 @@ def cmd_plan(a, cfg):
         raise FleetError("plan must contain at least one ticket")
     plan_after(state, cfg, tickets, list(tickets))
     check_graph(tickets)
+    check_sequenced(state, tickets, list(tickets))
     check_fanout_ids(state, tickets, set(tickets))
     check_reviewable(cfg, state, pool, tickets)
     write_tasks(d, texts)
+    for pid in stale:
+        contained(d, d / "prompts" / f"{pid}.md").unlink(missing_ok=True)
     state["tickets"] = tickets
-    state["decisions"] = init_decisions(state["options"]) + data.get("decisions", [])
+    state["decisions"] = init_decisions(state["options"]) + decisions
     state["plan_decisions"] = len(state["decisions"])  # a prompt hands down only the decisions after these
     save_run(repo, a.run, state)
     print(f"saved {len(tickets)} tickets; routing, dependencies and assignments persist across sessions")
+    if stale:
+        print(f"removed the prompts written for the earlier plan ({', '.join(stale)}); write them again with fleet "
+              f"prompt {a.run} <id>, or let launch --ready write them")
+
+
+def plan_decisions(data: dict) -> list[str]:
+    """A plan's or add's `decisions`: a list of text, or none."""
+    decisions = data.get("decisions", []) if isinstance(data, dict) else []
+    if not isinstance(decisions, list) or not all(isinstance(x, str) for x in decisions):
+        raise FleetError('decisions must be a list of text, one entry per decision, such as ["Owner: keep the old '
+                         'API"]; nothing was saved')
+    return decisions
+
+
+def check_sequenced(state: dict, tickets: dict, new: list[str]) -> None:
+    """An unverified ticket's review diff goes stale if another worker edits its files first, so two tickets
+    sharing files must be sequenced: one waits on the other. Saved tickets come first, then the `new` ones in order,
+    since they too may share files. In a worktree run each diff lives in its own tree, so they may run side by side;
+    fleet merge then refuses the second with CONFLICT if both changed a file."""
+    if isolated(state):
+        return
+    earlier = [j for j in tickets if j not in new]
+    for i in new:
+        waits_on = ancestors(tickets, i)
+        for j in earlier:
+            old = tickets[j]
+            if (old["status"] == "pending" and scopes_overlap(tickets[i]["files"], old["files"])
+                    and j not in waits_on and i not in ancestors(tickets, j)):
+                raise FleetError(f"{i}: files overlap unverified ticket {j}; add {j} to its blockers")
+        earlier.append(i)
+
 
 def ancestors(tickets: dict, i: str) -> set[str]:
     """Every ticket `i` waits on, directly or through other blockers."""
@@ -3057,6 +3113,7 @@ def cmd_add(a, cfg):
     repo = repo_root()
     state = load_run(repo, a.run)
     data = json.loads(sys.stdin.read() if a.file == "-" else Path(a.file).read_text())
+    decisions = plan_decisions(data)
     d = run_dir(repo, a.run)
     note_lead_file(repo, state, a.file)
     pool = routing_pool(state["options"]["routing"], cfg)
@@ -3084,22 +3141,10 @@ def cmd_add(a, cfg):
         for b in t["blockers"]:
             if tickets[b]["status"] == "dropped":
                 raise FleetError(f"{i}: blocker {b} was dropped and will never be verified")
-    # An unverified ticket's review diff goes stale if another worker edits its files first, so two tickets
-    # sharing files must be sequenced: one waits on the other. Saved tickets come first, then this call's in order.
-    # In a worktree run each diff lives in its own tree, so they may run side by side; fleet merge then refuses
-    # the second with CONFLICT if both changed a file.
-    earlier = list(state["tickets"])
-    for i, t in added.items() if not isolated(state) else ():  # tickets in this call, too, may share files
-        waits_on = ancestors(tickets, i)
-        for j in earlier:
-            old = tickets[j]
-            if (old["status"] == "pending" and scopes_overlap(t["files"], old["files"])
-                    and j not in waits_on and i not in ancestors(tickets, j)):
-                raise FleetError(f"{i}: files overlap unverified ticket {j}; add {j} to its blockers")
-        earlier.append(i)
+    check_sequenced(state, tickets, list(added))
     write_tasks(d, texts)
     state["tickets"] = tickets
-    state["decisions"] += [f"{x} (added {now})" for x in data.get("decisions", [])]
+    state["decisions"] += [f"{x} (added {now})" for x in decisions]
     save_run(repo, a.run, state)
     print(f"added {len(added)} tickets: {', '.join(added)}")
 
@@ -3485,6 +3530,10 @@ def cmd_prompt(a, cfg):
             raise FleetError("stop the implementation worker before preparing review")
         if a.id in state["tickets"]:
             raise FleetError("reviewer must have a separate ID")
+        other = state["workers"].get(a.id) or state["prompts"].get(a.id) or {}
+        if fanout_of(state, a.id) or (other and other.get("review_of") != review_of):  # as fleet review --as refuses
+            what = f"reviews {other['review_of']}" if other.get("review_of") else "names another worker"
+            raise FleetError(f"{a.id} already {what}; give this reviewer an ID no other worker uses")
         t = state["tickets"][review_of]
         assert_scope_idle(state, t["files"], review_of)
         if not a.diff:
@@ -3507,6 +3556,7 @@ def cmd_prompt(a, cfg):
             raise FleetError("save the ticket in fleet plan first")
         t = state["tickets"][tid]
         meta = {"role": "implementation"}  # an investigator too: launch, stop and verify treat it as a writer of no files
+        meta["files"] = list(t["files"])  # its scope line: launch refuses the prompt once the ticket's files differ
         if tid != a.id:
             meta["fanout_of"] = tid
         investigate = t.get("kind") == "investigate"
@@ -3740,6 +3790,20 @@ def stale_handdown(meta: dict, t: dict) -> list[str]:
     return [b for b in t["blockers"] if b not in meta["verified_blockers"]]
 
 
+def launched_overlap(state: dict, i: str) -> str | None:
+    """A launched, unverified ticket other than `i` whose files overlap `i`'s while neither waits on the other, or
+    None. It owns them from its first launch until it is verified or dropped, as launch --ready holds them, so `i`'s
+    worker editing them first would land in its diff. A run planned before plan sequenced such tickets may hold
+    two; in a worktree run each ticket edits its own tree."""
+    if isolated(state):
+        return None
+    tickets = state["tickets"]
+    waits_on = ancestors(tickets, i)
+    return next((j for j, o in tickets.items() if j != i and o["status"] == "pending" and j in state["workers"]
+                 and scopes_overlap(tickets[i]["files"], o["files"]) and j not in waits_on
+                 and i not in ancestors(tickets, j)), None)
+
+
 def launch_one(a, cfg) -> tuple[str, dict]:
     """Launch one planned ticket or reviewer; returns its tab label and worker record."""
     repo = repo_root()
@@ -3762,6 +3826,9 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     if not prompt_path.exists() or a.id not in state["prompts"]:
         raise FleetError("write the prompt first with fleet prompt")
     meta_now = state["prompts"][a.id]
+    if meta_now.get("role") == "implementation" and (meta_now.get("fanout_of") or a.id) not in state["tickets"]:
+        raise FleetError(f"{meta_now.get('fanout_of') or a.id} is not a ticket of this run's plan, so {a.id}'s prompt "
+                         f"was written for an earlier one; fleet resume {a.run} lists the tickets")
     unfilled = unfilled_fields(prompt_path.read_text(), meta_now.get("content_placeholders", ()),
                                meta_now.get("content_lead", 0))
     if unfilled:
@@ -3809,6 +3876,11 @@ def launch_one(a, cfg) -> tuple[str, dict]:
             raise FleetError(f"{a.id} was dropped; add a new ticket for the work instead")
         if any(state["tickets"][b]["status"] != "verified" for b in t["blockers"]):
             raise FleetError("ticket has unverified blockers")
+        granted = {f for g in t.get("grants") or () for f in g["files"]}  # each grant's own message names them
+        if "files" in meta and set(meta["files"]) - granted != set(t["files"]) - granted:
+            raise FleetError(f"{a.id}'s prompt was written for {', '.join(meta['files']) or 'no files'}, but {tid} "
+                             f"now owns {', '.join(t['files']) or 'no files'}; rewrite it with fleet prompt {a.run} "
+                             f"{a.id} --force")
         if check_rounds(repo, state, cfg, a, tid, "repair"):
             grant_round(state, tid, a.extra_round)  # saved with the worker record, so a refused launch keeps none
         stale = stale_handdown(meta, t)
@@ -3843,6 +3915,9 @@ def launch_one(a, cfg) -> tuple[str, dict]:
                 continue  # in a worktree run another ticket's worker edits its own tree, never this one's
             if scopes_overlap(t["files"], state["tickets"][owner]["files"]):
                 raise FleetError("files overlap an active implementation/review; wait for its exit")
+        if held := launched_overlap(state, tid):
+            raise FleetError(f"files overlap {held}, which has launched and is not verified, so its diff still awaits "
+                             f"review; verify {held}, or drop it (fleet drop {a.run} {held} --reason …), first")
     elif meta.get("plan_of"):  # a plan reviewer: the writer keeps running, waiting for the lead's answer
         t, model, effort, family = plan_review_launch(state, cfg, a, pcfg, meta)
     else:
@@ -3869,7 +3944,8 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     known = set(state.get("worktrees", {}))
     work = launch_tree(repo, state, cfg, a.id, meta, a.resume)  # the worker's cwd: the checkout, or its own worktree
     made = [x for x in (d / "snapshots" / f"{a.id}.json", d / "snapshots" / f"{a.id}.tree.json") if not x.exists()]
-    try:  # until the run is saved, a tree made for this launch is on disk only: a failure removes it again
+    report, previous = d / "reports" / f"{a.id}.md", None
+    try:  # until the run is saved, what this launch made is on disk only: a failure removes it again
         baseline = d / "snapshots" / f"{a.id}.json"
         if meta["role"] == "implementation" and not baseline.exists():
             atomic_json(baseline, capture_files(work, t["files"]))
@@ -3878,9 +3954,9 @@ def launch_one(a, cfg) -> tuple[str, dict]:
             atomic_json(tree, tree_state(work, run_ignore(state, cfg)))
         if meta["role"] == "implementation":
             t.setdefault("launched_at", time.time())  # from here until verified or dropped, it owns its files
-        report = d / "reports" / f"{a.id}.md"
         if report.exists():
-            report.replace(d / "reports" / f"{a.id}.{uuid.uuid4().hex}.previous")
+            previous = d / "reports" / f"{a.id}.{uuid.uuid4().hex}.previous"
+            report.replace(previous)
         token = uuid.uuid4().hex
         line = (resume_prompt_line(prompt_path, a.id, report, inbox_path(repo, a.run, a.id)) if a.resume
                 else warm_prompt_line(prompt_path, a.id, warm["after"], report, inbox_path(repo, a.run, a.id)) if warm
@@ -3933,6 +4009,8 @@ def launch_one(a, cfg) -> tuple[str, dict]:
                                                            usage_home(pcfg) if session else None))
         save_run(repo, a.run, state)
     except BaseException:
+        if previous and not report.exists():  # no worker started, so the report it set aside is still the latest
+            previous.replace(report)
         forget_new_tree(repo, state, a.id, known, made)
         raise
     if new_round and t.get("findings_sent"):  # the writer's Repair note names findings this round now settles
@@ -3959,6 +4037,18 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     if a.settle:  # outside the lock: a read-only look must not hold up the lead's next command
         a.unlocked = lambda: print_start_screen(term, w, a.settle)
     return label, w
+
+
+def uncertain_launch(repo: Path, run: str, wid: str, role: str) -> str | None:
+    """After a launch_one that raised: the way out when it saved `wid`'s record first, so its worker may be running
+    (the terminal failed to answer, say), or None when it saved nothing. Launch refuses a worker whose record is
+    still live, so a live one now is this launch's."""
+    w = load_run(repo, run)["workers"].get(wid)
+    if not w or w.get("state") not in ACTIVE_STATES:
+        return None
+    return (f"{wid} may be running: its launch is saved as {w['state']} on {w['surface']}. Inspect the terminal: a "
+            f"running {role} hands back as usual; otherwise confirm its exit with fleet stop {run} {wid}, or record "
+            f"that it never started with fleet recover {run} {wid} --evidence <file>")
 
 
 def gate_rounds_back(state: dict, i: str, last: dict | None, resume: bool) -> bool:
@@ -4273,6 +4363,7 @@ def cmd_send(a, cfg):
         raise FleetError("--extra-round goes with --findings, the only send that relaunches the writer")
     repo = repo_root()
     state = load_run(repo, a.run)
+    reconcile(repo, state)  # a worker that exited on its own reads the message at its next launch, not a dead pane
     valid_id(a.id)
     if a.id not in state["tickets"] and a.id not in state["prompts"] and a.id not in state["workers"]:
         raise FleetError(f"no ticket or worker '{a.id}' in this run")
@@ -4811,7 +4902,7 @@ def cmd_status(a, cfg):
     if a.json:
         print(json.dumps(rows, indent=2))
         return
-    print(f"run {state['run']}  {terminal(state).where()}  running {len(active(state))}/{cfg['defaults']['max_parallel']}")
+    print(f"run {state['run']}  {terminal(state).where()}  running {len(active(state))}/{state['options']['max_parallel']}")
     if hold := load_hold(repo):
         print(f"hold: {hold_text(hold)}; running workers continue, `fleet release` lifts it")
     for r in rows:
@@ -6891,6 +6982,9 @@ def send_findings(a, cfg):
     try:
         _, w = launch_one(one, cfg)
     except (FleetError, OSError, subprocess.TimeoutExpired) as e:
+        if live := uncertain_launch(repo, a.run, a.id, "writer"):
+            raise FleetError(f"{str(e).strip()}\n{rid}'s findings are saved as message {n} in {box}. {live}, and "
+                             f"then run fleet send {a.run} {a.id} --findings again (it saves nothing twice)") from None
         raise FleetError(f"{str(e).strip()}\n{rid}'s findings are saved as message {n} in {box}, but {a.id} did not "
                          f"relaunch; resolve that, then run fleet send {a.run} {a.id} --findings again (it saves "
                          "nothing twice)") from None
@@ -7159,6 +7253,9 @@ def cmd_review(a, cfg):
                        settle=LAUNCH_SETTLE_S if a.settle is None else a.settle)
         _, w = launch_one(one, cfg)
     except (FleetError, OSError, subprocess.TimeoutExpired) as e:
+        if live := uncertain_launch(repo, a.run, rid, "reviewer"):
+            raise FleetError(f"{str(e).strip()}\n{a.id} is stopped. {live}, and then run fleet review {a.run} "
+                             f"{a.id} again") from None
         raise FleetError(f"{str(e).strip()}\n{a.id} is stopped and no reviewer is running; resolve that, then run "
                          f"fleet review {a.run} {a.id} again") from None
     if getattr(one, "unlocked", None):  # the start screen prints once main releases the lock
@@ -8219,6 +8316,9 @@ def approve_review(a, cfg, repo: Path, state: dict, report: Path, finished: list
                        settle=LAUNCH_SETTLE_S if a.settle is None else a.settle)
         _, w = launch_one(one, cfg)
     except (FleetError, OSError, subprocess.TimeoutExpired) as e:
+        if live := uncertain_launch(repo, a.run, rid, "plan reviewer"):
+            raise FleetError(f"{str(e).strip()}\n{a.id}'s plan still waits. {live}, and then run fleet approve "
+                             f"{a.run} {a.id} --review again") from None
         raise FleetError(f"{str(e).strip()}\nNo plan reviewer of {a.id} is running and its plan still waits; resolve "
                          f"that, then run fleet approve {a.run} {a.id} --review again") from None
     if getattr(one, "unlocked", None):  # the start screen prints once main releases the lock
@@ -8816,6 +8916,9 @@ def cmd_judge(a, cfg):
                        settle=LAUNCH_SETTLE_S if a.settle is None else a.settle)
         _, w = launch_one(one, cfg)
     except (FleetError, OSError, subprocess.TimeoutExpired) as e:
+        if live := uncertain_launch(repo, a.run, jid, "judge"):
+            raise FleetError(f"{str(e).strip()}\n{a.id}'s {role}s are stopped. {live}, and then run fleet judge "
+                             f"{a.run} {a.id} again") from None
         raise FleetError(f"{str(e).strip()}\n{a.id}'s {role}s are stopped and no judge is running; resolve "
                          f"that, then run fleet judge {a.run} {a.id} again") from None
     if getattr(one, "unlocked", None):  # the start screen prints once main releases the lock
@@ -9625,8 +9728,10 @@ def remove_tree(repo: Path, state: dict, rec: dict) -> None:
 
 
 def forget_new_tree(repo: Path, state: dict, wid: str, known: set[str], made: list[Path]) -> None:
-    """A launch that failed before saving the run: remove the tree it made for `wid`, and the snapshots it took
-    from that tree, so the next launch starts clean instead of meeting a tree no record knows."""
+    """A launch that failed before saving the run: remove the snapshots it took, in every run, and the tree it
+    made for `wid`, so the next launch starts clean instead of meeting a stale baseline or a tree no record knows."""
+    for path in made:
+        path.unlink(missing_ok=True)
     if wid in known or wid not in state.get("worktrees", {}):
         return
     try:
@@ -9634,8 +9739,6 @@ def forget_new_tree(repo: Path, state: dict, wid: str, known: set[str], made: li
     except (FleetError, OSError, subprocess.TimeoutExpired) as e:
         print(f"{wid}: could not remove the worktree this launch made ({str(e).strip()[:200]}); fleet check "
               f"{state['run']} --clean-worktrees removes it", file=sys.stderr)
-    for path in made:
-        path.unlink(missing_ok=True)
 
 
 def launch_tree(repo: Path, state: dict, cfg: dict, wid: str, meta: dict, resume: bool) -> Path:
