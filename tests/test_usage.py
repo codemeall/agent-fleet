@@ -274,6 +274,30 @@ class Usage(UsageCase):
         self.assertEqual((t["changes_requested"], t["repairs"], t["outcome"], t["first_pass"]),
                          (True, 0, "open", None))
 
+    def test_a_report_that_is_not_utf8_never_stops_the_report(self):
+        """#53 review, 6: usage reads every report tolerantly, an archived one included."""
+        self.plan([{"id": "01", "files": ["owned.txt"]}])
+        self.launch("01")
+        self.hand_back("01")
+        self.run_file("reports", "01." + "ab" * 16 + ".previous").write_bytes(
+            b"# Report \xff\xfe\nStatus: changes-requested\n\nDone.\n")
+        t = self.tickets(self.usage_json("demo"))["01"]
+        self.assertTrue(t["changes_requested"])
+        self.assertIn("total: 1 ticket (1 open)", self.usage("demo"))
+
+    def test_all_lists_a_run_folder_whose_name_is_no_run_id_as_skipped(self):
+        """#53 review, 7: one folder Fleet cannot name never aborts the whole report."""
+        self.plan([{"id": "01", "files": ["owned.txt"]}])
+        self.launch("01")
+        bad = self.repo / ".fleet" / "runs" / "bad.name"
+        bad.mkdir()
+        (bad / "run.json").write_text("{}")
+        u = self.usage_json("--all")
+        self.assertEqual(u["runs"], ["demo"])
+        self.assertEqual([s["run"] for s in u["skipped"]], ["bad.name"])
+        self.assertIn("skipped run bad.name: run/worker IDs must be", self.usage("--all"))
+        self.assertIn("run/worker IDs must be", self.usage("bad.name", expected=1))  # a named run must be valid
+
     def test_it_writes_nothing_and_takes_no_lock(self):
         self.scripted()
         self.legacy_run("old")

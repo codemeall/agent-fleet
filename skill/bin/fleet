@@ -1269,8 +1269,9 @@ def try_lock(repo: Path):
 @contextmanager
 def mutation_lock(a):
     # wait, supervise and gate may run for minutes; holding the lock would block the lead's commands. supervise
-    # takes it only for each brief change, without waiting (try_lock).
-    if a.cmd not in ("hold", "release") and (not hasattr(a, "run") or a.cmd in ("wait", "supervise", "gate", "usage",
+    # takes it only for each brief change, without waiting (try_lock). A command with no `run` argument holds no
+    # lock either: `fleet usage` (which takes `runs`) reads and writes nothing, and its test asserts it never locks.
+    if a.cmd not in ("hold", "release") and (not hasattr(a, "run") or a.cmd in ("wait", "supervise", "gate",
                                                                               *BOARD_COMMANDS, *OWNER_VIEWS)):
         yield
         return
@@ -2433,7 +2434,9 @@ def read_text(f: Path) -> str:
         return ""
 
 
-def report_status(f: Path) -> str:
+def usage_status(f: Path) -> str:
+    """A report's status, lowercased ("" for none), read tolerantly: usage must read an archived report that holds
+    invalid UTF-8. The verify paths keep report_status, which reads strictly."""
     return (parse_status(read_text(f)) or "").lower()
 
 
@@ -2448,7 +2451,7 @@ def usage_repairs(d: Path, entries: list[dict]) -> int:
     entries = sorted(entries, key=lambda e: e.get("start") or 0)
     if len(entries) < 2:
         return 0
-    archived = [(f.stat().st_mtime, report_status(f)) for f in archived_reports(d, entries[0]["worker"])]
+    archived = [(f.stat().st_mtime, usage_status(f)) for f in archived_reports(d, entries[0]["worker"])]
     repairs = 0
     for prev, e in zip(entries, entries[1:]):
         if e.get("resume") and prev.get("start") is not None and e.get("start") is not None:
@@ -2459,12 +2462,22 @@ def usage_repairs(d: Path, entries: list[dict]) -> int:
     return repairs
 
 
+def usage_reviewer(state: dict, i: str, wid: str) -> bool:
+    """True for a worker whose rounds are ticket `i`'s reviews: its cross-family reviewers (never a plan's), and, for
+    a best-of-two ticket, its judges, which stand as the kept diff's review."""
+    w = state["workers"].get(wid) or {}
+    if w.get("review_of") == i:
+        return not plan_review(state, wid)
+    return bool(w.get("judge")) and w.get("fanout_of") == i and best_of_two(state["tickets"].get(i))
+
+
 def usage_findings(d: Path, state: dict, i: str) -> tuple[int, int]:
     """(findings, rounds read) over the review rounds of ticket `i` whose reviewer report can still be read: the
-    current one and those later rounds archived. A round without a readable header is left out, never zero."""
+    current one and those later rounds archived. A round without a readable header is left out, never zero. A
+    best-of-two ticket's judges count as its reviewers."""
     found = rounds = 0
-    for wid, w in state["workers"].items():
-        if w.get("review_of") != i or plan_review(state, wid):
+    for wid in state["workers"]:
+        if not usage_reviewer(state, i, wid):
             continue
         for f in [*archived_reports(d, wid), d / "reports" / f"{wid}.md"]:
             data = parse_header(read_text(f))[0] if f.exists() else None
@@ -2484,14 +2497,21 @@ def usage_ticket(d: Path, state: dict, i: str, entries: list[dict]) -> dict | No
     for e in own:
         by_worker.setdefault(e["worker"], []).append(e)
     repairs = sum(usage_repairs(d, es) for es in by_worker.values())
-    gates = max(len(GATE_ROUND_RE.findall(read_text(d / "inbox" / f"{i}.md"))), t.get("gate_rounds_used", 0))
-    reviews = [e for e in entries if e.get("role") == "reviewer" and not plan_review(state, e["worker"])]
-    rounds = t["review_rounds"] if "review_rounds" in t else max(
-        sum(not e.get("resume") for e in reviews), review_rounds(state, i) if i in state["tickets"] else 0)
+    # A best-of-two ticket's writers each keep their own inbox, gate rounds and reports: its rework is their sum.
+    writers = pick_writers(t) if best_of_two(t) else [i]
+    gates = sum(max(len(GATE_ROUND_RE.findall(read_text(d / "inbox" / f"{w}.md"))), gate_rounds_used(t, w))
+                for w in writers)
+    if best_of_two(t):  # its judges are its review rounds (fleet review refuses these tickets)
+        judged = [e for e in entries if e.get("role") == "judge"]
+        rounds = max(sum(not e.get("resume") for e in judged), len(judges(state, i)))
+    else:
+        reviews = [e for e in entries if e.get("role") == "reviewer" and not plan_review(state, e["worker"])]
+        rounds = t["review_rounds"] if "review_rounds" in t else max(
+            sum(not e.get("resume") for e in reviews), review_rounds(state, i) if i in state["tickets"] else 0)
     findings, read = usage_findings(d, state, i)
-    parked = [d / "reports" / f"{i}.md", *archived_reports(d, i)]
+    parked = [f for w in writers for f in (d / "reports" / f"{w}.md", *archived_reports(d, w))]
     changes = (gates > 0 or bool(t.get("findings_sent"))
-               or any(report_status(f) == "changes-requested" for f in parked if f.exists()))
+               or any(usage_status(f) == "changes-requested" for f in parked if f.exists()))
     outcome = t.get("status") if t.get("status") in ("verified", "dropped") else "open"
     return {"run": state["run"], "ticket": i, "outcome": outcome, "role": first.get("role"),
             "provider": first.get("provider"), "model": first.get("model"), "tier": first.get("tier") or t.get("tier"),
@@ -2608,8 +2628,8 @@ def cmd_usage(a, cfg):
             raise FleetError("no runs in this checkout yet")
     else:
         runs = list(dict.fromkeys(a.runs)) or [latest_run(repo)]
-    for run in runs:
-        valid_id(run)
+        for run in runs:  # a named run must be readable; with --all, a folder Fleet cannot name is listed as skipped
+            valid_id(run)
     u = usage_report(repo, runs, cfg, a.by, skip_bad=a.all)
     if a.json:
         print(json.dumps(u, indent=2))
@@ -2739,26 +2759,36 @@ def check_command(repo: Path, i: str, raw: dict) -> dict:
         if not isinstance(reason, str) or not reason.strip() or "\n" in reason.strip() or "\r" in reason.strip():
             raise FleetError(f"{i}: a manual check needs \"manual\": a nonempty one-line reason no command can check it")
         return {"manual": reason.strip()}
-    unknown = sorted(set(raw) - CHECK_KEYS)
-    if unknown:
-        raise FleetError(f"{i}: unknown key {', '.join(unknown)} in a check; a command takes run, cwd and timeout, "
-                         "a manual check only manual")
+    c = check_fields(i, raw)
+    try:
+        full = contained(repo.resolve(), repo.resolve() / c["cwd"])
+    except FleetError as e:
+        raise FleetError(f"{i}: check cwd {raw.get('cwd', '.')!r}: {e}") from None
+    if not full.is_dir():
+        raise FleetError(f"{i}: check cwd {raw.get('cwd', '.')!r} is not a directory in the repository")
+    return c
+
+
+def check_fields(where: str, raw: dict, manual_ok: bool = True) -> dict:
+    """A check command's fields as they can be checked without a checkout: known keys, a nonempty run, a lexically
+    repo-relative cwd and a timeout in range; normalized. A ticket's checks (check_command) and the config's
+    accept_checks (accept_checks_shape, `manual_ok` False: commands only) share it."""
+    if unknown := sorted(set(raw) - CHECK_KEYS):
+        raise FleetError(f"{where}: unknown key {', '.join(unknown)}{' in a check' if manual_ok else ''}; a command "
+                         f"takes run, cwd and timeout{', a manual check only manual' if manual_ok else ''}")
     run = raw.get("run")
     if not isinstance(run, str) or not run.strip():
-        raise FleetError(f"{i}: a check command needs \"run\": the shell command to run")
+        raise FleetError(f"{where}: a check command needs \"run\": the shell command to run" if manual_ok else
+                         f"{where} needs run: the shell command to run")
     cwd = raw.get("cwd", ".")
     path = Path(cwd) if isinstance(cwd, str) and cwd.strip() else None
     if path is None or path.is_absolute() or ".." in path.parts:
-        raise FleetError(f"{i}: check cwd must be a repo-relative directory without ..: {cwd!r}")
-    try:
-        full = contained(repo.resolve(), repo.resolve() / path)
-    except FleetError as e:
-        raise FleetError(f"{i}: check cwd {cwd!r}: {e}") from None
-    if not full.is_dir():
-        raise FleetError(f"{i}: check cwd {cwd!r} is not a directory in the repository")
+        raise FleetError(f"{where}: {'check ' if manual_ok else ''}cwd must be a repo-relative directory without ..: "
+                         f"{cwd!r}")
     timeout = raw.get("timeout", CHECK_TIMEOUT)
     if type(timeout) is not int or not 1 <= timeout <= CHECK_TIMEOUT_MAX:
-        raise FleetError(f"{i}: check timeout must be whole seconds from 1 to {CHECK_TIMEOUT_MAX}: {timeout!r}")
+        raise FleetError(f"{where}: {'check ' if manual_ok else ''}timeout must be whole seconds from 1 to "
+                         f"{CHECK_TIMEOUT_MAX}: {timeout!r}")
     return {"run": run.strip(), "cwd": path.as_posix(), "timeout": timeout}
 
 
@@ -2774,16 +2804,7 @@ def accept_checks_shape(raw) -> None:
         where = f"defaults.accept_checks item {n}"
         if "manual" in c:
             raise FleetError(f"{where}: accept_checks take commands only; a manual check is the lead's, in its evidence")
-        if unknown := sorted(set(c) - CHECK_KEYS):
-            raise FleetError(f"{where}: unknown key {', '.join(unknown)}; a command takes run, cwd and timeout")
-        if not isinstance(c.get("run"), str) or not c["run"].strip():
-            raise FleetError(f"{where} needs run: the shell command to run")
-        cwd = c.get("cwd", ".")
-        if not isinstance(cwd, str) or not cwd.strip() or Path(cwd).is_absolute() or ".." in Path(cwd).parts:
-            raise FleetError(f"{where}: cwd must be a repo-relative directory without ..: {cwd!r}")
-        timeout = c.get("timeout", CHECK_TIMEOUT)
-        if type(timeout) is not int or not 1 <= timeout <= CHECK_TIMEOUT_MAX:
-            raise FleetError(f"{where}: timeout must be whole seconds from 1 to {CHECK_TIMEOUT_MAX}: {timeout!r}")
+        check_fields(where, c, manual_ok=False)
 
 
 def accept_check_list(repo: Path, raw: list) -> list[dict]:
@@ -5073,7 +5094,7 @@ def wait_loop(a, repo: Path, d: Path, seen: Path, statuses, deadline: float, loo
             fresh = loop.handle(state, fresh)
         events = scan_workers(repo, state, seen, a.stall) + board_lines(d, seen)
         # A fan-out wakes once, when all its investigators are back; best-of-two, once both writers' gates are done.
-        fresh, fan = fanout_pass(repo, state, seen, fresh, gates_deferred(loop))
+        fresh, fan = fanout_pass(repo, state, seen, fresh, gating(loop))
         if fresh or events or fan or plans or loop and loop.lines:
             settle_until, settled = min(deadline, time.time() + a.settle), False
             while time.time() < settle_until:
@@ -5085,7 +5106,7 @@ def wait_loop(a, repo: Path, d: Path, seen: Path, statuses, deadline: float, loo
                 settled = True
             if settled:  # screens once more, not every second: each read is a cmux call per worker
                 events += scan_workers(repo, load_run(repo, a.run), seen, a.stall) + board_lines(d, seen)
-                fresh, more = fanout_pass(repo, load_run(repo, a.run), seen, fresh, gates_deferred(loop))
+                fresh, more = fanout_pass(repo, load_run(repo, a.run), seen, fresh, gating(loop))
                 fan += more
             fresh = list({i: (i, status, f) for i, status, f in fresh}.values())  # a rewritten report: latest status
             for line in getattr(loop, "actions", ()):  # supervise's own steps: listed, never a wake of their own
@@ -5836,10 +5857,10 @@ def gate_scope(repo: Path, state: dict, i: str, now: dict,
             + "\n".join(f"- {code_span(p)} ({kind})" for p, kind, _ in changes), changes)
 
 
-def gate_evidence(run: str, i: str, results: list[dict], scope: str, summary: str,
-                  manual: list[str] = ()) -> str:
-    lines = [f"# Gate evidence: {i}", "",
-             f"Run `{run}`, ticket `{i}`, {time.strftime('%Y-%m-%dT%H:%M:%S')}. Fleet ran each command with "
+def commands_evidence(title: str, run: str, i: str, ran: str, results: list[dict]) -> list[str]:
+    """An evidence file's opening, which the gate's and accept_checks' share: the title, what Fleet ran (`ran`) and
+    how, each command's result and the tail of each that failed."""
+    lines = [title, "", f"Run `{run}`, ticket `{i}`, {time.strftime('%Y-%m-%dT%H:%M:%S')}. Fleet ran {ran} with "
              "/bin/sh from its directory, without the lead's session variables or stdin.", "", "## Commands", ""]
     for n, r in enumerate(results, 1):
         mark = "FAILED" if check_failed(r) else "passed"
@@ -5850,6 +5871,12 @@ def gate_evidence(run: str, i: str, results: list[dict], scope: str, summary: st
             tail = "\n".join(r["output"].rstrip().splitlines()[-GATE_TAIL_LINES:])
             lines += ["", f"### Output of {n}: {code_span(r['run'])} (last {GATE_TAIL_LINES} lines at most)", "",
                       fenced(tail) if tail.strip() else "No output."]
+    return lines
+
+
+def gate_evidence(run: str, i: str, results: list[dict], scope: str, summary: str,
+                  manual: list[str] = ()) -> str:
+    lines = commands_evidence(f"# Gate evidence: {i}", run, i, "each command", results)
     if manual:
         lines += ["", "## Manual checks", "", "Skipped: no command checks these, so the lead checks them by hand "
                   "and records the result in its own evidence.", ""] + [f"- {m}" for m in manual]
@@ -5857,17 +5884,33 @@ def gate_evidence(run: str, i: str, results: list[dict], scope: str, summary: st
     return "\n".join(lines) + "\n"
 
 
-def record_check_outputs(repo: Path, state: dict, i: str, before: dict, after: dict) -> list[str]:
+def record_check_outputs(repo: Path, state: dict, i: str, before: dict, after: dict,
+                         live_ok: bool = False, unrecorded: list | None = None) -> list[str]:
     """Files the gate's commands changed outside every ticket's files. Recorded (in their own file, since gate
-    saves no run state) only while no worker runs: otherwise a worker's stray edit could pass as a cache."""
+    saves no run state) only while no worker runs: otherwise a worker's stray edit could pass as a cache. With
+    `live_ok` (accept_checks, whose own ticket's workers are stopped) they are recorded while other workers run too,
+    each provided it was unchanged before the commands ran (or held only a recorded output then), so an edit made
+    before them is never excused. Returns every such file, recorded or not; `unrecorded` gets those not recorded."""
     changed = {p: new for p, (_, new) in tree_changes(repo, before, after).items()}
     owned = {f for t in state["tickets"].values() for f in t["files"]} | set(state.get("lead_files", []))
     changed = {p: fp for p, fp in changed.items() if p not in owned}
-    if changed and not active(state):
+    keep = changed if not active(state) else check_outputs_clean_before(repo, state, before, changed) if live_ok \
+        else {}
+    if unrecorded is not None:
+        unrecorded += sorted(set(changed) - set(keep))
+    if keep:
         f = contained(run_dir(repo, state["run"]), run_dir(repo, state["run"]) / "check-outputs" / f"{i}.json")
         f.parent.mkdir(exist_ok=True)
-        atomic_json(f, {**(json.loads(f.read_text()) if f.exists() else {}), **changed})
+        atomic_json(f, {**(json.loads(f.read_text()) if f.exists() else {}), **keep})
     return sorted(changed)
+
+
+def check_outputs_clean_before(repo: Path, state: dict, before: dict, changed: dict[str, str]) -> dict[str, str]:
+    """Those of `changed` that were unchanged when `before` was taken: clean against HEAD then, or holding only what
+    an earlier check recorded as its own output."""
+    prior = check_outputs(repo, state["run"])
+    return {p: fp for p, fp in changed.items()
+            if p not in before["paths"] or before["paths"][p] in prior.get(p, ())}
 
 
 def cmd_gate(a, cfg):
@@ -6087,7 +6130,8 @@ def reusable_gate(repo: Path, state: dict, cfg: dict, i: str) -> str | None:
 
 class GateLoop:
     """wait --gate across its polls. A gate whose send found the lock held is kept with the report and tree it ran
-    on, so the next poll retries the send without running the checks again."""
+    on, so the next poll retries the send without running the checks again. `deferred` is only that cache: nothing
+    else reads it (a best-of-two FANOUT asks gate_pending, which reads the .seen marker and the gate record)."""
 
     def __init__(self, repo: Path, state: dict, cfg: dict, seen: Path):
         self.repo, self.run, self.cfg, self.seen = repo, state["run"], cfg, seen
@@ -6122,6 +6166,7 @@ class GateLoop:
         """Run ticket `i`'s gate (or reuse a deferred one) and act on it. True: wake with its REPORT line."""
         key, out = report_key(f, f.read_text()), gate_file(self.repo, self.run, i)
         g = self.cached(state, i, key)
+        self.deferred.pop(i, None)  # used or stale: only a send that finds the lock busy keeps a gate for later
         if g is None:
             (self.seen / i).unlink(missing_ok=True)  # a wait ended mid-gate leaves the hand-back to the next wait
             g = run_gate(self.repo, state, self.cfg, i, out, loop=True)
@@ -6222,7 +6267,8 @@ def cmd_verify(a, cfg):
         if worktree_rec(state, a.id) and not merge_done(repo, state, a.id):
             raise FleetError(f"{a.id} ran in its own worktree and its diff is not in the checkout yet; apply it first "
                              f"with fleet merge {a.run} {a.id} (fleet accept does both)")
-        evidence += quality_check(repo, state, a, a.id)  # the strict bar: refuses below it, records an override
+        q = quality_check(repo, state, a, a.id)  # the strict bar: refuses below it; recorded below, once nothing can
+        evidence += q["text"]
         t["status"], t["closed_at"] = "verified", time.time()
     else:
         if getattr(a, "accept_anyway", None) is not None or getattr(a, "accept_finding", None):
@@ -6231,17 +6277,29 @@ def cmd_verify(a, cfg):
         sha = digest(scoped_diff(repo, state, w["review_of"]).encode())
         if sha != w["diff_sha"]:
             raise FleetError("review is stale; regenerate diff and review")
-    w["verified"] = True
-    w["verified_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-    w["verification_evidence"] = evidence
-    warn_header(repo, state, a.id, report.read_text())
-    set_report_status(report, "verified", "\n## Lead verification\n" + evidence + "\n")
+        q = None
+    mark_verified(repo, state, a.id, evidence)
+    if q:
+        quality_commit(state, q)
     save_run(repo, a.run, state)
+    if q:
+        quality_say(q)
     inline = Path(state["tickets"][owner]["ticket"]).parent == (run_dir(repo, a.run) / "tasks").resolve()
     if w["role"] == "implementation" and inline:
         print(f"{a.id}: verified; an inline task has no source ticket to update")
     else:
         print(f"{a.id}: verified; update the source ticket only after implementation acceptance")
+
+
+def mark_verified(repo: Path, state: dict, wid: str, evidence: str, now: str | None = None) -> None:
+    """Worker `wid` verified with `evidence`: on its record and in its report, which gets the evidence appended and
+    no longer waits on the lead. verify, fan-out verify and accept --pick share it; the caller saves."""
+    report = run_dir(repo, state["run"]) / "reports" / f"{wid}.md"
+    w = state["workers"][wid]
+    w["verified"], w["verified_at"] = True, now or time.strftime("%Y-%m-%dT%H:%M:%S")
+    w["verification_evidence"] = evidence
+    warn_header(repo, state, wid, report.read_text())
+    set_report_status(report, "verified", "\n## Lead verification\n" + evidence + "\n")
 
 
 # ---------- review and accept ----------
@@ -6928,9 +6986,10 @@ def note_evidence(repo: Path, state: dict, a) -> None:
         note_lead_file(repo, state, f)
 
 
-def accept_problems(repo: Path, state: dict, a, review: dict | None, rid: str | None) -> list[str]:
+def accept_problems(repo: Path, state: dict, a, review: dict | None, rid: str | None,
+                    bar: list | None = None) -> list[str]:
     """What fleet verify (or the gate) would refuse, for the reviewer and the writer together, so one refusal
-    names every problem before either is verified."""
+    names every problem before either is verified. `bar`: the quality bar, when the caller computed it already."""
     t = state["tickets"][a.id]
     note_evidence(repo, state, a)  # in memory, as gate does; verify saves them
     out = []
@@ -6939,15 +6998,30 @@ def accept_problems(repo: Path, state: dict, a, review: dict | None, rid: str | 
     if review and (rid or t["review_required"]) and \
             digest(scoped_diff(repo, state, a.id).encode()) != review.get("diff_sha"):
         out.append(f"{review['id']} reviewed an earlier diff of {a.id}; run fleet review {a.run} {a.id} again")
-    reports = run_dir(repo, a.run) / "reports"
-    for wid in filter(None, (rid, a.id)):
+    out += handback_problems(repo, state, [rid, a.id])
+    out += accept_flag_problems(a, t, rid, "reviewer")
+    out += accept_unowned_problems(repo, state, a, [rid, a.id])
+    return out + quality_problems(repo, state, a, a.id, items=bar)  # the strict bar, in the same refusal
+
+
+def handback_problems(repo: Path, state: dict, ids: list[str | None]) -> list[str]:
+    """Each of `ids` (None skipped) whose report does not say Status: needs-verification, which verify requires."""
+    reports, out = run_dir(repo, state["run"]) / "reports", []
+    for wid in filter(None, ids):
         f = reports / f"{wid}.md"
         status = parse_status(f.read_text()) if f.exists() else None
         if status != "needs-verification":
             said = f"Status: {status}" if status else "no status line" if f.exists() else "nothing (no report yet)"
             out.append(f"{wid}'s report says {said}; it must say Status: needs-verification")
+    return out
+
+
+def accept_flag_problems(a, t: dict, rid: str | None, role: str) -> list[str]:
+    """accept's flags against ticket `t`: --review-evidence without a `role` (reviewer, judge) awaiting
+    verification, evidence files that cannot be read, --gate with no runnable checks, --unowned-ok without words."""
+    out = []
     if a.review_evidence and not rid:
-        out.append(f"--review-evidence: no reviewer of {a.id} awaits verification; drop it")
+        out.append(f"--review-evidence: no {role} of {a.id} awaits verification; drop it")
     for flag, files in (("--evidence", a.evidence), ("--review-evidence", a.review_evidence if rid else None)):
         try:
             read_evidence_files(files or [])
@@ -6957,15 +7031,21 @@ def accept_problems(repo: Path, state: dict, a, review: dict | None, rid: str | 
         out.append(f"{a.id} has no runnable checks to gate; drop --gate and record your checks in --evidence")
     if a.unowned_ok is not None and not a.unowned_ok.strip():
         out.append("--unowned-ok needs the owner's reason")
-    if a.unowned_ok is None:
-        unowned, now = {}, tree_state(repo, run_ignore(state))
-        for wid in filter(None, (rid, a.id)):
-            for path, kind, fp in unowned_for(repo, state, wid, now) or []:
-                unowned.setdefault(path, (path, kind, fp))
-        if unowned:
-            out.append("files outside every ticket's scope changed since launch:\n"
-                       f"{unowned_text(list(unowned.values()))}\n  {UNOWNED_WAYS_OUT}")
-    return out + quality_problems(repo, state, a, a.id)  # the strict bar, in the same refusal
+    return out
+
+
+def accept_unowned_problems(repo: Path, state: dict, a, ids: list[str | None]) -> list[str]:
+    """The scope check verify runs for each of `ids` (None skipped), as one item; none with --unowned-ok."""
+    if a.unowned_ok is not None:
+        return []
+    unowned, now = {}, tree_state(repo, run_ignore(state))
+    for wid in filter(None, ids):
+        for path, kind, fp in unowned_for(repo, state, wid, now) or []:
+            unowned.setdefault(path, (path, kind, fp))
+    if not unowned:
+        return []
+    return ["files outside every ticket's scope changed since launch:\n"
+            f"{unowned_text(list(unowned.values()))}\n  {UNOWNED_WAYS_OUT}"]
 
 
 def refuse_problems(a, problems: list[str], unchanged: str) -> None:
@@ -6978,6 +7058,45 @@ def unblocked_by(state: dict, i: str) -> list[str]:
     tickets = state["tickets"]
     return [j for j, t in tickets.items() if t["status"] == "pending" and unlaunched(state, j)
             and i in t["blockers"] and all(tickets[b]["status"] == "verified" for b in t["blockers"])]
+
+
+def accept_stopped(repo: Path, a, cfg, ids_of, gated: str, failed: str) -> list[str]:
+    """accept's steps once its workers are stopped, shared by accept and accept --pick: the lead's files noted and
+    the owner's accepted changes recorded for each worker `ids_of(state)` names (None skipped), on the state the
+    stop left, saved before the gate, whose own scope check would otherwise count them; then, with --gate, worker
+    `gated`'s gate (reused while nothing changed). Returns the evidence files for the writer's verify; a failed gate
+    refuses with `failed`."""
+    state = load_run(repo, a.run)
+    note_evidence(repo, state, a)
+    if a.unowned_ok is not None:
+        for wid in filter(None, ids_of(state)):
+            guard_unowned(repo, state, wid, a.unowned_ok)
+    save_run(repo, a.run, state)
+    evidence = list(a.evidence)
+    if a.gate:
+        gate_md = gate_file(repo, a.run, gated)
+        if at := reusable_gate(repo, state, cfg, gated):
+            print(f"GATE {gated} reused the passing gate the gate loop ran at {at}: HEAD and the tree are unchanged "
+                  f"since, so the checks were not run again; evidence {gate_md}")
+        elif cmd_gate(sub_args(a, id=gated, output=None), cfg):
+            raise FleetError(f"{gated}'s gate failed (above), so nothing was verified; its evidence is in {gate_md}. "
+                             f"{failed}")
+        evidence.insert(0, str(gate_md))
+    return evidence
+
+
+def accept_finish(repo: Path, a, cfg) -> None:
+    """After accept verified ticket `a.id`: remove its trees, list what that unblocks, and with --launch-ready
+    start it."""
+    accept_cleanup(repo, a)
+    ready = unblocked_by(load_run(repo, a.run), a.id)
+    print(f"UNBLOCKED {' '.join(ready) or 'none'}")
+    if a.launch_ready:
+        try:
+            launch_ready(sub_args(a, id=None, provider=None, tier=None, model=None, effort=None, family=None,
+                                  pane=None, settle=None, resume=False, ready=True), cfg)
+        except FleetError as e:
+            raise FleetError(f"{a.id} is accepted, but launch --ready refused: {e}") from None
 
 
 def cmd_accept(a, cfg):
@@ -6996,26 +7115,13 @@ def cmd_accept(a, cfg):
     rid = review["id"] if review and not review.get("verified") else None  # a verified one needs nothing more
     refuse_problems(a, accept_problems(repo, state, a, review, rid), "nothing was stopped or verified")
     stop_live(a, cfg, state, [x for x in (rid, a.id) if x], "nothing was verified")
-    # Saved before the gate, whose own scope check would otherwise count the lead's files and the owner's edits.
+    evidence = accept_stopped(repo, a, cfg, lambda _: [rid, a.id], a.id, "Its workers are stopped: repair it within "
+                              "its assignment (examples.md 6), then accept again, after a new review when one is "
+                              "required")
+    # Checked again on the state the stop and the gate left: the bar is computed once here, and verify reuses it.
     state = load_run(repo, a.run)
-    note_evidence(repo, state, a)
-    if a.unowned_ok is not None:
-        for wid in filter(None, (rid, a.id)):
-            guard_unowned(repo, state, wid, a.unowned_ok)
-    save_run(repo, a.run, state)
-    evidence = list(a.evidence)
-    if a.gate:
-        gate_md = gate_file(repo, a.run, a.id)
-        if at := reusable_gate(repo, state, cfg, a.id):
-            print(f"GATE {a.id} reused the passing gate the gate loop ran at {at}: HEAD and the tree are unchanged "
-                  f"since, so the checks were not run again; evidence {gate_md}")
-        elif cmd_gate(sub_args(a, id=a.id, output=None), cfg):
-            raise FleetError(f"{a.id}'s gate failed (above), so nothing was verified; its evidence is in {gate_md}. "
-                             "Its workers are stopped: repair it within its assignment (examples.md 6), then accept "
-                             "again, after a new review when one is required")
-        evidence.insert(0, str(gate_md))
-    state = load_run(repo, a.run)
-    refuse_problems(a, accept_problems(repo, state, a, review, rid), "its workers are stopped; nothing was verified")
+    bar = accept_bar(repo, state, a, a.id)
+    refuse_problems(a, accept_problems(repo, state, a, review, rid, bar), "its workers are stopped; nothing was verified")
     applied = ""
     if worktree_rec(state, a.id):  # its diff reaches the checkout's working tree before anything is verified
         applied = accept_merge(repo, state, a)
@@ -7027,22 +7133,14 @@ def cmd_accept(a, cfg):
         except FleetError as e:
             raise FleetError(f"{rid}: {e}; nothing was verified{applied}") from None
     try:
-        cmd_verify(sub_args(a, id=a.id, evidence=evidence, unowned_ok=None, **quality_args(a, overrode)), cfg)
+        cmd_verify(sub_args(a, id=a.id, evidence=evidence, unowned_ok=None, **quality_args(a, overrode, bar)), cfg)
     except FleetError as e:
         if not rid:
             raise FleetError(f"{a.id}: {e}; nothing was verified{applied}") from None
         raise FleetError(f"{rid} is verified and recorded, but {a.id} is not: {e}. Resolve that, then run fleet "
                          f"accept {a.run} {a.id} again with the same evidence; it skips the verified reviewer, "
                          "unless the writer's files changed, which needs a new review") from None
-    accept_cleanup(repo, a)
-    ready = unblocked_by(load_run(repo, a.run), a.id)
-    print(f"UNBLOCKED {' '.join(ready) or 'none'}")
-    if a.launch_ready:
-        try:
-            launch_ready(sub_args(a, id=None, provider=None, tier=None, model=None, effort=None, family=None,
-                                  pane=None, settle=None, resume=False, ready=True), cfg)
-        except FleetError as e:
-            raise FleetError(f"{a.id} is accepted, but launch --ready refused: {e}") from None
+    accept_finish(repo, a, cfg)
 
 
 # ---------- the quality bar (TW22) ----------
@@ -7086,9 +7184,23 @@ def header_items(repo: Path, state: dict, i: str, wid: str, text: str) -> tuple[
     for p in header_summary(repo, state, wid, text)[1]:
         way = send_back(run, wid)
         if p.endswith(" outside scope"):
-            way = f"fleet grant {run} {i} <file> --reason \"<why>\" if it is the ticket's own work; else {way}"
+            way = outside_scope_way(state, i, wid, way)
         items.append((f"{wid}'s header: {p}", way, False))
     return items, (None if shape else data)
+
+
+def outside_scope_way(state: dict, i: str, wid: str, back: str) -> str:
+    """The way out for a file a worker's header lists outside its ticket's scope. fleet grant widens a ticket, but
+    it refuses a best-of-two ticket whose writers have launched (each has its own baseline), so a best-of-two writer
+    gets the ways that work there: repair it within its files, keep the other writer, or the owner's words."""
+    run, t = state["run"], state["tickets"].get(i) or {}
+    if not best_of_two(t):
+        return f"fleet grant {run} {i} <file> --reason \"<why>\" if it is the ticket's own work; else {back}"
+    other = next((x for x in pick_writers(t) if x != wid), None)
+    keep = f"; or keep the other writer: fleet accept {run} {i} --pick {other}" if other else ""
+    return (f"{back}, with a repair note to keep its change within {', '.join(t['files'])}{keep}; or, only with "
+            "the owner's words, --accept-anyway \"<owner's words>\" (fleet grant refuses a best-of-two ticket once "
+            "its writers have launched)")
 
 
 def writer_items(repo: Path, state: dict, i: str, wid: str, text: str) -> list[tuple]:
@@ -7188,14 +7300,21 @@ def quality_bar(repo: Path, state: dict, i: str, writer: str | None = None, acce
 
 def pick_verdict_items(repo: Path, state: dict, i: str, wid: str) -> list[tuple]:
     """Under strict, keeping best-of-two writer `wid` needs the latest judge to have picked it: a judge that picked
-    the other writer, recommended neither, or gave no readable pick is below the bar. Only the owner's words keep
-    `wid` regardless. With no judge at all, the review rule (pick_review_problem) decides."""
+    the other writer, recommended neither, or gave no readable pick is below the bar, and so is one that has not
+    handed back (Status: needs-verification, or verified): a blocked or half-written report's header is no verdict.
+    Only the owner's words keep `wid` regardless. With no judge at all, the review rule (pick_review_problem)
+    decides."""
     j = latest_judge(state, i)
     if not j:
         return []
     text = report_text(repo, state, j["id"])
-    if text is None:
-        return [(f"{j['id']} has not handed back its verdict", f"wait for {j['id']}, or judge again", False)]
+    status = (parse_status(text) or "").lower() if text is not None else ""
+    if status not in ("needs-verification", "verified"):  # a blocked or mid-write judge's header is no verdict
+        said = (f"its report says Status: {parse_status(text)}" if status else
+                "it has no report yet" if text is None else "its report has no status line")
+        return [(f"{j['id']} has not handed back its verdict ({said})",
+                 f"wait for {j['id']} to hand back with Status: needs-verification, or judge again: fleet judge "
+                 f"{state['run']} {i}", False)]
     data, problems = parse_header(text)
     pick, why, unreadable = pick_verdict(data, problems, pick_writers(state["tickets"][i]))
     run = state["run"]
@@ -7267,10 +7386,12 @@ def quality_lines(items: list) -> list[str]:
 OVERRIDE_HINT = "Only the owner may accept it regardless: --accept-anyway \"<owner's words>\", never without their words"
 
 
-def quality_problems(repo: Path, state: dict, a, i: str, writer: str | None = None) -> list[str]:
+def quality_problems(repo: Path, state: dict, a, i: str, writer: str | None = None,
+                     items: list | None = None) -> list[str]:
     """accept's part of its one refusal, before anything is stopped: the flags' problems, and the items below the bar
-    unless the owner's words override them. A hard item is left to accept_problems, which names it in every run."""
-    items = quality_bar(repo, state, i, writer, accepted_findings(a))
+    unless the owner's words override them. A hard item is left to accept_problems, which names it in every run.
+    `items`: the bar, when the caller computed it already (accept_bar)."""
+    items = accept_bar(repo, state, a, i, writer) if items is None else items
     out = quality_flag_problems(repo, state, a, i, items, foreseen=not accept_checks_for(state, i))
     soft = [x for x in items if not x[2]]
     if soft and not (getattr(a, "accept_anyway", None) or "").strip():
@@ -7279,18 +7400,30 @@ def quality_problems(repo: Path, state: dict, a, i: str, writer: str | None = No
     return out
 
 
-def quality_args(a, overrode=()) -> dict:
-    """The quality bar's flags for the verify that accept runs, with what accept's own steps overrode."""
+def accept_bar(repo: Path, state: dict, a, i: str, writer: str | None = None) -> list[tuple]:
+    """The bar for an accept of ticket `i` (writer `writer`), with the findings whose rebuttal the lead accepts."""
+    return quality_bar(repo, state, i, writer, accepted_findings(a))
+
+
+def quality_args(a, overrode=(), bar: list | None = None) -> dict:
+    """The quality bar's flags for the verify that accept runs, with what accept's own steps overrode. `bar`: the
+    items accept computed on the state its workers stopped in, after any gate. Nothing the bar reads can change
+    after that (the workers are stopped, a merge applies the very diff the bar read in the writer's tree, and accept
+    refuses when its accept_checks change a ticket's files), so verify takes them instead of computing them again."""
     return {"accept_anyway": getattr(a, "accept_anyway", None), "accept_finding": getattr(a, "accept_finding", None),
-            "overrode": list(overrode), "from_accept": True}
+            "overrode": list(overrode), "from_accept": True, "bar": bar}
 
 
-def quality_check(repo: Path, state: dict, a, i: str, writer: str | None = None) -> str:
+def quality_check(repo: Path, state: dict, a, i: str, writer: str | None = None) -> dict:
     """verify's quality bar for ticket `i`: refuses below it, with nothing changed, unless the owner's words override
-    every item. Returns what goes into the evidence (accepted findings, the owner's override), which the run's
-    decisions get too; the caller saves state."""
+    every item. On a pass it changes and prints nothing: it returns what passing records, {"text": what goes into
+    the evidence (accepted findings, the owner's override), "decisions": what the run's decisions get, "notes": what
+    to print}. The caller calls quality_commit once nothing else can refuse, and quality_say once it has saved, so a
+    later refusal never leaves a decision behind or a claim that something was recorded."""
     accepted = accepted_findings(a)
-    items = quality_bar(repo, state, i, writer, accepted)
+    items = getattr(a, "bar", None)
+    if items is None:
+        items = quality_bar(repo, state, i, writer, accepted)
     overrode = [what for what, _, _ in items] + list(getattr(a, "overrode", None) or [])
     problems = quality_flag_problems(repo, state, a, i, overrode, foreseen=not getattr(a, "from_accept", False))
     if problems:
@@ -7301,22 +7434,33 @@ def quality_check(repo: Path, state: dict, a, i: str, writer: str | None = None)
         lines = quality_lines(hard or items)
         raise FleetError(f"{i} is below the strict acceptance bar (acceptance strict), so it is not verified; nothing "
                          "was changed:\n" + "\n".join(f"- {x}" for x in lines) + ("" if hard else f"\n{OVERRIDE_HINT}"))
-    now, who, text = time.strftime("%Y-%m-%dT%H:%M:%S"), writer or i, ""
+    now, who = time.strftime("%Y-%m-%dT%H:%M:%S"), writer or i
+    q = {"text": "", "decisions": [], "notes": []}
     if accepted:
-        for fid, why in accepted.items():
-            state["decisions"].append(f"Accepted {who}'s rebuttal of {fid} on {i}: {why} ({now})")
-        text += ("\n\n## Accepted findings\n\nThe lead accepted the writer's rebuttal of each finding below, which the "
-                 "latest review still lists:\n" + "\n".join(f"- {fid}: {why}" for fid, why in accepted.items()))
+        q["decisions"] += [f"Accepted {who}'s rebuttal of {fid} on {i}: {why} ({now})" for fid, why in accepted.items()]
+        q["text"] += ("\n\n## Accepted findings\n\nThe lead accepted the writer's rebuttal of each finding below, which "
+                      "the latest review still lists:\n" + "\n".join(f"- {fid}: {why}" for fid, why in accepted.items()))
     if words and overrode:
-        state["decisions"].append(f"Accepted {i} regardless of the quality bar, by the owner: {words}. It overrode: "
-                                  f"{'; '.join(overrode)} ({now})")
-        text += (f"\n\n## Accepted anyway\n\nThe owner's words: {words}\n\nThey overrode:\n"
-                 + "\n".join(f"- {x}" for x in overrode))
-        print(f"{i}: accepted regardless of the quality bar, by the owner's words; {len(overrode)} item(s) "
-              "overridden, recorded in decisions and the evidence", file=sys.stderr)
+        q["decisions"].append(f"Accepted {i} regardless of the quality bar, by the owner: {words}. It overrode: "
+                              f"{'; '.join(overrode)} ({now})")
+        q["text"] += (f"\n\n## Accepted anyway\n\nThe owner's words: {words}\n\nThey overrode:\n"
+                      + "\n".join(f"- {x}" for x in overrode))
+        q["notes"].append(f"{i}: accepted regardless of the quality bar, by the owner's words; {len(overrode)} item(s) "
+                          "overridden, recorded in decisions and the evidence")
     elif words:
-        print(f"NOTE {i} met the bar, so --accept-anyway overrode nothing and nothing was recorded", file=sys.stderr)
-    return text
+        q["notes"].append(f"NOTE {i} met the bar, so --accept-anyway overrode nothing and nothing was recorded")
+    return q
+
+
+def quality_commit(state: dict, q: dict) -> None:
+    """Record a passed bar's decisions in run state (the caller saves), once nothing else can refuse the verify."""
+    state["decisions"] += q["decisions"]
+
+
+def quality_say(q: dict) -> None:
+    """Print a passed bar's notes, once the verify that recorded them is saved."""
+    for line in q["notes"]:
+        print(line, file=sys.stderr)
 
 
 def quality_note(repo: Path, state: dict, i: str) -> str:
@@ -7349,21 +7493,18 @@ def accept_checks_for(state: dict, i: str) -> list[dict] | None:
 
 
 def accept_checks_evidence(run: str, i: str, results: list[dict], summary: str, wrote: list[str],
-                           live: list[str]) -> str:
-    lines = [f"# Combined checks: {i}", "",
-             f"Run `{run}`, ticket `{i}`, {time.strftime('%Y-%m-%dT%H:%M:%S')}. Fleet ran each of the run's "
-             "accept_checks in the owner's checkout, after any merge and before anything was verified, with /bin/sh "
-             "from its directory, without the lead's session variables or stdin.", "", "## Commands", ""]
-    for n, r in enumerate(results, 1):
-        lines.append(f"{n}. {code_span(r['run'])}: {'FAILED' if check_failed(r) else 'passed'}, {check_outcome(r)}, "
-                     f"{r['seconds']:.1f}s, cwd `{r['cwd']}`")
-    for n, r in enumerate(results, 1):
-        if check_failed(r):
-            tail = "\n".join(r["output"].rstrip().splitlines()[-GATE_TAIL_LINES:])
-            lines += ["", f"### Output of {n}: {code_span(r['run'])} (last {GATE_TAIL_LINES} lines at most)", "",
-                      fenced(tail) if tail.strip() else "No output."]
+                           live: list[str], counted: list[str] = (), touched: list[str] = ()) -> str:
+    lines = commands_evidence(f"# Combined checks: {i}", run, i, "each of the run's accept_checks in the owner's "
+                              "checkout, after any merge and before anything was verified,", results)
     if wrote:
         lines += ["", "The checks wrote " + ", ".join(code_span(p) for p in wrote) + " outside every ticket's files."]
+        if counted:
+            lines += ["", ", ".join(code_span(p) for p in counted) + " had changed before the checks ran, so the "
+                      "scope check still counts them."]
+    if touched:
+        lines += ["", "The checks changed " + ", ".join(code_span(p) for p in touched) + ", which tickets own: a check "
+                  "must not modify the code it checks, so Fleet verified nothing on this run. The worker is not "
+                  "blamed for it."]
     if live:
         lines += ["", f"Workers still ran in this checkout ({', '.join(live)}): a half-done edit of theirs counts too."]
     lines += ["", "## Result", "", summary]
@@ -7381,6 +7522,14 @@ def reusable_accept_checks(repo: Path, state: dict, record: Path, checks: list[d
         return None
     now = tree_state(repo, run_ignore(state))
     return r if (now["head"], now["paths"]) == (r.get("head"), r.get("paths")) else None
+
+
+def checks_touched(repo: Path, state: dict, before: dict, after: dict) -> list[str]:
+    """Files tickets own that changed while accept_checks ran: a formatter's rewrite, generated code. A ticket with
+    a worker still live in this checkout is left out, since that worker may have made the change."""
+    live = {ticket_of(w) for w in active(state) if work_tree(repo, state, w["id"]) == repo}
+    owned = {f for i, t in state["tickets"].items() if i not in live for f in t["files"]}
+    return sorted(p for p in tree_changes(repo, before, after) if p in owned)
 
 
 def combined_checks(repo: Path, state: dict, a, done: str = "") -> tuple[list[str], list[str]]:
@@ -7408,11 +7557,25 @@ def combined_checks(repo: Path, state: dict, a, done: str = "") -> tuple[list[st
     before = tree_scan(repo, state)
     results = [run_check(repo, c) for c in checks]
     after = tree_scan(repo, state)
-    wrote = record_check_outputs(repo, state, f"{i}.accept-checks", before, after)
+    # What the checks wrote outside every ticket is theirs, as the gate's outputs are: recorded even while other
+    # workers run, so the verify after them never refuses it, unless the file had changed before they ran.
+    counted: list[str] = []  # what they wrote that had changed before they ran: the scope check still counts it
+    wrote = record_check_outputs(repo, state, f"{i}.accept-checks", before, after, live_ok=True, unrecorded=counted)
+    touched = checks_touched(repo, state, before, after)
     failed = [r for r in results if check_failed(r)]
     live = [w["id"] for w in active(state)]
     summary = f"{len(results) - len(failed)}/{len(results)} passed"
-    md.write_text(accept_checks_evidence(run, i, results, summary, wrote, live))
+    md.write_text(accept_checks_evidence(run, i, results, summary, wrote, live, counted, touched))
+    if touched:  # never verified on: the code the review and the bar read is no longer what is in the checkout
+        record.unlink(missing_ok=True)
+        print(f"ACCEPT-CHECKS {i} {summary} in the checkout, and the checks changed {', '.join(touched)}; "
+              f"evidence {md}")
+        raise FleetError(f"{i} not accepted: accept_checks changed {', '.join(touched)}; a check must not modify the "
+                         f"code it checks, so nothing was verified{done}. This is the checks' doing, not the worker's; "
+                         f"their evidence is in {md}. Put those files back as they were before the checks ran, make "
+                         "the checks leave them alone (a formatter in its check mode, generated code outside every "
+                         f"ticket's files), then run fleet accept {run} {i} again. The owner's words cannot override "
+                         "this")
     if not failed:
         atomic_json(record, {"passed": True, "commands": checks, "head": after["head"], "paths": after["paths"],
                              "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "ticket": i, "evidence": md.read_text()})
@@ -8172,7 +8335,7 @@ def fanout_held(state: dict, reports: Path, wid: str, status: str) -> bool:
                 and fanout_back(state, reports, i) is None)
 
 
-def fanout_pass(repo: Path, state: dict, seen: Path, fresh: list, deferred=()) -> tuple[list, list[str]]:
+def fanout_pass(repo: Path, state: dict, seen: Path, fresh: list, gated: bool = False) -> tuple[list, list[str]]:
     """wait's fan-out step, lockless and read-only like the rest of wait (only .seen markers are written). An
     investigator's hand-back wakes nobody on its own; once every investigator of a ticket has handed back, one
     FANOUT line does, and again only after one of them hands back anew. A judge's hand-back keeps its REPORT line
@@ -8190,7 +8353,7 @@ def fanout_pass(repo: Path, state: dict, seen: Path, fresh: list, deferred=()) -
     for i, t in state["tickets"].items():
         if not t.get("fanout") or t["status"] != "pending" or not (files := fanout_back(state, reports, i)):
             continue
-        if best_of_two(t) and any(e["worker"] in deferred for e in t["fanout"]):
+        if gated and best_of_two(t) and any(gate_pending(repo, state, seen, e["worker"]) for e in t["fanout"]):
             continue  # a writer's gate is still to run or to send back: the wake comes after both gates
         key = digest("|".join(report_key(f, f.read_text()) for f in files).encode())[:32]
         if mark_once(seen, f"{i}.fanout", key):
@@ -8575,19 +8738,18 @@ def verify_fanout(repo: Path, state: dict, a) -> None:
         note_lead_file(repo, state, f)
     for wid in ids:  # investigators and judges own no files: any change while they ran counts
         guard_unowned(repo, state, wid, a.unowned_ok)
-    evidence += quality_check(repo, state, a, i)  # the strict bar: a readable header from each worker
+    q = quality_check(repo, state, a, i)  # the strict bar: a readable header from each worker
+    evidence += q["text"]
     now = time.strftime("%Y-%m-%dT%H:%M:%S")
-    reports = run_dir(repo, a.run) / "reports"
     for wid in ids:
-        w = state["workers"][wid]
-        w["verified"], w["verified_at"], w["verification_evidence"] = True, now, evidence
-        warn_header(repo, state, wid, (reports / f"{wid}.md").read_text())
-        set_report_status(reports / f"{wid}.md", "verified", "\n## Lead verification\n" + evidence + "\n")
+        mark_verified(repo, state, wid, evidence, now)
     t = state["tickets"][i]
     t["status"], t["closed_at"] = "verified", time.time()
     for note in notes:
         state["decisions"].append(f"Verified {i} without a verdict: {note} ({now})")
+    quality_commit(state, q)
     save_run(repo, a.run, state)
+    quality_say(q)
     for note in notes:
         print(f"NOTE {note}")
     inline = Path(t["ticket"]).parent == (run_dir(repo, a.run) / "tasks").resolve()
@@ -8618,14 +8780,7 @@ def accept_fanout(repo: Path, state: dict, a, cfg) -> None:
     stop_live(a, cfg, state, fanout_members(state, a.id), "nothing was verified")
     state = load_run(repo, a.run)
     verify_fanout(repo, state, sub_args(a, id=a.id, evidence=a.evidence, unowned_ok=a.unowned_ok, **quality_args(a)))
-    ready = unblocked_by(load_run(repo, a.run), a.id)
-    print(f"UNBLOCKED {' '.join(ready) or 'none'}")
-    if a.launch_ready:
-        try:
-            launch_ready(sub_args(a, id=None, provider=None, tier=None, model=None, effort=None, family=None,
-                                  pane=None, settle=None, resume=False, ready=True), cfg)
-        except FleetError as e:
-            raise FleetError(f"{a.id} is accepted, but launch --ready refused: {e}") from None
+    accept_finish(repo, a, cfg)
 
 
 def fanout_cost_lines(state: dict, i: str) -> list[str]:
@@ -8679,10 +8834,34 @@ def pick_refusal(state: dict, i: str, verb: str) -> FleetError:
                       "its judge, and saves the other's change as a patch. Nothing was verified")
 
 
-def gates_deferred(loop) -> set[str]:
-    """The workers whose hand-back the gate loop has yet to gate or send back, because the lock was busy."""
-    gates = loop if isinstance(loop, GateLoop) else getattr(loop, "gates", None)
-    return set(gates.deferred) if gates else set()
+def gating(loop) -> bool:
+    """True when this wait gates hand-backs: wait --gate, or supervise with its gate step."""
+    return isinstance(loop, GateLoop) or getattr(loop, "gates", None) is not None
+
+
+def gate_pending(repo: Path, state: dict, seen: Path, wid: str) -> bool:
+    """While the gate loop runs: True when best-of-two writer `wid`'s current hand-back is still the loop's to gate
+    or to send back. Read from what is on disk, never from one wait's memory: the hand-back is the loop's while it
+    could gate it (gate_eligible: a live writer, planned commands) and the loop has not finished with it, that is
+    its .seen marker is not this report's key (a scan marks a hand-back as it returns it, and the loop takes the
+    marker away when a send back finds the lock busy, so the next poll retries it). Every other outcome (a gate that
+    passed, a scope problem, rounds used up, a send that failed, a stopped writer) leaves the marker on the report,
+    and a gate record that passed on this very hand-back settles it too."""
+    f = run_dir(repo, state["run"]) / "reports" / f"{wid}.md"
+    try:
+        text = f.read_text()
+    except OSError:
+        return False
+    if not gate_eligible(repo, state, wid, parse_status(text) or ""):
+        return False
+    key, marker = report_key(f, text), seen / wid
+    try:
+        r = json.loads(gate_file(repo, state["run"], wid, ".gate.json").read_text())
+    except (OSError, ValueError):
+        r = {}
+    if r.get("report") == key and r.get("passed"):
+        return False
+    return not (marker.exists() and marker.read_text() == key)
 
 
 def writer_gate(repo: Path, state: dict, wid: str) -> tuple[str, Path | None]:
@@ -8702,12 +8881,29 @@ def writer_gate(repo: Path, state: dict, wid: str) -> tuple[str, Path | None]:
     return f"gate not run on this hand-back (fleet gate {run} {wid})", None
 
 
+HUNK_RE = re.compile(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+
+
 def diff_size(diff: str) -> str:
-    """A scoped diff's size in a few words: files, added and removed lines."""
-    lines = diff.splitlines()
-    files = sum(x.startswith("diff --fleet ") for x in lines)
-    plus = sum(x.startswith("+") and not x.startswith("+++") for x in lines)
-    minus = sum(x.startswith("-") and not x.startswith("---") for x in lines)
+    """A scoped diff's size in a few words: files, added and removed lines. Lines are counted inside each hunk, by
+    the lengths its `@@` header gives, so a content line that starts with `++` or `--` counts like any other, and
+    only the per-file header lines (`diff --fleet`, before/after, `--- a/…`, `+++ b/…`) are skipped."""
+    files = plus = minus = 0
+    old = new = 0  # what the current hunk has left to read, on each side
+    for x in diff.splitlines():
+        if x.startswith("diff --fleet "):  # never a hunk line, which starts with " ", "+", "-" or "\"
+            files, old, new = files + 1, 0, 0
+            continue
+        if old > 0 or new > 0:
+            if x.startswith("+"):
+                plus, new = plus + 1, new - 1
+            elif x.startswith("-"):
+                minus, old = minus + 1, old - 1
+            elif not x.startswith("\\"):  # context; "\ No newline at end of file" counts on neither side
+                old, new = old - 1, new - 1
+            continue
+        if m := HUNK_RE.match(x):
+            old, new = int(m.group(1) or 1), int(m.group(2) or 1)
     return f"{files} file{'' if files == 1 else 's'}, +{plus} -{minus} lines"
 
 
@@ -8856,17 +9052,17 @@ def pick_review_problem(repo: Path, state: dict, i: str, wid: str) -> str | None
     return None
 
 
-def pick_problems(repo: Path, state: dict, a, wid: str) -> list[str]:
-    """What accept --pick would refuse, named in one refusal before anything is stopped, merged or verified."""
+def pick_problems(repo: Path, state: dict, a, wid: str, bar: list | None = None) -> list[str]:
+    """What accept --pick would refuse, named in one refusal before anything is stopped, merged or verified. It is
+    accept_problems with the kept writer `wid` in the writer's place and the judge in the reviewer's, and shares its
+    steps (handback_problems, accept_flag_problems, accept_unowned_problems, quality_problems); what is its own is
+    the judge's rule as the required review and a merge of the other writer already in the checkout."""
     i, t, run = a.id, state["tickets"][a.id], a.run
     note_evidence(repo, state, a)  # in memory, as accept_problems does
     out = [] if t["status"] == "pending" else [f"{i} is {t['status']}"]
-    reports = run_dir(repo, run) / "reports"
-    if wid not in state["workers"]:
-        out.append(f"{wid} has not launched: fleet launch {run} {i} starts it")
-    elif (status := report_status(reports / f"{wid}.md")) != "needs-verification":
-        out.append(f"{wid}'s report says {'Status: ' + status if status else 'nothing yet'}; it must say "
-                   "Status: needs-verification")
+    launched = wid in state["workers"]
+    out += handback_problems(repo, state, [wid]) if launched else [f"{wid} has not launched: fleet launch {run} {i} "
+                                                                    "starts it"]
     if t["review_required"] and (why := pick_review_problem(repo, state, i, wid)):
         out.append(why)
     merged = t.get("merged") or {}
@@ -8875,34 +9071,18 @@ def pick_problems(repo: Path, state: dict, a, wid: str) -> list[str]:
                    f"({', '.join(sorted(merged['files'])) or 'no files'}); pick it, or have the owner put those "
                    "files back first")
     jid = judge_to_verify(repo, state, i)
-    if a.review_evidence and not jid:
-        out.append(f"--review-evidence: no judge of {i} awaits verification; drop it")
-    for flag, files in (("--evidence", a.evidence), ("--review-evidence", a.review_evidence if jid else None)):
-        try:
-            read_evidence_files(files or [])
-        except (FleetError, OSError) as e:
-            out.append(f"{flag}: {e}")
-    if a.gate and not t.get("commands"):
-        out.append(f"{i} has no runnable checks to gate; drop --gate and record your checks in --evidence")
-    if a.unowned_ok is not None and not a.unowned_ok.strip():
-        out.append("--unowned-ok needs the owner's reason")
-    if a.unowned_ok is None and wid in state["workers"]:
-        unowned, now = {}, tree_state(repo, run_ignore(state))
-        for x in filter(None, (jid, wid)):
-            for path, kind, fp in unowned_for(repo, state, x, now) or []:
-                unowned.setdefault(path, (path, kind, fp))
-        if unowned:
-            out.append("files outside every ticket's scope changed since launch:\n"
-                       f"{unowned_text(list(unowned.values()))}\n  {UNOWNED_WAYS_OUT}")
-    if wid in state["workers"]:
-        out += quality_problems(repo, state, a, i, writer=wid)  # the strict bar, in the same refusal
+    out += accept_flag_problems(a, t, jid, "judge")
+    if launched:
+        out += accept_unowned_problems(repo, state, a, [jid, wid])
+        out += quality_problems(repo, state, a, i, writer=wid, items=bar)  # the strict bar, in the same refusal
     return out
 
 
 def accept_pick(repo: Path, state: dict, a, cfg) -> None:
     """fleet accept --pick for a best-of-two ticket: stop both writers and the judge, gate the kept writer when
     asked, merge only its tree, then verify it and the judge, save the other's change as a patch, remove both trees
-    and record the decision. Every problem that can be seen in advance is refused before anything is stopped."""
+    and record the decision. Every problem that can be seen in advance is refused before anything is stopped. Its
+    steps are cmd_accept's, with the kept writer and the judge in the writer's and the reviewer's places."""
     i, t = a.id, state["tickets"][a.id]
     writers = pick_writers(t)
     if not a.pick:
@@ -8913,24 +9093,12 @@ def accept_pick(repo: Path, state: dict, a, cfg) -> None:
     wid = a.pick
     refuse_problems(a, pick_problems(repo, state, a, wid), "nothing was stopped or verified")
     stop_live(a, cfg, state, fanout_members(state, i), "nothing was verified")
+    evidence = accept_stopped(repo, a, cfg, lambda s: [judge_to_verify(repo, s, i), wid], wid,
+                              "Its workers are stopped: keep the other writer, or repair this one and accept again")
+    # Checked again on the state the stop and the gate left: the bar is computed once here, and verify reuses it.
     state = load_run(repo, a.run)
-    note_evidence(repo, state, a)
-    if a.unowned_ok is not None:
-        for x in filter(None, (judge_to_verify(repo, state, i), wid)):
-            guard_unowned(repo, state, x, a.unowned_ok)
-    save_run(repo, a.run, state)
-    evidence = list(a.evidence)
-    if a.gate:
-        gate_md = gate_file(repo, a.run, wid)
-        if at := reusable_gate(repo, state, cfg, wid):
-            print(f"GATE {wid} reused the passing gate the gate loop ran at {at}: HEAD and the tree are unchanged "
-                  f"since, so the checks were not run again; evidence {gate_md}")
-        elif cmd_gate(sub_args(a, id=wid, output=None), cfg):
-            raise FleetError(f"{wid}'s gate failed (above), so nothing was verified; its evidence is in {gate_md}. "
-                             f"Its workers are stopped: keep the other writer, or repair this one and accept again")
-        evidence.insert(0, str(gate_md))
-    state = load_run(repo, a.run)
-    refuse_problems(a, pick_problems(repo, state, a, wid), "its workers are stopped; nothing was verified")
+    bar = accept_bar(repo, state, a, i, wid)
+    refuse_problems(a, pick_problems(repo, state, a, wid, bar), "its workers are stopped; nothing was verified")
     try:
         print(merge_ticket(repo, state, i, wid=wid))
     except FleetError as e:
@@ -8941,25 +9109,18 @@ def accept_pick(repo: Path, state: dict, a, cfg) -> None:
     checked, overrode = combined_checks(repo, load_run(repo, a.run), a, applied)  # accept_checks, merged checkout
     evidence += checked
     try:
-        verify_pick(repo, argparse.Namespace(**{**vars(a), **quality_args(a, overrode)}), wid, evidence)
+        verify_pick(repo, argparse.Namespace(**{**vars(a), **quality_args(a, overrode, bar)}), wid, evidence)
     except (FleetError, OSError, subprocess.TimeoutExpired) as e:
-        raise FleetError(f"{i}: {str(e).strip()}; nothing was verified; {wid}'s diff is already in the checkout's "
-                         "working tree (MERGED above), and the next accept does not apply it again") from None
-    accept_cleanup(repo, a)
-    ready = unblocked_by(load_run(repo, a.run), i)
-    print(f"UNBLOCKED {' '.join(ready) or 'none'}")
-    if a.launch_ready:
-        try:
-            launch_ready(sub_args(a, id=None, provider=None, tier=None, model=None, effort=None, family=None,
-                                  pane=None, settle=None, resume=False, ready=True), cfg)
-        except FleetError as e:
-            raise FleetError(f"{i} is accepted, but launch --ready refused: {e}") from None
+        raise FleetError(f"{i}: {str(e).strip()}; nothing was verified{applied}") from None
+    accept_finish(repo, a, cfg)
 
 
 def verify_pick(repo: Path, a, wid: str, evidence: list[str]) -> None:
     """accept --pick's verify step, once the kept writer's diff is in the checkout: the scope check for it and the
     judge, the other writer's change saved as a patch, then both verified, the other's report set aside, and the
-    ticket verified with its decision recorded. Nothing changes in run state on a refusal."""
+    ticket verified with its decision recorded. Every step that can refuse runs first: nothing changes in run state
+    on a refusal, and the quality bar's decisions are recorded, and its notes printed, only once the verify is
+    saved."""
     state = load_run(repo, a.run)
     i, t = a.id, state["tickets"][a.id]
     reports = run_dir(repo, a.run) / "reports"
@@ -8967,8 +9128,11 @@ def verify_pick(repo: Path, a, wid: str, evidence: list[str]) -> None:
     jid = judge_to_verify(repo, state, i)
     if not merge_done(repo, state, i, wid=wid):
         raise FleetError(f"{wid}'s diff is not in the checkout; fleet merge {a.run} {i} --pick {wid}")
+    if problems := handback_problems(repo, state, [wid]):  # verify's own rule, as for any writer
+        raise FleetError(problems[0])
     text = read_evidence_files(evidence)
-    text += quality_check(repo, state, a, i, writer=wid)  # refuses below the bar; records the owner's override
+    q = quality_check(repo, state, a, i, writer=wid)  # refuses below the bar; recorded once nothing else can refuse
+    text += q["text"]
     review_text = read_evidence_files(a.review_evidence or evidence)
     for f in evidence + (a.review_evidence or []):
         note_lead_file(repo, state, f)
@@ -8983,10 +9147,7 @@ def verify_pick(repo: Path, a, wid: str, evidence: list[str]) -> None:
     now = time.strftime("%Y-%m-%dT%H:%M:%S")
     for x, ev in ((jid, review_text), (wid, text)):
         if x:
-            w = state["workers"][x]
-            w["verified"], w["verified_at"], w["verification_evidence"] = True, now, ev
-            warn_header(repo, state, x, (reports / f"{x}.md").read_text())
-            set_report_status(reports / f"{x}.md", "verified", "\n## Lead verification\n" + ev + "\n")
+            mark_verified(repo, state, x, ev, now)
     set_report_status(reports / f"{other}.md", PICK_STATUS, f"\n## Lead decision\nThe lead kept {wid}'s diff; this "
                       f"writer's change is {'saved in ' + patch if patch else 'not in the checkout'}.\n")
     verdict, why = None, ""
@@ -9001,7 +9162,9 @@ def verify_pick(repo: Path, a, wid: str, evidence: list[str]) -> None:
               if jid else "no judge")
     state["decisions"].append(f"Picked {wid} for best-of-two {i} over {other} ({judged}); {other}'s change "
                               f"{'is saved in ' + patch if patch else 'had no worktree to save'} ({now})")
+    quality_commit(state, q)
     save_run(repo, a.run, state)
+    quality_say(q)
     if jid and verdict != wid:
         print(f"NOTE {wid} is kept against {jid}'s verdict ({judged}); the decision is recorded")
     inline = Path(t["ticket"]).parent == (run_dir(repo, a.run) / "tasks").resolve()
@@ -9459,6 +9622,9 @@ def merge_ticket(repo: Path, state: dict, i: str, resolved: str | None = None, w
         expect = dict(head_fingerprints(repo, since, touched), **{f: fp for f, fp in prior["files"].items()
                                                                   if f in touched})
         moved = "changed in the checkout since Fleet last merged this ticket"
+        if not touched:  # nothing new in its tree, yet not merge_done: the checkout's copy moved (the owner, a check)
+            if why := {f: moved for f in names if now.get(f) != prior["files"].get(f)}:
+                raise merge_conflict(repo, state, i, rec, why, since, wid)
     else:
         since, touched, patch = rec["base_tree"], names, view["patch"]
         expect = head_fingerprints(repo, since, names)
@@ -9774,8 +9940,12 @@ def profile_report(cfg: dict, name: str, p: dict, found: str) -> tuple[list[str]
     if missing is None:
         lines.append(f"{pad}flags unverified: {where}")
     elif missing:
-        lines += [f"{pad}WARNING: signals {signal_method(p)} passes {flag}, which {where} does not list; wait may "
-                  f"fall back to the screen hash on this CLI version" if flag == signal_flag else
+        own = launch_flags(p)  # the launch line's own flags, without what the signals slot adds
+        lines += [f"{pad}WARNING: signals {signal_method(p)} passes {flag}, which {where} does not list; "
+                  + (f"{name}'s launch line passes {flag} for its own settings too, so the launch itself may fail on "
+                     "this CLI version, not only its signals" if flag in own else
+                     "a CLI that no longer takes it may refuse the launch itself, not only its signals")
+                  + f": check {name}'s launch line against this CLI version" if flag == signal_flag else
                   f"{pad}WARNING: {flag} is not in {where}; check {name}'s launch line against this CLI version"
                   for flag in missing]
     else:
