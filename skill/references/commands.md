@@ -231,7 +231,7 @@ fleet launch <run> <id> <provider> --tier heavy|standard|light|review
 fleet launch <run> --ready [--pane <ref|uuid|index>]
 ```
 
-Starts the worker in its own cmux pane, or its own window of the run's tmux session, with the prompt. The provider, tier and pins must match the saved plan; a steer (see `steer`) may change the provider and model, and launch prints `steered (<tier>): …`. Launch enforces blockers, file ownership, capacity, any hold, the run's [caps](#caps) and the ticket's [review rounds](#review-rounds). An implementation ticket runs the adapter's `worker` profile; a reviewer or an investigate ticket runs its `review` profile. Launch refuses a profile above `permission_ceiling`, naming the adapter, the profile and the ceiling: raising the ceiling is the owner's call ([permission profiles](providers.md#permission-profiles)). Each launch, `--resume` included, adds an entry to the run's [ledger](#cost). If a blocker was verified after the ticket's prompt was written, launch still starts the worker but warns on stderr that the prompt does not hand down that blocker's work; regenerate it with `fleet prompt <run> <id> --force` before the next launch. `--ready` writes a missing prompt itself, so that one is current; it does not rewrite one you wrote earlier.
+Starts the worker in its own cmux pane, or its own window of the run's tmux session, with the prompt. The provider, tier and pins must match the saved plan; a steer (see `steer`) may change the provider and model, and launch prints `steered (<tier>): …`. Launch enforces blockers, file ownership, capacity, any hold, the run's [caps](#caps) and the ticket's [review rounds](#review-rounds). An implementation ticket runs the adapter's `worker` profile; a reviewer or an investigate ticket runs its `review` profile. Launch refuses a profile above `permission_ceiling`, naming the adapter, the profile and the ceiling: raising the ceiling is the owner's call ([permission profiles](providers.md#permission-profiles)). An adapter with `hooks` (Claude) also gets its own settings file, `.fleet/runs/<run>/settings/<id>.json`, passed with `--settings`: a guard that keeps its edits to the ticket's files and its report, and the events `wait` reads ([hooks](#claude-hooks)). With the guard, a Claude reviewer or investigator runs `acceptEdits` instead of manual mode, and with the owner's `scope_permissions` a Claude worker does too, with its planned check commands allowed. Each launch, `--resume` included, adds an entry to the run's [ledger](#cost). If a blocker was verified after the ticket's prompt was written, launch still starts the worker but warns on stderr that the prompt does not hand down that blocker's work; regenerate it with `fleet prompt <run> <id> --force` before the next launch. `--ready` writes a missing prompt itself, so that one is current; it does not rewrite one you wrote earlier.
 
 Under tmux each worker gets a new window, with no limit; the window stays after the worker exits, so its screen and scrollback stay readable until `stop --close`. Fleet strips the lead's session variables (such as `CLAUDECODE`) from the worker's environment.
 
@@ -305,7 +305,9 @@ Blocks until something needs the lead, then prints it and exits 0. On timeout it
 | `REPORT <id> [needs-verification]` | The worker handed back | Read the report's summary lines, review and verify |
 | `REPORT <id> [blocked]` | The worker needs a decision | `send` the answer |
 | `EXITED <id>` | The process ended before handing back | `status`, read the report, repair or relaunch |
-| `STALLED <id>` | The screen hasn't changed for `--stall` seconds (default 180; 0 turns it off). A worker launched in the last 4 minutes wakes after 60, which catches a prompt at start-up | `peek` |
+| `PERMISSION <id>: <message>` | A Claude worker is at a permission prompt ([hooks](#claude-hooks)); the line ends `the owner answers it in the worker's pane (fleet agents); the lead never does` | Tell the owner; never answer it, with `send` or otherwise |
+| `IDLE <id>` | A Claude worker is idle without handing back; the line quotes its last words | `peek`; answer a question meant for you with `send` |
+| `STALLED <id>` | The screen hasn't changed for `--stall` seconds (default 180; 0 turns it off). A worker launched in the last 4 minutes wakes after 60, which catches a prompt at start-up. The line names a likely approval prompt, which the owner answers in the pane | `peek` |
 | `UNREACHABLE <id>` | cmux can't read the pane | Investigate; a missing pane isn't proof of exit |
 | `HOLD` | Launches are held and no worker is running | Handle `PENDING` lines, tell the owner, end your turn |
 | `TIMEOUT` | Nothing new | Handle `PENDING` lines, otherwise wait again |
@@ -326,6 +328,16 @@ REPORT api [needs-verification] criteria 5/5, checks 2/2 exit 0, findings 0, que
 `--timeout` is at most 600; use the longest your host allows (540 in Claude Code), or run it in the background. `--interval` (default 10) sets how often it polls. `--any-change` wakes on any report change. `--settle` (default 5, at most 30) keeps gathering events for that long after the first, never past `--timeout`, so workers finishing together cost one wake; 0 returns at once.
 
 **Use:** whenever workers are running and you have nothing else to do. Run one wait at a time: a wait consumes the events it prints. End a background wait before `handoff`.
+
+#### Claude hooks
+
+A Claude worker launches with Fleet's hooks ([provider notes](providers.md#claude-hooks)): a guard that refuses edits outside its ticket's files and its report, and hooks that append events to `.fleet/runs/<run>/events/<id>.jsonl`. `wait` reads that file without the lock and wakes once per event:
+
+- **`PERMISSION <id>: <message>`** when Claude shows a permission prompt. The owner answers it in the worker's pane (`fleet agents`); the lead never does, and `wait` sends no keystrokes.
+- **`IDLE <id>`** when Claude reports the worker idle (about a minute after its turn ended) and it has not handed back. The line quotes the turn's last words: `peek` it, and answer a question meant for the lead with `send`.
+- A turn that ends is recorded as `turn-ended` but never wakes the lead by itself: a hand-back already does.
+
+A screen already reported as `PERMISSION` or `IDLE` does not also wake as `STALLED`. Other adapters, and workers from runs launched before hooks, keep the screen check.
 
 #### The gate loop
 
