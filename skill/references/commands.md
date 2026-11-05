@@ -196,7 +196,7 @@ fleet prompt <run> <review-id> --review-of <id> --diff <diff-file> [--force]
 
 Writes `.fleet/runs/<run>/prompts/<id>.md` from the saved ticket, the worker rules, `.fleet/rules.md`, and the ticket's `context` and `checks`. If either is missing from the plan, the prompt keeps a `<!-- LEAD: … -->` comment for you to fill; `launch` refuses until you do. With `--review-of`, it writes a reviewer prompt instead; the writer must be stopped and the diff must match its current changes. `--force` overwrites an existing prompt, but never a live worker's. For an `investigate` ticket it writes a read-only investigator prompt instead of the worker rules; `--review-of` refuses one, since it has no diff.
 
-A ticket's prompt (not a reviewer's) also gets a "Since this ticket was planned" section, because the plan is frozen at the first launch and its `context` is what you knew then. For each blocker: once verified, the blocker's files that changed since its launch and its report above `## Appendix` (without its title and `Status:` line; at most 40 lines, then the full report's path); before that, a line saying it is not verified yet. Then the decisions recorded after `plan` (by `add`, `drop` and accepted out-of-scope changes; in a run planned by an earlier Fleet, those stamped with a time), and the path of `notes.md` when it exists. A ticket with none of these gets no section. The prompt records which blockers were verified when it was written.
+A ticket's prompt (not a reviewer's) also gets a "Since this ticket was planned" section, because the plan is frozen at the first launch and its `context` is what you knew then. For each blocker: once verified, the blocker's files that changed since its launch and its report above `## Appendix` (without its title, `Status:` line and `fleet` header; at most 40 lines, then the full report's path); before that, a line saying it is not verified yet. Then the decisions recorded after `plan` (by `add`, `drop` and accepted out-of-scope changes; in a run planned by an earlier Fleet, those stamped with a time), and the path of `notes.md` when it exists. A ticket with none of these gets no section. The prompt records which blockers were verified when it was written.
 
 **Use:** before each launch, and before each review. Write a dependent's prompt after its blockers are verified, or regenerate it then with `--force`, so it hands down their work.
 
@@ -291,6 +291,14 @@ Blocks until something needs the lead, then prints it and exits 0. On timeout it
 
 A `REPORT` line ends with the report's path and, for a report with an `## Appendix`, the lines above it: `(read lines 1-34 of 180; appendix below)`. Read those lines; the appendix holds supporting detail for a line you doubt.
 
+When the report opens with its `fleet` block (the JSON header in the report template), the summary sits between the status and the path:
+
+```text
+REPORT api [needs-verification] criteria 5/5, checks 2/2 exit 0, findings 0, questions 0, files in scope <path>  (read lines 1-34 of 180; appendix below)
+```
+
+`criteria` counts those met, `checks` those that exited 0, `findings` adds a count by severity when there are any (`findings 3 (1 high, 2 low)`), and `questions` counts open questions. Fleet then checks the header against the run and appends what contradicts it after `header:`: a path outside an implement ticket's files (`header: src/x.py outside scope`), any file listed by a reviewer or investigator, a planned check missing or without an integer exit (`header: npm test not reported`), or a criteria count unlike the source ticket's `- [ ]` / `- [x]` lines. A header Fleet cannot read shows only the reason, such as `header: invalid JSON`. A report without the block wakes exactly as before. The header only summarizes and never sets status. Read the prose whenever the summary shows unmet criteria, a failed check, a finding, a question or a `header:` problem, and whenever the summary is missing.
+
 `--timeout` is at most 600; use the longest your host allows (540 in Claude Code), or run it in the background. `--interval` (default 10) sets how often it polls. `--any-change` wakes on any report change. `--settle` (default 5, at most 30) keeps gathering events for that long after the first, never past `--timeout`, so workers finishing together cost one wake; 0 returns at once.
 
 **Use:** whenever workers are running and you have nothing else to do. Run one wait at a time: a wait consumes the events it prints. End a background wait before `handoff`.
@@ -366,6 +374,8 @@ An investigate ticket, or one whose review is not required, is accepted without 
 
 Before stopping anything, and again before the first verify, it checks what `verify` and the gate would refuse for both workers and names every problem in one refusal: a missing or stale required review, a report not at `Status: needs-verification`, a missing or empty evidence file, `--gate` on a ticket with no runnable checks, and files outside every ticket's scope. `--unowned-ok` records the owner's reason for those before the gate runs, so the gate's own scope check passes too. If `verify` still refuses the writer after the reviewer was verified, `accept` says the reviewer's verification is recorded and the writer's is not; resolve it and run `accept` again with the same evidence, which skips the verified reviewer.
 
+Header problems in either report print as `verify` warnings on stderr and never refuse.
+
 It holds the run's lock throughout, gate included. To send a failing check back to a writer that is still running, run `gate` on its own first: after `accept --gate` fails, the writer is stopped and needs a relaunch to fix it.
 
 **Use:** once the reviewer's report is in (or the writer's, when no review is required) and your evidence is written. Only then update the source ticket.
@@ -413,7 +423,7 @@ Prints or saves the ticket's changes since launch, including new files. The writ
 fleet verify <run> <id> --evidence <file> [--evidence <file> ...] [--unowned-ok <reason>]
 ```
 
-Accepts a ticket or a review. Repeat `--evidence` to record several files, such as a `gate` file and your own notes; they are read in order, each must be non-empty, and they are recorded together. The worker must have exited, its report must say `Status: needs-verification`, and for a writer, any required review must be verified and match the current diff. No file outside every ticket's scope may have changed since the worker launched ([the scope check](#the-scope-check)). It sets the report to `verified`, appends the evidence, records `verified_at` on the worker (shown by `resume --json`), and unblocks dependents.
+Accepts a ticket or a review. Repeat `--evidence` to record several files, such as a `gate` file and your own notes; they are read in order, each must be non-empty, and they are recorded together. The worker must have exited, its report must say `Status: needs-verification`, and for a writer, any required review must be verified and match the current diff. No file outside every ticket's scope may have changed since the worker launched ([the scope check](#the-scope-check)). It sets the report to `verified`, appends the evidence, records `verified_at` on the worker (shown by `resume --json`), and unblocks dependents. A missing header, or one with a problem [`wait`](#wait) would name, prints a `WARNING <id> header…` line on stderr; it never refuses on the header alone.
 
 **Use:** after running the ticket's checks yourself. Verify the reviewer first, then the writer, each with its own evidence file; [`accept`](#accept) does both. Only then update the source ticket.
 
