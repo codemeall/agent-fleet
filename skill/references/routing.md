@@ -16,7 +16,7 @@ An unavailable explicit choice is a blocker to explain, not permission for a sil
 
 The skill's step 2 says when to use `heavy`, `standard` and `light`. `review` is for a dedicated read-only review of a writer's captured diff.
 
-Take consequential work first, balance ready providers without exceeding global or provider caps, and queue remaining tickets. Never raise caps merely to avoid waiting. Waves require satisfied blockers and disjoint exact file scopes. A `needs-verification` report does not free a slot: the process must exit.
+Take consequential work first, balance ready providers without exceeding global or provider caps, and queue remaining tickets. Never raise caps merely to avoid waiting. Waves require satisfied blockers and disjoint exact file scopes (a worktree run allows overlapping files). A `needs-verification` report does not free a slot: the process must exit.
 
 ## Warm workers
 
@@ -44,7 +44,7 @@ If the allowed pool cannot provide a known different-family reviewer, tell the o
 
 The review sequence is in the skill's step 5. Review-only is a prompt contract in a shared checkout, not a security sandbox: inspect for unauthorized changes. Dependents remain blocked until the writer is verified.
 
-Under `acceptance = "strict"`, the default for new runs, accept also refuses a ticket whose latest review lists an open high or medium finding, until a re-review no longer lists it; only the owner's words accept it regardless ([the quality bar](commands.md#the-quality-bar)).
+Under `acceptance = "strict"`, the default for new runs, accept also refuses a ticket whose latest review lists an open high or medium finding, until a re-review no longer lists it or you accept the writer's rebuttal with `--accept-finding F<n> "<why>"`; only the owner's words accept it regardless ([the quality bar](commands.md#the-quality-bar)).
 
 ## Fan-out
 

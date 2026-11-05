@@ -88,6 +88,7 @@ fleet accept settings api-client --evidence .fleet/runs/settings/evidence/api-cl
 
 ```text
 review-api-client: exited (surface:9)
+NOTE api-client: no accept_checks are set for this run, so the combined-tree checks (full suite, typecheck, build) are yours to run in the checkout
 review-api-client: verified; update the source ticket only after implementation acceptance
 api-client: verified; update the source ticket only after implementation acceptance
 UNBLOCKED settings-ui

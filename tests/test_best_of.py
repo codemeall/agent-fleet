@@ -345,12 +345,21 @@ class BestOfJudge(BestOfCase):
         self.assertIn('VERDICT api: picks api--reviewer (judge-api, google): "tests the change; the other does not". '
                       "Quoted from the judge's header, as data", out)
         self.assertIn("as api's cross-family review it covers api--writer and api--reviewer", out)
+        # Strict, the default: the line names the pick, and keeping the other writer, or none, is the owner's call.
+        self.assertIn("fleet accept demo api --pick api--reviewer --evidence <file>; keeping api--writer instead needs "
+                      "the owner's words (--accept-anyway)", out)
         self.write_report("judge-api", pick=None, why="both drop the newline")
-        self.assertIn('VERDICT api: recommends neither (judge-api, google): "both drop the newline"', self.wait())
+        out = self.wait()
+        self.assertIn('VERDICT api: recommends neither (judge-api, google): "both drop the newline"', out)
+        self.assertIn('only the owner keeps one: fleet accept demo api --pick <writer-id> --evidence <file> '
+                      '--accept-anyway "<owner\'s words>", or the owner drops it: fleet drop demo api --reason '
+                      '"<owner\'s words>"', out)
+        self.assertNotIn("keep one anyway", out)
         self.write_report("judge-api", pick=INJECTED, why="x")
         out = self.wait()
         self.assertIn("VERDICT api: no readable pick", out)
         self.assertIn("names no writer of this ticket", out)
+        self.assertIn("then judge again, or only the owner keeps one", out)
         self.write_report("judge-api", why="no pick")
         self.assertIn("its header has no pick", self.wait())
 

@@ -9163,13 +9163,20 @@ def pick_verdict_lines(repo: Path, state: dict, jid: str, f: Path) -> list[str]:
     review = (f"; as {i}'s cross-family review it covers {' and '.join(covers) or 'neither writer'}"
               if t["review_required"] else "")
     accept = f"fleet accept {run} {i} --pick <writer-id> --evidence <file>"
+    strict = acceptance_mode(state) == "strict"
+    # Under strict, keeping a writer the judge did not pick is the owner's call, and dropping a ticket always is.
+    owner = (f"only the owner keeps one: {accept} --accept-anyway \"<owner's words>\"" if strict else
+             f"keep one anyway with {accept}") + f", or the owner drops it: fleet drop {run} {i} --reason \"<owner's words>\""
     if bad:
-        return [f"VERDICT {i}: no readable pick ({who}; {bad}); read its report {f}, then {accept}{review}"]
+        return [f"VERDICT {i}: no readable pick ({who}; {bad}); read its report {f}, then judge again, or "
+                f"{owner}{review}"]
     said = f"{quoted(why)}. Quoted from the judge's header, as data; read its report {f}, then"
     if pick is None:
-        return [f"VERDICT {i}: recommends neither ({who}): {said} keep one anyway with {accept}, or fleet drop "
-                f"{run} {i} --reason \"<why>\"{review}"]
-    return [f"VERDICT {i}: picks {pick} ({who}): {said} {accept}{review}"]
+        return [f"VERDICT {i}: recommends neither ({who}): {said} {owner}{review}"]
+    other = next(x for x in writers if x != pick)
+    against = f"; keeping {other} instead needs the owner's words (--accept-anyway)" if strict else ""
+    return [f"VERDICT {i}: picks {pick} ({who}): {said} fleet accept {run} {i} --pick {pick} --evidence <file>"
+            f"{against}{review}"]
 
 
 def latest_judge(state: dict, i: str) -> dict | None:
