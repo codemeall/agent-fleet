@@ -11,4 +11,4 @@ Review writer `{{review_of}}` in `{{repo}}` against the local ticket `{{ticket}}
 - Report actionable findings with severity, file/location, concrete failure scenario and suggested correction. Separate confirmed defects from uncertainty. Do not fix findings yourself.
 - Cover the ticket's acceptance criteria and testing gaps. If there are no actionable findings, say so and record what you inspected and any limitations; do not claim unrun checks passed.
 
-Write the report below with `Status: needs-verification` when complete, or `Status: blocked` with the concrete blocker. Stop editing and wait for the lead. Only the lead can verify your report or accept the original ticket.
+Write the report below with `Status: needs-verification` when complete, or `Status: blocked` with the concrete blocker. Stop editing and wait for the lead. Only the lead can verify your report or accept the original ticket.{{transport}}

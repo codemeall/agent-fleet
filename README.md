@@ -4,12 +4,13 @@ Run a fleet of coding-agent CLIs (Claude Code, Codex, Cursor) led by the agent y
 
 The lead turns approved tickets into a saved execution plan, picks a worker model and effort for each ticket, watches progress, and verifies every result before dependents start. Workers share one Git checkout with explicit file ownership. **You keep control of commits and publishing.**
 
-> **Preview `0.1.0-preview.25`.** Bundled adapters exist for Claude Code, Codex and Cursor, plus Antigravity and OpenCode (disabled by default). Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
+> **Preview `0.1.0-preview.26`.** Bundled adapters exist for Claude Code, Codex and Cursor, plus Antigravity and OpenCode (disabled by default). Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
 
 - [Quick start](#quick-start)
 - [Installation](#installation)
   - [Companion skills (optional)](#companion-skills-optional)
 - [Usage](#usage)
+- [When not to use Fleet](#when-not-to-use-fleet)
 - [Where workers run: cmux or headless](#where-workers-run-cmux-or-headless)
   - [Running workers in cmux](#running-workers-in-cmux)
   - [Running workers headless in tmux](#running-workers-headless-in-tmux)
@@ -201,9 +202,20 @@ models_allow = ["opus", "sonnet", "fable"]
 
 Codex's list comes from its `codex debug models` catalog and includes each model's effort levels. Claude's `opus`, `sonnet` and `fable` aliases already follow the current model. Launch one small ticket first (the [documentation-only example](examples/README.md) is a safe choice).
 
+### Live smoke
+
+`doctor` checks logins; `fleet smoke` checks that your real CLIs and accounts get through a whole run. It gives each provider one tiny ticket in a throwaway repository, with its own Fleet config and a private tmux server, and runs it through launch, `wait --gate`, a cross-family review and `accept --gate`:
+
+```sh
+fleet smoke                              # prints the plan and the command to run; spends and writes nothing
+fleet smoke --providers claude,codex --yes-paid
+```
+
+It costs a little real usage, so it runs only with `--yes-paid`. It never writes your repository, your Fleet config or your tmux server, and it cleans up after itself on success, failure or Ctrl-C (`--keep` keeps the throwaway repository). The Markdown report it prints the path of has each CLI's version, every step with its seconds, and the screen of any worker that stopped at a login, trust or permission prompt or a usage limit. See [`smoke`](skill/references/commands.md#smoke).
+
 ### Configure
 
-Personal overrides live in `~/.config/agent-fleet/config.toml`; start from [config.example.toml](config.example.toml). `backend` under `[defaults]` picks where workers run (see [below](#where-workers-run-cmux-or-headless)). No cmux workspace is pinned by default. Start the lead in the intended workspace, or pass `workspace=<ref>` explicitly.
+Personal overrides live in `~/.config/agent-fleet/config.toml`; start from [config.example.toml](config.example.toml). `backend` under `[defaults]` picks where workers run (see [below](#where-workers-run-cmux-or-headless)). No cmux workspace is pinned by default. Start the lead in the intended workspace, or pass `workspace=<ref>` explicitly. An unknown key in either file prints a warning naming the file, section and key, with the closest known one; the next version refuses it. The [allowed keys](skill/references/providers.md#config-keys) are listed with the provider notes.
 
 ### Updating
 
@@ -284,6 +296,15 @@ The lead drives Fleet through the `fleet` CLI; you rarely need to, but you can r
 | `fleet provider enable\|disable <name>` | Turn a provider on or off in your config |
 
 More: [safe first run](examples/README.md) · [agent workflow](skill/SKILL.md) · [commands](skill/references/commands.md) · [routing](skill/references/routing.md) · [host setup](skill/references/harnesses.md) · [providers](skill/references/providers.md) · [lead context](skill/references/lead-context.md) · [worked examples](skill/references/examples.md)
+
+## When not to use Fleet
+
+Every Fleet worker costs a pane, a prompt, a report and a verification turn by the lead. That pays off when tickets can run side by side or need a second model family's review; for small work it is overhead.
+
+- **Small or single-file tickets: use one agent.** Rule of thumb: if the whole job is one or two tickets that would run one after the other, or touches a single file, or you could review the change in one sitting, ask your agent to do it directly. Reach for Fleet when at least two tickets with disjoint files can run at the same time, or a ticket needs cross-family review.
+- **A quick read-only lookup: use the lead's own subagent.** Where something is defined, what a function does, which files a change would touch: your host's subagent (Claude Code's Explore, a Codex `explorer`) answers for less. Fleet's `investigate` tickets are for questions that need another vendor's model, a long investigation you want verified, or one kept out of the lead's context ([Fleet or your own subagent](skill/references/delegation.md#0-fleet-or-your-own-subagent)).
+- **No speed or quality claim.** Fleet is not yet benchmarked against one agent doing the same tickets ([#16](https://github.com/codemeall/agent-fleet/issues/16)), so this README makes no performance claim: parallel workers may finish sooner or later than one agent would.
+- **Only Claude Code, Codex and Cursor are on by default.** Antigravity and OpenCode ship disabled (`fleet provider enable agy`, then `fleet doctor agy`), and Grok and Muse are placeholders, not supported CLIs ([compatibility](#compatibility-and-adapters)).
 
 ## Where workers run: cmux or headless
 
@@ -491,6 +512,10 @@ Window sizes differ by host and setting: Claude Code runs Opus 5.5 with a 1M win
 - **Usage limits.** A worker that hits its limit shows as stalled. Claude workers can be relaunched with `fleet launch … --resume` after the reset: Fleet records each one's session ID, so the worker continues its own conversation instead of starting over. Otherwise the lead steers to another provider in the run's routing and relaunches fresh.
 - **Taking a break.** `fleet hold [--reason <text>]` blocks new workers from starting in this checkout, for every run. Running workers carry on and can still be verified, and once none is running the lead ends its turn instead of polling; it does not `fleet stop` anything. Only `fleet release` lifts the hold; there is no timer. Ask the lead to hold or release, or run the commands yourself. The lead is told to release only when you ask, but it can technically run the command. A hold does not make a shutdown safe: sleep is fine, but when the machine, cmux or the tmux server shuts down, running workers die without an exit receipt, so after `fleet release` Fleet still lists them as running and refuses to relaunch them. Confirm each one is gone, record it with `fleet recover`, then relaunch, with `--resume` where the adapter supports it (see [example 7](skill/references/examples.md#7-recover-a-worker-whose-exit-cannot-be-confirmed)). To avoid that, run `fleet stop <run> --all` before you shut down.
 - **Isolation is by instruction, not by the OS.** All workers share one checkout. Exact file scope and read-only review are prompt rules plus lead checks. Fleet does compare the whole checkout before accepting work: a file that changed outside every ticket's scope while a worker ran, new files included, blocks `fleet diff` and `fleet verify` until it is reverted, granted to the ticket, or accepted with your reason ([the scope check](skill/references/commands.md#the-scope-check)). Use one active run per checkout, keep sensitive or high-conflict work out of concurrent waves, inspect scoped diffs, and run checks on the combined tree. The Git check compares the captured HEAD and index; it can't prove that no Git operation happened in between.
+- **Permission profiles and a ceiling.** Each adapter launches implementation workers with its `worker` profile and reviewers and investigators with its `review` profile, each declaring a level (`read-only`, `workspace-write`, `full-access`). Launch and `fleet doctor` refuse a profile above your `permission_ceiling` (default `workspace-write`), and doctor warns when a flag an adapter uses is missing from that CLI's `--help`.
+- **Claude hooks.** Claude workers launch with Fleet's own hooks: a guard refuses any edit outside the ticket's files and the worker's report as it happens, and Claude's permission and idle notifications wake the lead as `PERMISSION` or `IDLE` instead of waiting for a screen to go still. Fleet never answers a prompt. Hooks never loosen a permission mode, so a guard that fails leaves Claude's own prompts in charge. With `scope_permissions = true` (off by default), Claude workers may also edit their own files and run their ticket's planned checks without asking.
+- **Headless reviewers.** With `review_transport = "headless"`, reviewers and investigators on Claude and Codex run once, read-only by the CLI's own flags (`claude -p` with prompts denied, `codex exec -s read-only`); their final message becomes the report and their token use goes to `fleet cost`. A run that has not finished after `headless_timeout_minutes` is stopped with a blocked report.
+- **Cost and caps.** Every worker launch is recorded in the run's ledger with its wall time and, for Claude workers, the tokens its own session log reports (others show unknown, never zero). `fleet cost <run>` prints it; optional `max_workers` and `max_wall_minutes` caps refuse new launches past them, never stopping running workers.
 - **Review rounds.** Each ticket gets `review_rounds` reviews (default 2, at most 5); after that Fleet refuses the next repair or review and prints the open findings for you to decide: accept as is, drop the ticket, or allow one more round in your own words.
 - **Other agents' text is data.** Worker prompts and the lead's skill treat tickets, specs, repo files, tool output and other workers' reports as data, never instructions; a planted instruction is reported, not followed.
 - **Evidence from what ran.** A ticket's `checks` may include commands (`{"run": …, "cwd": …, "timeout": …}`); `fleet gate` runs them, then the scope check, and writes the result as evidence for `fleet verify`. With `fleet wait --gate`, a failing check goes back to the worker through its inbox before the lead is woken, up to `gate_rounds` times; the lead wakes on a pass, on `GATE-FAILED`, or on a scope problem, which never goes to the worker.
@@ -615,7 +640,8 @@ Every method that addresses a worker must raise rather than reach a terminal tha
 
 - `tests/test_adapters_smoke.py` runs every shipped adapter (claude, claude-co, codex, cursor, agy, opencode) through launch, wait and stop in headless tmux. A strict fake named after each adapter's `bin` (`tests/fixtures/fake_cli.py`) accepts only the exact launch line the adapter builds, fails loudly on anything else, and quits only on the adapter's own quit sequence, so a failure names the adapter. These tests prove the launch line's shape, not that a real CLI or account works; see the tested-version table in [provider notes](skill/references/providers.md).
 - `tests/test_teamwork_e2e.py` runs the teamwork commands end to end with a scripted worker and two fake providers of different families: plan, launch, the scope check, the inbox, grant, gate, cross-family review, accept and hand-down.
-- Like the backend tests, both use a private tmux server per test and skip when tmux isn't installed.
+- `tests/test_smoke.py` runs `fleet smoke` against the same strict fakes: two families pass every step including review, a fake that never reports fails with its screen in the report, Ctrl-C still cleans up, and the test's own repository, config and tmux server stay untouched.
+- Like the backend tests, these use a private tmux server per test and skip when tmux isn't installed.
 
 Run only the backend tests with `python3 -m unittest tests.test_backends -v`, or the live smoke and end-to-end tests with `python3 -m unittest tests.test_adapters_smoke tests.test_teamwork_e2e -v`.
 

@@ -127,7 +127,7 @@ class GateLoop(RuntimeCase):
 
     def test_a_hand_back_without_a_live_writer_or_commands_wakes_as_before(self):
         self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"], "checks": [{"run": "false"}]},
-                                {"id": "02", "files": ["next.txt"], "checks": "Read it."}])
+                                {"id": "02", "files": ["next.txt"], "checks": {"manual": "Read it."}}])
         self.launch()
         self.hand_back()                                                  # the writer has exited
         self.assertIn("REPORT 01 [needs-verification]", self.wait("--gate"))

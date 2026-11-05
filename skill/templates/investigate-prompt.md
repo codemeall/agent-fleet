@@ -14,4 +14,4 @@ You investigate one question in the shared checkout at `{{repo}}` and report wha
 - Do not fix what you find. Put the answer and its evidence (file:line, command and result) under **Findings**, and a suggested fix scoped to exact files under **Decisions and blockers**. Separate what you confirmed from what you suspect.
 - If blocked or unsure, write `Status: blocked` with the concrete question and wait for the lead.
 
-Write the report below with `Status: needs-verification` when done, then stop and wait. Only the lead can verify your report.
+Write the report below with `Status: needs-verification` when done, then stop and wait. Only the lead can verify your report.{{transport}}

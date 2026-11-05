@@ -215,7 +215,7 @@ class TmuxLive(unittest.TestCase):
         plan = self.repo / "plan.json"
         plan.write_text(json.dumps({"tickets": [{"id": "01", "ticket": str(ticket), "files": ["a.txt"],
                                                  "provider": "fake", "tier": "standard", "context": "none",
-                                                 "checks": "manual prose review is sufficient"}]}))
+                                                 "checks": {"manual": "manual prose review is sufficient"}}]}))
         self.call("plan", "demo", "--file", str(plan))
         self.assertRegex(self.call("launch", "demo", "--ready"), r"LAUNCHED 01 fake:fake-1 standard @\d+")
         self.until(lambda: "fake agent on 01" in self.call("peek", "demo", "01"))
@@ -238,7 +238,7 @@ class TmuxLive(unittest.TestCase):
         ticket.write_text("# Change a.txt\n")
         (self.repo / "plan.json").write_text(json.dumps({"tickets": [
             {"id": "01", "ticket": str(ticket), "files": ["a.txt"], "provider": "fake", "tier": "standard",
-             "context": "none", "checks": "manual prose review is sufficient"}]}))
+             "context": "none", "checks": {"manual": "manual prose review is sufficient"}}]}))
         self.call("plan", "demo", "--file", "plan.json")
         self.call("launch", "demo", "--ready")
         subprocess.run(["tmux", "-L", self.socket, "kill-server"], capture_output=True)

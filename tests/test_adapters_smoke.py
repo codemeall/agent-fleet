@@ -133,7 +133,7 @@ class AdapterSmoke(FleetCase):
         (self.repo / "01.md").write_text("# Smoke\nChange a.txt.\n")
         (self.repo / "plan.json").write_text(json.dumps({"tickets": [
             {"id": "01", "ticket": "01.md", "files": ["a.txt"], "provider": name, "tier": "standard",
-             "context": "A smoke test.", "checks": "manual prose review is sufficient"}]}))
+             "context": "A smoke test.", "checks": {"manual": "manual prose review is sufficient"}}]}))
         self.fleet("plan", "smoke", "--file", str(self.repo / "plan.json"))
         effort = f"@{want['effort']}" if want["effort"] else ""
         self.assertRegex(self.fleet("launch", "smoke", "--ready"),
@@ -178,7 +178,7 @@ class AdapterSmoke(FleetCase):
         self.assertEqual(len(self.calls("agy")), 1)
 
     def test_opencode(self):
-        self.launch_report_stop("opencode")
+        self.launch_report_stop("opencode", 'permission_ceiling = "full-access"')  # its build agent asks nothing
         self.assertEqual(self.calls("opencode")[0]["argv"][2], "--prompt")
 
     def test_claude_resume(self):

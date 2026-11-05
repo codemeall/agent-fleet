@@ -33,11 +33,40 @@
 # trust: how launch marks the repo trusted when [defaults] auto_trust = true (off by default):
 #   claude-config sets the project's hasTrustDialogAccepted in the account's .claude.json, codex-flag passes the
 #   trust as a session-only -c override, agy-settings adds the repo to agy's trustedWorkspaces.
+# profiles: how each role launches. profiles.worker runs implementation tickets; profiles.review runs reviewers and
+#   investigate tickets, which write only their report. `args` fills the launch line's {profile} slot (trusted, not
+#   quoted; the slot is dropped when empty). `level` is what that launch lets the CLI do without the owner answering
+#   in its pane: read-only < workspace-write < full-access. Launch refuses, and doctor fails, a profile above
+#   [defaults] permission_ceiling (default workspace-write). A launch line without {profile} runs as written for
+#   every role, at the worker's level. See references/providers.md#permission-profiles.
+# bin_aliases: other names the same CLI installs under; doctor names one it finds when `bin` is missing.
+# headless: a one-shot, non-interactive launch line for reviewers and investigate tickets ({bin}, {model}, {effort},
+#   {prompt}; no {session} or {profile}). Its own flags must deny every write and every prompt, so it counts as
+#   read-only. Its runner saves the CLI's final message as the report and the usage it prints for `fleet cost`.
+# review_transport: "tui" (default) or "headless", here or under [defaults]; headless needs a `headless` line, and
+#   an adapter without one keeps its TUI under a [defaults] headless. Implementation workers always run in a TUI.
+#   See references/providers.md#headless-reviewers.
+# hooks: how launch gives each worker Fleet's hooks, through the launch line's {settings} slot (dropped without them).
+#   claude-settings writes .fleet/runs/<run>/settings/<id>.json and passes --settings <path>: a guard that refuses
+#   edits outside the worker's own files and report, and events `fleet wait` reads (a permission prompt, idle).
+#   "" turns them off; so does a launch line without {settings}. See references/providers.md#claude-hooks.
 
 [providers.claude]
 enabled = true
 bin = "claude"
-launch = "{bin} {session} --model {model} --effort {effort} {prompt}"
+launch = "{bin} {session} --model {model} --effort {effort} {profile} {settings} {prompt}"
+hooks = "claude-settings"
+# Workers get no mode flag, so the account's permissions.defaultMode applies, as before profiles, unless the owner
+# sets [defaults] scope_permissions = true (then allow rules for their own files and planned checks, same mode).
+# Reviewers pin manual mode (`claude --help` 2.1.318: Claude asks before each edit and command), so a looser
+# defaultMode never reaches them. With hooks on, the guard lets a reviewer write only its report and its settings
+# allow that one file, so the report write needs no answer. Hooks never change the mode, so a guard that cannot run
+# leaves every other edit asking: the level stays read-only either way.
+profiles.worker = { args = "", level = "workspace-write" }
+profiles.review = { args = "--permission-mode manual", level = "read-only" }
+# Headless (review_transport = "headless"): `-p` with nobody to answer (`--permission-prompts none`) in manual mode,
+# so every edit and every command that would ask is denied, not left waiting. JSON output carries the result and usage.
+headless = "{bin} -p --output-format json --model {model} --effort {effort} --permission-mode manual --permission-prompts none {prompt}"
 session = "--session-id {id}"
 resume = "--resume {id}"
 quit = ["/exit", "enter"]
@@ -70,7 +99,15 @@ max = 1
 enabled = true
 bin = "codex"
 # check_for_update_on_startup=false: an "Update available" screen would stall a worker before its prompt runs.
-launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c check_for_update_on_startup=false -s workspace-write -a on-request {prompt}"
+launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c check_for_update_on_startup=false {profile} {prompt}"
+# A TUI reviewer must write its report; under -s read-only that write, and any check that writes a cache, would wait
+# for the owner's approval. So review runs the worker's sandbox, and only Fleet's review contract keeps it to its report.
+profiles.worker = { args = "-s workspace-write -a on-request", level = "workspace-write" }
+profiles.review = { args = "-s workspace-write -a on-request", level = "workspace-write" }
+# Headless (review_transport = "headless"): `codex exec` under -s read-only, with approval_policy pinned to never
+# (exec's default, which an owner's auto_review would otherwise lift), so a write fails instead of escalating and
+# nothing waits for an answer. Its final message is the report; --json streams events and usage.
+headless = "{bin} exec --json -m {model} -c model_reasoning_effort={effort} -s read-only -c approval_policy=never {prompt}"
 quit = ["/quit", "enter"]
 login = "codex login status"
 login_ok = "Logged in"
@@ -90,8 +127,13 @@ tiers.review = { model = "gpt-6.1-sol", effort = "high" }
 [providers.cursor]
 enabled = true
 bin = "cursor-agent"
+bin_aliases = ["agent"]   # Cursor's newer name for the same CLI, per its docs; not checked here
 # Cursor has no effort flag: effort is part of the model id.
-launch = "{bin} --model {model} --trust {prompt}"
+launch = "{bin} --model {model} --trust {profile} {prompt}"
+# Edits apply without asking; commands ask unless the owner's Cursor config allows them (Fleet never passes --force).
+# No interactive mode Fleet has checked both stops edits and lets a reviewer write its report, so review runs as the worker.
+profiles.worker = { args = "", level = "workspace-write" }
+profiles.review = { args = "", level = "workspace-write" }
 quit = ["/quit", "enter"]
 login = "cursor-agent status"
 login_ok = "Logged in"
@@ -123,7 +165,11 @@ tiers.review = { model = "muse-spark-1.3-max", family = "meta" }
 [providers.agy]
 enabled = false
 bin = "agy"
-launch = "{bin} --model {model} --effort {effort} --mode accept-edits -i {prompt}"
+launch = "{bin} --model {model} --effort {effort} {profile} -i {prompt}"
+# accept-edits: file edits are approved automatically, shell commands still ask. No other mode was checked, so
+# review runs as the worker.
+profiles.worker = { args = "--mode accept-edits", level = "workspace-write" }
+profiles.review = { args = "--mode accept-edits", level = "workspace-write" }
 trust = "agy-settings"
 quit = ["/exit", "enter"]
 login = "agy models"
@@ -147,7 +193,12 @@ tiers.review = { model = "gemini-3.8-flash-high", effort = "high", family = "goo
 [providers.opencode]
 enabled = false
 bin = "opencode"
-launch = "{bin} --model {model} --prompt {prompt}"
+launch = "{bin} --model {model} {profile} --prompt {prompt}"
+# Its default build agent runs every tool without asking, so both profiles are honestly full-access, and the default
+# permission_ceiling (workspace-write) refuses them. The owner either raises the ceiling, or sets `permission` in
+# opencode.json (edits allowed, bash and webfetch "ask") and lowers these levels to workspace-write.
+profiles.worker = { args = "", level = "full-access" }
+profiles.review = { args = "", level = "full-access" }
 quit = ["/exit", "enter"]
 login = "opencode models openrouter"   # lists only providers with credentials; point it at yours
 login_ok = "openrouter/"

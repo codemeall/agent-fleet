@@ -2,7 +2,7 @@
 
 How the lead and its workers collaborate, compared with Claude Code agent teams, Codex multi-agent and T3 Code's delegation. The goal: match their collaboration, beat them on quality, and spend fewer tokens.
 
-Reviewed 2026-11-04 at `0.1.0-preview.23`. **Release 1 (P1–P7) is implemented in `0.1.0-preview.24`** (spec #21; tickets #10 and #22–#27), and **release 2 in `0.1.0-preview.25`** (spec #31): P8 (gate loop) and P9 (report header), plus untrusted-data rules, plan-time review checks, a review-round cap and adapter smoke tests in CI. The rest of Phases 2–4 below remain proposals. Claims about Fleet were checked against `skill/bin/fleet`, the skill and its templates; the defects below were reproduced with a fake worker CLI in headless tmux. Claims about other harnesses come from their current docs and source, cited in [Sources](#sources).
+Reviewed 2026-11-04 at `0.1.0-preview.23`. **Release 1 (P1–P7) is implemented in `0.1.0-preview.24`** (spec #21; tickets #10 and #22–#27), and **release 2 in `0.1.0-preview.25`** (spec #31): P8 (gate loop) and P9 (report header), plus untrusted-data rules, plan-time review checks, a review-round cap and adapter smoke tests in CI. **Release 3 in `0.1.0-preview.26`** (spec #35) delivers P13 (Claude hooks), the read-only half of P15 (headless reviewers), P19's ledger, the permission ceiling of P14, and a live smoke kit. The rest of Phases 3–4 below remain proposals. Claims about Fleet were checked against `skill/bin/fleet`, the skill and its templates; the defects below were reproduced with a fake worker CLI in headless tmux. Claims about other harnesses come from their current docs and source, cited in [Sources](#sources).
 
 ## Summary
 

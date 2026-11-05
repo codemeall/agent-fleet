@@ -9,23 +9,34 @@ The values the test expects (model, effort, session mode, trust override, accoun
 file named by $FAKE_CLI_EXPECT. On a good command line it records its argv in $FAKE_CLI_LOG/<cli>.jsonl, finds the
 Fleet prompt file named in the prompt argument, writes a needs-verification report, and then reads its terminal
 until it gets its own quit command (/exit or /quit). The other CLI's quit command is refused, not obeyed.
+
+Claude's `--settings <file>` must name a file that parses to a settings object; the fake then runs its hooks as
+Claude Code would: PreToolUse (Write) before each file it writes, refusing to write when a hook exits 2, and Stop
+after its report. An expectation with "settings": true also requires the flag.
+
+For tests/test_smoke.py: $FAKE_CLI_EXPECT may hold one expectation per CLI under "by_cli"; a writer whose prompt
+carries a `fleet smoke` check (`grep -qx '<line>' smoke/<name>.txt`) writes that file first; and a CLI named in
+$FAKE_CLI_STALL (comma-separated) never writes its report, like a CLI stuck at a login or trust prompt.
 """
 import json
 import os
 import re
+import subprocess
 import sys
 import uuid
 from pathlib import Path
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")  # `claude --help`
+CLAUDE_MODES = ("acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan")  # `claude --help` 2.1.318
 AGY_EFFORTS = ("low", "medium", "high", "xhigh", "max")  # `agy --help`
 CODEX_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
 # Per CLI: the flags it is launched with (name -> takes a value), where the prompt goes, the quit command and
 # the account-directory variable its adapter clears or sets.
 GRAMMAR = {
-    "claude": {"flags": {"--session-id": True, "--resume": True, "--model": True, "--effort": True},
+    "claude": {"flags": {"--session-id": True, "--resume": True, "--model": True, "--effort": True,
+                         "--permission-mode": True, "--settings": True},
                "prompt": "positional", "quit": "/exit", "account": "CLAUDE_CONFIG_DIR"},
     "codex": {"flags": {"-m": True, "-c": True, "-s": True, "-a": True},
               "prompt": "positional", "quit": "/quit", "account": "CODEX_HOME"},
@@ -79,12 +90,77 @@ def one(flags: dict, name: str, expected=None, choices=None):
     return value
 
 
+SETTINGS = {}  # claude's --settings file, once it parsed
+
+
+def claude_settings(value: str) -> None:
+    """--settings takes a file or a JSON string (`claude --help`); Fleet passes a file, which must exist and parse to
+    an object whose hooks have the documented shape: event -> [{matcher?, hooks: [{type: command, command}]}]."""
+    path = Path(value)
+    if not path.is_file():
+        raise Refused(f"--settings {value!r} is not a file")
+    try:
+        data = json.loads(path.read_text())
+    except ValueError as e:
+        raise Refused(f"--settings {value!r} is not JSON: {e}") from None
+    if not isinstance(data, dict) or not isinstance(data.get("hooks", {}), dict):
+        raise Refused(f"--settings {value!r} is not a settings object")
+    for event, groups in data.get("hooks", {}).items():
+        if not isinstance(groups, list) or not all(
+                isinstance(g, dict) and all(h.get("type") == "command" and isinstance(h.get("command"), str)
+                                            for h in g.get("hooks", [])) for g in groups):
+            raise Refused(f"--settings {value!r}: bad {event} hooks")
+    SETTINGS.update(data)
+
+
+def run_hooks(event: str, payload: dict, target: str = "") -> list[int]:
+    """Run the settings' command hooks for an event the way Claude Code does: `sh -c` with the JSON on stdin, for
+    each group whose matcher (an exact name list here) names `target`. Returns their exit codes."""
+    codes = []
+    for group in SETTINGS.get("hooks", {}).get(event, []):
+        matcher = group.get("matcher", "")
+        if matcher and target not in re.split(r"[|,]\s*", matcher):
+            continue
+        for hook in group["hooks"]:
+            res = subprocess.run(["/bin/sh", "-c", hook["command"]], input=json.dumps(payload), text=True,
+                                 capture_output=True, timeout=hook.get("timeout", 600))
+            codes.append(res.returncode)
+            if res.returncode == 2:
+                print(f"{event}:{target} hook error: {res.stderr.strip()}", flush=True)
+    return codes
+
+
+def fake_write(path: Path, text: str) -> bool:
+    """Write a file as Claude's Write tool would, after the PreToolUse hooks; False when one blocks it."""
+    payload = {"session_id": "fake", "transcript_path": "/dev/null", "cwd": os.getcwd(), "permission_mode": "default",
+               "hook_event_name": "PreToolUse", "tool_name": "Write",
+               "tool_input": {"file_path": str(path.resolve()), "content": text}, "tool_use_id": "toolu_fake"}
+    if 2 in run_hooks("PreToolUse", payload, "Write"):
+        return False
+    path.write_text(text)
+    return True
+
+
 def check(cli: str, flags: dict, positional: list[str], want: dict) -> str:
     """The prompt argument, once every flag matches what the adapter should have built."""
     model, effort = want["model"], want.get("effort")
     if cli == "claude":
         one(flags, "--model", model)
         one(flags, "--effort", effort, CLAUDE_EFFORTS)
+        mode = want.get("permission_mode")  # the review profile pins one; a worker gets none
+        roles = want.get("permission_modes")  # one fake shared by a writer and a reviewer: either role's mode
+        if roles is not None:
+            given = flags.get("--permission-mode", [None])[0]
+            if given not in roles:
+                raise Refused(f"--permission-mode {given!r}, expected one of {roles!r}")
+        elif mode is None and "--permission-mode" in flags:
+            raise Refused("unexpected --permission-mode")
+        elif mode is not None:
+            one(flags, "--permission-mode", mode, CLAUDE_MODES)
+        if "--settings" in flags:
+            claude_settings(flags["--settings"][0])
+        elif want.get("settings"):
+            raise Refused("missing --settings")
         session = want.get("session")  # "new", "resume" or None (no session fragment at all)
         given = [f for f in ("--session-id", "--resume") if f in flags]
         if session is None and given:
@@ -150,9 +226,19 @@ def prompt_file(prompt: str) -> tuple[str, Path, bool]:
     return ticket, path, resume
 
 
+def smoke_edit(ticket: str, text: str) -> None:
+    """A writer's `fleet smoke` ticket: write the line its grep check looks for. Reviewers edit nothing."""
+    if ticket.startswith("review-"):
+        return
+    for line, path in re.findall(r"grep -qx '([^']*)' (smoke/[\w.-]+\.txt)", text):
+        Path(path).parent.mkdir(exist_ok=True)
+        fake_write(Path(path), line + "\n")
+
+
 def main() -> int:
     cli, argv = sys.argv[1], sys.argv[2:]
     want = json.loads(Path(os.environ["FAKE_CLI_EXPECT"]).read_text())
+    want = want.get("by_cli", {}).get(cli, want)
     log = Path(os.environ["FAKE_CLI_LOG"])
     try:
         if cli not in GRAMMAR:
@@ -174,9 +260,17 @@ def main() -> int:
     report = Path(found.group(1)) if found else path.parent.parent / "reports" / f"{ticket}.md"
     with (log / f"{cli}.jsonl").open("a") as fh:
         fh.write(json.dumps({"argv": argv, "ticket": ticket, "resume": resume, "id": uuid.uuid4().hex}) + "\n")
-    report.write_text(f"# Report {ticket}\n\nStatus: needs-verification\n\n## Work or review performed\n"
-                      f"- Smoke run of the {cli} launch line{' (resumed)' if resume else ''}; no files changed.\n")
-    print(f"fake {cli} working on {ticket}", flush=True)
+    if cli in os.environ.get("FAKE_CLI_STALL", "").split(","):
+        print(f"fake {cli} is waiting at a sign-in prompt", flush=True)
+    else:
+        smoke_edit(ticket, text)
+        if not fake_write(report, f"# Report {ticket}\n\nStatus: needs-verification\n\n## Work or review performed\n"
+                                  f"- Smoke run of the {cli} launch line{' (resumed)' if resume else ''}; no files changed.\n"):
+            print(f"FAKE {cli}: a PreToolUse hook refused my own report", flush=True)
+        run_hooks("Stop", {"session_id": "fake", "hook_event_name": "Stop", "stop_hook_active": False,
+                           "last_assistant_message": f"Report written for {ticket}.", "background_tasks": [],
+                           "session_crons": []})
+        print(f"fake {cli} working on {ticket}", flush=True)
     quit_word = GRAMMAR[cli]["quit"]
     for line in sys.stdin:
         line = line.strip()

@@ -18,6 +18,34 @@ What each shipped adapter was last checked against, from the changelog and the r
 
 `tests/test_adapters_smoke.py` runs every shipped adapter through `fleet launch`, `wait` and `stop` in headless tmux against a fake executable named after its `bin`, which accepts only the exact command line the adapter builds (model, effort, session and resume fragments, Codex's `-c` overrides, Cursor's `--trust`, OpenCode's `--prompt`) and quits only on the adapter's own quit sequence. Those tests use fakes: they prove the launch line's shape and the quit sequence, not that a CLI version accepts them, that the account is signed in or that a model is offered. Re-check a CLI live after it changes its flags, and update this table.
 
+### Profile flags checked
+
+What was checked on 2026-11-05 for the [launch profiles](#permission-profiles). Only Claude Code is installed where this was done; nothing was launched.
+
+| Adapter | Flags its launch line and profiles use | How they were checked |
+| --- | --- | --- |
+| `claude`, `claude-co` | `--session-id`, `--resume`, `--model`, `--effort`, `--permission-mode manual`, and with [hooks](#claude-hooks) `--settings <file>` | `claude --help` on 2.1.318: every flag listed, `manual` is among `--permission-mode`'s choices (`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`), and `--settings` takes "a settings JSON file or a JSON string". The 2.1.318 binary's own mode table titles it "Manual" and stores it as `default`, the name older versions' `--help` used. `fleet doctor claude` printed `flags listed by claude --help`; doctor also checks `--settings` for an adapter with hooks. The hook schema is in [what was checked](#what-was-checked). |
+| `codex` | `-m`, `-c`, `-s workspace-write`, `-a on-request` | Read, not run, in the Codex source at commit `9ff072d` (2026-11-04): `utils/cli/src/shared_options.rs` (`-m, --model`; `-s, --sandbox` with `read-only`, `workspace-write`, `danger-full-access`), `tui/src/cli.rs` (`-a, --ask-for-approval`: `on-request` or `never`), `utils/cli/src/config_override.rs` (`-c, --config`, global). No `codex --help` was run. |
+| `cursor` | `--model`, `--trust` | Not checked: no Cursor CLI here. **`--trust` in the interactive TUI is unverified**: it is in the shipped line and the smoke fake accepts it, but no real Cursor run has shown that the TUI honours it rather than rejecting or ignoring it. Check it with the `fleet smoke` path (#32) on a machine with Cursor signed in, and record the result here. Cursor's docs also name the CLI `agent`; that was not checked either, and doctor only names `agent` when `cursor-agent` is missing. |
+| `agy` | `--model`, `--effort`, `--mode accept-edits`, `-i` | Unchanged since the 1.3.0 live check and the 1.4.8 `--help` listing; not re-checked. |
+| `opencode` | `--model`, `--prompt` | Unchanged since the 1.18.34 live check. Its docs (opencode.ai) were unreachable from this session, so no narrower agent for reviewers was checked and none is shipped. |
+
+`fleet doctor` repeats the help check on the owner's machine for every enabled adapter (see [below](#permission-profiles)), which is how drift in a newer CLI shows up.
+
+### Headless lines checked
+
+What was checked on 2026-11-05 for [headless reviewers](#headless-reviewers). Nothing was launched against a real account: the lines' shape and Fleet's handling of each CLI's output are proven by fakes in `tests/test_headless.py`, not by a real run.
+
+| Adapter | Headless line | How it was checked |
+| --- | --- | --- |
+| `claude`, `claude-co` | `-p --output-format json --model … --effort … --permission-mode manual --permission-prompts none` | `claude --help` on 2.1.318 lists every flag: `-p/--print`, `--output-format` (`json`: "single result"), `manual` among `--permission-mode`'s choices, and `--permission-prompts host\|none`, where `none` means "anything that would prompt is denied automatically; the permission mode still decides everything else". The headless docs (code.claude.com/docs/en/headless, read 2026-11-05) say a manual-mode `-p` run denies any call that needs approval and that `--permission-prompts none` tells Claude not to retry it (2.1.259 or later); the Agent SDK reference gives the `json` result's fields: `result` (the final text), `is_error`, `usage` (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`) and `permission_denials` (`tool_name`, `tool_input`). `fleet doctor claude` with `review_transport = "headless"` printed no headless-flag warning. |
+| `codex` | `exec --json -m … -c model_reasoning_effort=… -s read-only -c approval_policy=never` | Read, not run, in the Codex source at commit `9ff072d` (2026-11-04): `exec/src/cli.rs` (`--json` prints JSONL events; a prompt argument with stdin that is not a terminal only appends a non-empty stdin, so Fleet passes an empty one), `exec/src/lib.rs` (exec sets `approval_policy = never` unless the owner's config turns on `auto_review`, hence the explicit `-c approval_policy=never`), `exec/src/exec_events.rs` (`item.completed` with an `agent_message` carries the final text; `turn.completed` carries `usage`: `input_tokens`, which includes `cached_input_tokens`, `output_tokens`, `cache_write_input_tokens`), `protocol/src/protocol.rs` (`never`: failures go back to the model and are never escalated). No `codex exec --help` was run. |
+| `cursor` | none | No Cursor CLI here and nothing checked; its print mode is not shipped. |
+| `agy` | none | Its non-interactive mode was never checked; none is shipped. |
+| `opencode` | none | `opencode run` exists (it takes `--variant`), but its output format and a read-only agent were not checked (its docs were unreachable), so none is shipped. |
+
+An owner may add a `headless` line for another adapter in the user config once they have checked it: its own flags must deny every write and every prompt, since Fleet counts it as read-only.
+
 ## Turning providers on and off
 
 Which providers are on is the owner's decision. `fleet doctor` shows each one as `off`, as a sign-in result, or as `PLACEHOLDER`.
@@ -70,6 +98,55 @@ Claude Code, Codex and Antigravity ask once per folder whether to trust it. With
 
 Cursor always launches with `--trust`; OpenCode asks nothing. Launch never creates a CLI's file: a CLI that has not run yet, or a file it cannot read or write, gets one stderr line and the worker shows its trust screen as before. `auto_trust` is the owner's decision. The lead never turns it on, and never answers a trust, login or permission prompt with `fleet send`.
 
+## Permission profiles
+
+Each adapter launches a role through a profile. `profiles.worker` runs implementation tickets. `profiles.review` runs reviewers and investigate tickets, which write only their report. A profile has `args`, the fragment that fills the launch line's `{profile}` slot (dropped when empty), and a `level`, what that launch lets the CLI do without the owner answering in its pane:
+
+| Level | Meaning |
+| --- | --- |
+| `read-only` | Changes nothing unasked: every edit, and every command that is not read-only, waits for the owner. |
+| `workspace-write` | Edits files in the checkout without asking; commands that could reach further run in a sandbox or wait for the owner. |
+| `full-access` | Edits and runs any command without asking. |
+
+`[defaults] permission_ceiling` (default `workspace-write`) is the widest level Fleet will start. `fleet launch` (and the reviewer `fleet review` picks) refuses a profile above it, naming the adapter, the profile and the ceiling, before it touches the run. `fleet doctor` fails an enabled adapter with such a profile. Raising the ceiling is the owner's decision; the lead never edits it, and never routes to another provider just to get under it without telling the owner.
+
+| Adapter | `worker` | `review` | Why |
+| --- | --- | --- | --- |
+| `claude`, `claude-co` | no flag, `workspace-write` | `--permission-mode manual`, `read-only`, with or without [hooks](#claude-hooks) | Workers keep the account's `permissions.defaultMode`, as before ([hooks](#claude-hooks) for `scope_permissions`). Reviewers pin manual mode, so a looser `defaultMode` never reaches them, and Claude asks before each edit and command. With hooks, the guard refuses every edit but the reviewer's own report, and the settings file allows that one file, so the report write needs no answer. The mode stays manual, so if the guard cannot run, any other edit still asks. |
+| `codex` | `-s workspace-write -a on-request`, `workspace-write` | the same | A TUI reviewer must write its report. Under `-s read-only` that write, and any check that writes a cache, would wait for an approval, so review runs the worker's sandbox and only the review contract keeps it to its report. |
+| `cursor` | no flag, `workspace-write` | the same | Edits apply without asking; commands ask unless Cursor's own config allows them (Fleet never passes `--force`). No checked interactive mode both stops edits and lets a reviewer write its report. |
+| `agy` | `--mode accept-edits`, `workspace-write` | the same | Edits are approved automatically, shell commands ask. No other mode was checked. |
+| `opencode` | no flag, `full-access` | the same | Its default build agent runs every tool without asking, so the default ceiling refuses it ([below](#opencode)). |
+
+Levels are what the launch Fleet builds asks for over the CLI's own default settings. A CLI's own configuration can still widen or narrow that (Claude's settings, Cursor's CLI config, `opencode.json`), and doctor does not read it. If you widen a CLI there, raise its profile's `level` to match; if you narrow it, you may lower it. No level loosens the worker rules: whatever the level, a worker never makes network calls, installs packages, reads secrets or touches Git, and a reviewer writes only its report. Those are instructions, not OS isolation; a [headless run](#headless-reviewers) makes reviewers and investigators read-only by mechanism, and [Claude hooks](#claude-hooks) keep a TUI reviewer's edits to its report.
+
+An owner override of `launch` written before profiles, with no `{profile}` slot, keeps working: every role runs that line as written, and it counts at the worker profile's level. An adapter that declares no profiles counts as `workspace-write`. To change one field, override just that key:
+
+```toml
+[providers.opencode.profiles.worker]
+level = "workspace-write"   # only after setting `permission` in opencode.json so bash and webfetch ask
+```
+
+Doctor prints, for each enabled adapter, the binary it found, each profile's level and the ceiling. It also runs `<bin> --help` (and the launch's subcommand help, when the launch line runs one) with a 10-second timeout and warns, naming the adapter and flag, when a flag the launch line, its session fragments or its profiles use is missing from that text. A warning never fails doctor: help text is not a contract, so check the flag against the CLI's docs and a real launch. Help that exits non-zero, prints nothing or times out shows `flags unverified`. A missing binary still fails; for Cursor, doctor also names `agent` if that is what is installed (`bin_aliases`), and the owner then sets `bin`, `login` and `models` to it.
+
+## Headless reviewers
+
+A TUI reviewer or investigator is read-only only by its prompt, writes its own report and can stall at a permission prompt. With `review_transport = "headless"` (under `[defaults]` for every adapter that has a `headless` line, or under one adapter; default `"tui"`), reviewers and investigate tickets on that adapter run its `headless` line instead: one non-interactive CLI call whose own flags deny every write and every prompt. Implementation workers always run in a TUI. A headless run that has not finished after `headless_timeout_minutes` (under `[defaults]`, 1 to 240, default 30) is stopped, and Fleet writes a `Status: blocked` report saying so, so a hung CLI still wakes the lead.
+
+| Adapter | Headless line (beyond model and effort) | What makes it read-only |
+| --- | --- | --- |
+| `claude`, `claude-co` | `-p --output-format json --permission-mode manual --permission-prompts none` | Manual mode asks before every edit and every command outside the read-only set; with nobody to answer, each such call is denied and Claude is told not to retry. |
+| `codex` | `exec --json -s read-only -c approval_policy=never` | The read-only sandbox fails every write, and with approvals never asked nothing escalates out of it. |
+
+Others ship none ([checked](#headless-lines-checked)), so a `[defaults]` headless leaves them in a TUI; `review_transport = "headless"` on an adapter without a `headless` line is a config error. `fleet doctor` names an adapter that runs reviewers headless and checks its headless line's flags against the CLI's help, as for its launch line.
+
+- **Launch.** `fleet review` and `fleet launch --tier review`, and an investigate ticket's launch, start `fleet _headless` in the run's tmux window or cmux pane, so `fleet agents` shows it. It counts as `read-only` against `permission_ceiling`, whatever the adapter's `review` profile says, and has no session, so `--resume` refuses it.
+- **Prompt.** A headless reviewer cannot write its report, so its prompt (`fleet prompt … --provider <p>`; `fleet review` passes it) says to reply with the complete report, `Status:` line and `fleet` header included, as its final message. Launch refuses a prompt written for the other transport and says how to rewrite it.
+- **Report.** The runner writes the final message as `reports/<id>.md`. One without `Status: needs-verification` or `Status: blocked`, or no final message at all, becomes a `Status: blocked` report saying why, with the message and the CLI's last stderr lines quoted, so `wait` wakes the lead either way. Calls the CLI reports it denied (Claude's `permission_denials`, Codex's declined commands and failed file changes) are listed at the end under `## Denied by the read-only run`.
+- **Usage.** The runner writes what the CLI reported to `usage/<id>.<token>.json` (its raw output beside it as `.out`), and reconcile records it in the ledger under the run's lock. Codex counts cached input inside its input tokens; Fleet records the uncached part as input, as Claude reports it. A CLI that reports no usage stays `unknown`.
+- **Wait, stop and send.** `wait` wakes on the report exactly as for a TUI reviewer, header summary included. A headless run cannot stall at a prompt and its screen stays still while it works, so it never shows as `STALLED`; it still shows `UNREACHABLE` when its window goes. `fleet stop` sends Ctrl-C: the runner ends the CLI's process group and writes the exit receipt, without a report. A run that finished has already exited. `fleet send` only saves the message: a headless run reads its inbox when it starts.
+- **Limits.** Allow rules in Claude's own settings (or a mod or `PermissionRequest` hook) still approve what they match, in manual mode as in the TUI profile; an owner who allows edits or writing commands there has widened headless reviewers too. Codex's user `config.toml` still applies apart from the sandbox and approval policy the line sets. Neither CLI's network access is changed. A CLI that hangs without exiting keeps its window until `fleet stop`.
+
 ## Keeping models current
 
 Tier models are pinned on purpose: plans record the exact model and cross-family review needs a known family. When a provider ships new models, `fleet models <provider> [filter]` lists what the account offers, then override the tier in the user config (with `family` for a mixed adapter) and run `fleet doctor`. No Fleet release is needed. Shipped defaults are refreshed in releases and noted in the changelog.
@@ -94,11 +171,53 @@ Codex's list comes from `codex debug models`, a debug command that refreshes its
 
 ## Claude Code
 
-The default `claude` adapter uses the normal account and interactive permission controls. `opus`, `sonnet` and `fable` are aliases for the newest model of each line; pin a full ID such as `claude-opus-5-5` when the plan must record an exact version. Effort support depends on the installed CLI and model. Do not respond to a permission denial by switching account or bypassing the host's controls.
+The default `claude` adapter uses the normal account and interactive permission controls, plus Fleet's [hooks](#claude-hooks): each worker's edits are kept to its own files, and a permission prompt or an idle worker wakes the lead as `PERMISSION` or `IDLE`. Its reviewers and investigators launch with `--permission-mode manual`; with hooks their report write is allowed and every other edit is refused by the guard or, if the guard cannot run, asks; with hooks off they ask before writing even their report ([profiles](#permission-profiles)), unless the owner sets `review_transport = "headless"`, which runs them as `claude -p` with those prompts denied ([headless reviewers](#headless-reviewers)). `opus`, `sonnet` and `fable` are aliases for the newest model of each line; pin a full ID such as `claude-opus-5-5` when the plan must record an exact version. Effort support depends on the installed CLI and model. Do not respond to a permission denial by switching account or bypassing the host's controls.
 
 `claude-co` is a disabled example of a second account using `CLAUDE_CONFIG_DIR=~/.claude-co`. Turn it on with `fleet provider enable claude-co` only after the owner has signed that account in. It must receive a self-contained prompt; do not assume the same plugins exist under both configurations. Both accounts use Anthropic-family models, so switching between them does not satisfy cross-family review.
 
 Claude workers start with `--session-id` set to a UUID Fleet records, so `fleet launch --resume` can continue the same conversation with `--resume` after a usage limit resets. A session stays with the account that ran it. Other adapters can opt in through the `session` and `resume` fields in `providers.toml`.
+
+## Claude hooks
+
+The `claude` adapter (and `claude-co`, which `extends` it) sets `hooks = "claude-settings"`. Each launch, `--resume` included, then writes `.fleet/runs/<run>/settings/<id>.json` and passes `--settings <path>` through the launch line's `{settings}` slot. Claude layers that file above the account's and the project's own settings and merges lists, so its hooks and rules add to the owner's ([settings precedence](https://code.claude.com/docs/en/settings#settings-precedence)). It holds:
+
+- **A `PreToolUse` guard** on `Edit|Write|MultiEdit|NotebookEdit`, Claude's file-editing tools. It resolves the path the tool names (`tool_input.file_path`, or `notebook_path`) with `..` and symlinks followed, a relative one against Claude's `cwd`, and allows only the ticket's own files and the worker's own report. Reviewers and investigators may write only their report. Anything else exits 2, which blocks the call, and Claude reads the reason: the file is outside the ticket's scope, so write `Status: blocked` naming it and wait for the lead. A write through a symlink, even one inside the repo, is refused. `fleet grant` updates a running worker's guard before the worker hears of the grant.
+- **`Notification` and `Stop` hooks** that append events to `.fleet/runs/<run>/events/<id>.jsonl`: `permission-prompt` (Claude's `permission_prompt` notification, with its message), `idle` (`idle_prompt`, about a minute after a turn with nothing typed since) and `turn-ended` (each `Stop`, with Claude's last message). Refused edits are logged as `denied`, and a hook that could not decide as `hook-error`.
+- **`"disableAllHooks": false`**, so an owner's own `disableAllHooks` does not switch the guard off. It turns the owner's other hooks back on for that worker too. Managed settings still win over it.
+
+`fleet wait` reads the events file without the lock, as it reads everything else, and wakes the lead once per event: `PERMISSION <id>: <message>; the owner answers it in the worker's pane (fleet agents); the lead never does`, and `IDLE <id>` when an idle worker has not handed back (quoting its last words). A turn that ends never wakes the lead on its own, since a hand-back already does. No keystrokes are ever sent for these events. A screen already reported this way does not also wake as `STALLED`. Other adapters and runs launched before hooks keep the screen-hash `STALLED`, whose line now names a likely approval prompt.
+
+The hooks run `fleet _hook <kind> <scope file> <events file> <token>` (shell form, a 10-second `timeout`). It reads only the small scope file written at launch, `settings/<id>.scope.json`, never `run.json` or the run's lock, and it fails safe. Malformed input, a missing scope file or any other error exits 0, so the action goes ahead and the reason is logged. A hook that times out or crashes is a non-blocking error to Claude, since Fleet sets no `onFailure`. A broken hook never stops a worker. It also never widens one: the settings change no permission mode, so an edit the guard did not refuse meets Claude's own rules and mode as it would without hooks. The scope check (#10) still refuses acceptance of any stray change.
+
+**Allow rules.** The settings file allows, without asking, only paths the guard would let through. A reviewer or investigator gets one rule, for its report: `Edit(//<absolute path>)`, which covers every built-in editing tool. The `//` anchors the rule at the filesystem root, and gitignore's pattern characters (`\ * ? [ ]`) and trailing spaces are escaped, so it matches that file only. A rule Claude cannot read approves nothing, and the edit then asks.
+
+**`scope_permissions`** (under `[defaults]`, off by default) is the owner's opt-in. With it on, a Claude worker keeps the account's mode, and its settings file gets allow rules for exactly its own files and report, and its planned check commands (`Bash(<command>)`, an exact match). A planned command containing `*` gets no rule, because it would match as a wildcard, and so do multi-line ones; a compound command may still ask for its parts. `fleet grant` adds the new file's rule to a running worker's settings; Claude may read that file only at start, so the worker can still be asked about the granted file until it is relaunched. With it off, workers keep the account's own mode and get no rules. Either way, it never allows another file or another command.
+
+Fleet never launches a Claude worker in `acceptEdits`: that mode also approves `mkdir`, `touch`, `rm`, `rmdir`, `mv`, `cp` and `sed` in the working directory, through Bash, where the guard does not look. The hooks narrow the built-in tools only. A Bash command the owner approves, a script it runs, or an organisation policy that blocks non-managed hooks (`allowManagedHooksOnly`) is outside them, which is why the scope check stays.
+
+Turn the hooks off with `hooks = ""` under `[providers.claude]`, or with a `launch` override without `{settings}`. Reviewers then ask before writing their report, and `wait` falls back to `STALLED`. Headless reviewers never get hooks; their own line denies every write.
+
+### What was checked
+
+Checked on 2026-11-05 against the docs and the installed CLI; no real Claude worker was launched with the hooks.
+
+| What | Where it was checked | Result used |
+| --- | --- | --- |
+| Settings shape: `hooks.<Event>` is a list of `{matcher, hooks: [{type: "command", command, timeout}]}` | [hooks](https://code.claude.com/docs/en/hooks), "Hook handler fields" | As shipped. A command without `args` runs through `sh -c` (shell form), so paths are quoted |
+| Matchers: letters, digits, `_`, `-`, spaces, `,` and `\|` only means an exact name or a list of them | hooks, matcher table | `Edit\|Write\|MultiEdit\|NotebookEdit` and `permission_prompt\|idle_prompt` are exact lists; `Stop` takes no matcher |
+| File-editing tools and their path fields: `Write`/`Edit` `file_path` (always absolute), `NotebookEdit` `notebook_path`, `MultiEdit` legacy | hooks "PreToolUse input"; [permissions](https://code.claude.com/docs/en/permissions); [tools reference](https://code.claude.com/docs/en/tools-reference) | All four matched; a relative path is resolved anyway |
+| PreToolUse stdin: `session_id`, `transcript_path`, `cwd`, `permission_mode`, `hook_event_name`, `tool_name`, `tool_input`, `tool_use_id` | hooks, "Common input fields" | The tests feed this exact JSON |
+| Exit codes: 0 goes ahead; 2 blocks a PreToolUse call and Claude gets stderr; any other code, a timeout or a failed start is non-blocking unless `onFailure: "block"`; a hook exit 2 blocks even when an allow rule matches | hooks "Exit code output", "Block the action when a hook fails"; permissions "Extend permissions with hooks" | Deny is exit 2 with a message; everything else exits 0; no `onFailure` |
+| Notification stdin `message`, `title`, `notification_type`; types `permission_prompt` (about 6 s after the prompt shows, with nothing typed) and `idle_prompt` (about 60 s after a turn) | hooks, "Notification" | Two events, no decision (Notification cannot block) |
+| Stop stdin `stop_hook_active`, `last_assistant_message`, `background_tasks`, `session_crons`; exit 2 would keep the turn going | hooks, "Stop" | Always exit 0; the last message is logged |
+| `timeout` in seconds, default 600 for a command hook | hooks, "Common fields" | 10 |
+| `--settings` sits above user, project and local settings and below managed; list keys such as `permissions.allow` merge; `disableAllHooks` follows that precedence | [settings](https://code.claude.com/docs/en/settings); hooks "Disable or remove hooks" | As above |
+| Rule syntax `Bash(cmd)` exact, `Bash(cmd *)` prefix with the bare command; rules are checked deny, then ask, then allow; compound commands need each part allowed | permissions, "Permission rule syntax", "Compound commands" | `Bash` allow rules as above |
+| `Edit(path)` rules cover every built-in editing tool (`Write(path)` rules never match); paths are gitignore patterns, `//path` absolute; a written rule is not escaped for you; an allow rule with an unusable pattern approves nothing | permissions, "Read and Edit" | `Edit(//…)` allow rules, escaped |
+| `acceptEdits` auto-approves edits and `mkdir`, `touch`, `rm`, `rmdir`, `mv`, `cp`, `sed` in the working directory | [permission modes](https://code.claude.com/docs/en/permission-modes), "acceptEdits" | Never used |
+| `--settings <file-or-json>`, `--permission-mode` choices | `claude --help`, 2.1.318 | As above |
+
+**Assumption, not checked live:** that an `Edit(//…)` allow rule from a `--settings` file approves a `Write` to that path in manual mode without a prompt. The docs say so, but no signed-in Claude has run it; if it does not, the reviewer asks for its report write, as with hooks off. Check it with `fleet smoke` on a signed-in Claude and record it here. `tests/test_claude_hooks.py` runs the hooks with the documented JSON, and the strict fake runs a settings file's `PreToolUse` and `Stop` hooks around its own writes. Those tests prove Fleet's half, not Claude's.
 
 ## Extra subscriptions
 
@@ -117,14 +236,16 @@ max = 1
 
 ## Codex
 
-The example adapter uses `workspace-write` with `on-request` approval. Effective network and filesystem permissions still come from the host configuration; neither the adapter nor the preamble guarantees OS isolation. Fleet's worker contract prohibits network calls and package installation regardless of those capabilities. Request owner help for a necessary permission instead of weakening the sandbox.
+Both of the example adapter's [profiles](#permission-profiles) use `workspace-write` with `on-request` approval. Effective network and filesystem permissions still come from the host configuration; neither the adapter nor the preamble guarantees OS isolation. Fleet's worker contract prohibits network calls and package installation regardless of those capabilities. Request owner help for a necessary permission instead of weakening the sandbox.
 
 A Codex worker that needs an approval waits in its pane until the owner answers, because the lead never accepts a prompt for them. Codex 0.159+ can route those prompts to its own reviewer instead: `approvals_reviewer = "auto_review"` (`--approve-for-me` on the command line). It reviews sandbox escalations against the policy and does not widen what the sandbox allows. It is the owner's choice, made once in the user config rather than per run, and it is not a way past a decision the owner owes:
 
 ```toml
 [providers.codex]
-launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c check_for_update_on_startup=false -c approvals_reviewer=auto_review -s workspace-write -a on-request {prompt}"
+launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c check_for_update_on_startup=false -c approvals_reviewer=auto_review {profile} {prompt}"
 ```
+
+An older copy of this line that spells out `-s workspace-write -a on-request` instead of `{profile}` still works; both roles then run it as written.
 
 This is approval routing inside Codex. It is unrelated to Fleet's cross-family review of a ticket's diff, which `review=` controls.
 
@@ -132,7 +253,7 @@ Use model IDs and effort levels supported by the authenticated account. The ship
 
 ## Cursor
 
-The default launches `cursor-agent` with the chosen model and repository trust, retaining interactive permission handling; it does not use `--force`. `--trust` is in the shipped launch line, so Cursor is trusted with or without `auto_trust`. A trusted workspace is not permission for an arbitrary command. Inspect trust or command prompts as part of launch verification.
+The default launches `cursor-agent` with the chosen model and repository trust, retaining interactive permission handling; it does not use `--force`. `--trust` is in the shipped launch line, so Cursor is trusted with or without `auto_trust`; that the interactive TUI honours it is [unverified](#profile-flags-checked). A trusted workspace is not permission for an arbitrary command. Inspect trust or command prompts as part of launch verification.
 
 Cursor can serve several families. The example tiers identify xAI (`grok-…`), Moonshot (`kimi-…`) and Meta (`muse-…`) separately. The lead may choose any model `cursor-agent --list-models` offers (`fleet models cursor gemini` filters them); `family_prefixes` names each one's family. Parameterized IDs must remain a single argument. A model whose name hides its base model needs an exact family entry, especially for cross-family review. A different CLI name alone is not evidence of a different family.
 
@@ -153,7 +274,7 @@ Cursor can serve several families. The example tiers identify xAI (`grok-…`), 
 - Model IDs are `provider/model`. The shipped tiers and login check assume OpenRouter (`opencode auth login`). `opencode models` lists only providers with credentials, so `login = "opencode models openrouter"` with `login_ok = "openrouter/"` is a real sign-in check; point both at the provider you use.
 - It serves many families, so the adapter is `mixed`: every tier carries its family, and `family_prefixes` names the rest by vendor path. Every model `opencode models` lists may be chosen. The shipped tiers use Zhipu, Alibaba and DeepSeek models, which gives cross-family review options outside Anthropic, OpenAI and Google.
 - Effort: the TUI takes no `--variant` (only `opencode run` does), so tiers carry no effort.
-- Permissions: OpenCode's default build agent allows every tool without asking, except paths outside the workspace and repeated identical calls (`opencode debug agent build` shows the resolved rules). Fleet's worker contract is the only limit unless your `opencode.json` sets `permission`; tighten it there, not in the adapter.
+- Permissions: OpenCode's default build agent allows every tool without asking, except paths outside the workspace and repeated identical calls (`opencode debug agent build` shows the resolved rules). Fleet's worker contract is the only limit unless your `opencode.json` sets `permission`; tighten it there, not in the adapter. So both its [profiles](#permission-profiles) are `full-access`, and with the default `permission_ceiling` launch refuses OpenCode and `fleet doctor opencode` fails. The owner chooses one: set `permission` in `opencode.json` (edits allowed, `bash` and `webfetch` set to `ask`) and then `level = "workspace-write"` on its profiles, or raise `permission_ceiling` to `full-access`. Fleet ships no narrower profile because it cannot see `opencode.json` from the launch line, and no read-only agent for reviewers was checked against a real OpenCode.
 - Its sessions get IDs OpenCode picks, so `fleet launch --resume` does not apply.
 
 ## Placeholder adapters
@@ -173,8 +294,24 @@ To turn a placeholder into a working adapter, the owner fills it in under `[prov
 4. Set `login` and `login_ok` to a command that spends no model call and prints a known string only when signed in.
 5. Set `models` if the CLI can list models; otherwise set `models_allow`.
 6. Add `tiers.heavy`, `tiers.standard`, `tiers.light` and `tiers.review` with models the account offers, plus `efforts` if the CLI takes one and `family` (on each tier for a mixed adapter).
-7. Set `placeholder = false`, then run `fleet provider enable <name>` and `fleet doctor <name>`.
+7. Put a `{profile}` slot in `launch` and set `profiles.worker` and `profiles.review`, each with its permission flags in `args` and an honest `level` ([permission profiles](#permission-profiles)). Without them it counts as `workspace-write`.
+8. Set `placeholder = false`, then run `fleet provider enable <name>` and `fleet doctor <name>`.
 
 Then test it as below before routing real work to it.
 
 For every new adapter, test a harmless local ticket, multiple waves, a required review at capacity, process exit confirmation and recovery. Keep unavailable adapters out of auto routing. Login expiry needs the owner. On quota exhaustion the lead may resume after the reset or steer within the run's routing (skill step 1); otherwise it needs the owner. Neither is a reason to ignore the worker contract.
+
+## Config keys
+
+`skill/providers.toml` and the owner's `~/.config/agent-fleet/config.toml` take only the keys below. An unknown key prints a warning on stderr naming the file, the section and the key, with the closest known key when one is near (`[providers.codex.tiers.standard]: unknown key "modle" (did you mean "model"?)`), and the command still runs. **The next version refuses unknown keys**, so fix a warning when you see it.
+
+| Section | Keys |
+| --- | --- |
+| Top level | `defaults`, `providers`, `lead_context` |
+| `[defaults]` | `workspace`, `routing`, `prefer`, `max_parallel`, `review`, `review_rounds`, `gate`, `gate_rounds`, `auto_trust`, `backend`, `tmux_socket`, `max_workers`, `max_wall_minutes`, `scope_ignore`, `permission_ceiling`, `check_policy`, `scope_permissions`, `review_transport`, `headless_timeout_minutes` |
+| `[providers.<name>]` | `enabled`, `placeholder`, `extends`, `bin`, `bin_aliases`, `launch`, `profiles`, `session`, `resume`, `quit`, `login`, `login_ok`, `account_env`, `env`, `trust`, `models`, `model_config`, `default_home`, `model_note`, `models_allow`, `model_families`, `family_prefixes`, `efforts`, `family`, `plugins`, `max`, `tiers`, `hooks`, `headless`, `review_transport` |
+| `[providers.<name>.tiers.<tier>]` | `model`, `effort`, `family` (any tier name) |
+| `[providers.<name>.profiles.<role>]` | `args`, `level`; the roles are `worker` and `review` |
+| `[lead_context.<host>]` | `warn_at`, `dumb_at`; the hosts are `claude` and `codex`. Here another host or key is already an error |
+
+`env`, `family_prefixes`, `model_families` and a `models_allow` table are free-form: their keys are variable names, model IDs or prefixes, so Fleet does not check them. `hooks` is a name (`claude-settings`, or `""` for none). The [providers.toml header](../providers.toml) documents each adapter field; `config.example.toml` comments each `[defaults]` key.

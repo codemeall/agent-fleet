@@ -16,15 +16,41 @@ review = "cross-heavy"
 # Mark the repo trusted in Claude, Codex and Antigravity before each launch, so their first-run
 # "trust this folder?" screen does not stall a worker. Off by default; only the owner turns it on.
 # auto_trust = true
+# The widest launch profile Fleet will start: "read-only", "workspace-write" (the default) or "full-access".
+# Launch refuses, and doctor fails, a provider profile above it; OpenCode's build agent is full-access.
+# permission_ceiling = "workspace-write"
+# Claude workers launch with Fleet's hooks: a guard that refuses edits outside the ticket's files and the worker's
+# report, and events that wake the lead on a permission prompt (PERMISSION) or an idle worker (IDLE). With
+# scope_permissions on, Claude workers may also edit their own files and run their ticket's planned check commands
+# without asking (allow rules for exactly those; the permission mode is unchanged), and nothing else is allowed.
+# Off by default; only you turn it on.
+# scope_permissions = true
+# Reviewers and investigators on Claude or Codex can run headless and read-only by the CLI's own flags: their
+# final message becomes the report, they never stall at a prompt, and their token use goes to `fleet cost`.
+# review_transport = "headless"
+# A headless run not finished after this many minutes (1 to 240) is stopped with a blocked report.
+# headless_timeout_minutes = 30
 # Where workers run: "cmux" (visible panes beside the lead, macOS), "tmux" (headless windows in a detached
 # session; watch them with `fleet agents`) or "auto" (the default: cmux inside cmux, else tmux).
 # backend = "tmux"
 # Headless workers use Fleet's own tmux server (tmux -L fleet). "" puts their sessions on your default server,
 # so `tmux ls` lists them and, inside tmux, `fleet attach` switches to a worker instead of nesting.
 # tmux_socket = "fleet"
+# Caps per run (0, the default, means no cap). Once a run reaches one, Fleet refuses new workers and the lead brings
+# it to you; running workers are never stopped. A run keeps the values it was started with: raising one here
+# applies to new runs, or start a follow-up run (fleet init) for the remaining work. fleet cost shows the use.
+# max_workers counts every worker launch: writers, reviewers, investigators, relaunches and resumes.
+# max_workers = 20
+# max_wall_minutes sums every worker's wall time, running workers included.
+# max_wall_minutes = 600
 # Paths the whole-tree scope check never blames on a worker, besides .fleet/ and gitignored files. "name/" is a
 # directory at any depth, "a/b/" is anchored at the root, anything else is an exact path. Your list replaces this one.
 # scope_ignore = [".scratch/", "node_modules/", "__pycache__/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/"]
+# What plan and add do with a ticket whose checks hold neither a {"run": …} command nor a {"manual": "<reason>"}
+# marker: "refuse" it (the default) or "warn" and save it.
+# check_policy = "refuse"
+# Set only when you intentionally target a validated cmux workspace:
+# workspace = "workspace:3"
 
 # Optional lead context marks in tokens (none by default). Run commands then show the lead's size from warn_at and
 # dumb_at; the lead only tells you, and hands off or prepares for compaction when you ask (fleet handoff).
@@ -34,9 +60,6 @@ review = "cross-heavy"
 # [lead_context.codex]
 # warn_at = 150000
 # dumb_at = 200000
-
-# Set only when you intentionally target a validated cmux workspace:
-# workspace = "workspace:3"
 
 # Models are account-dependent examples: verify availability before assigning work.
 # [providers.codex.tiers.standard]
@@ -54,6 +77,10 @@ review = "cross-heavy"
 # enabled = true
 # [providers.cursor]
 # enabled = false
+
+# Turn Claude's hooks off (reviewers then ask before every edit again, and wait falls back to STALLED):
+# [providers.claude]
+# hooks = ""
 
 # Optional second account. Sign it in first (CLAUDE_CONFIG_DIR=~/.claude-co claude).
 # Other accounts: fleet account add <name> --from claude|codex --dir <path>
