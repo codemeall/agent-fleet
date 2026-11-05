@@ -2,6 +2,19 @@
 
 Use this when the owner hands you work in conversation rather than a ticket folder, or adds work while a run is live. Workers, gates and evidence are the same as for planned tickets (skill steps 3–5); only how the work enters the run differs.
 
+## 0. Fleet or your own subagent
+
+A Fleet worker costs a pane, a prompt file, a report and a verification turn. Before proposing one, check whether your host's own subagent does the job for less:
+
+| The work | Use |
+| --- | --- |
+| A quick read-only lookup your own model can answer: where something is defined, what a function does, which files a change would touch | Your host's subagent (Claude Code's Explore, a Codex `explorer`), or read it yourself |
+| Anything that edits files | Fleet (`implement`): ownership, the scope check and verification only apply there |
+| A question that needs another vendor's model, a long investigation the owner wants verified, or one you want kept out of your context | Fleet (`investigate`) |
+| A second opinion on a diff or plan | Fleet: a reviewer from another model family |
+
+Never use a host subagent to edit files during a run: Fleet's scope check sees its edits as unowned, and its work skips review and evidence.
+
 ## 1. Pick the run
 
 Only one run per checkout may have live workers: `fleet init` and `fleet launch` refuse while another run has any.

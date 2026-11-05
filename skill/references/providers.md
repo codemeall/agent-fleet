@@ -4,6 +4,20 @@
 
 All model IDs and efforts are examples tied to accounts and CLI versions. Before routing, authenticate through the owner's normal process. `doctor` checks binary presence and login signals, including the login command's exit status, and checks every tier model against the account's list where the CLI can list models (`models` field: Cursor, Antigravity, OpenCode, and Codex through `codex debug models`, which also lists each model's efforts). For Codex doctor also shows the configured default from `config.toml`; Claude's `opus`/`sonnet` aliases follow the current model. Doctor spends no model call and does not guarantee model access. A passing doctor is a preflight check, not an end-to-end compatibility claim.
 
+## Tested CLI versions
+
+What each shipped adapter was last checked against, from the changelog and the reviews in this repository. **Live-checked** means a real, signed-in CLI ran in a pane: launch with a first prompt, follow-up input and the quit sequence back to the shell. **Flags read from `--help` only** means the launch line was written from the CLI's help output; no Fleet worker was run on it.
+
+| Adapter | CLI (`bin`) | Version | Checked | How |
+| --- | --- | --- | --- | --- |
+| `claude`, `claude-co` | Claude Code (`claude`) | 2.1.318 (2.1.284 earlier) | 2026-11-04 (2026-09-30) | Flags read from `--help` only |
+| `codex` | Codex CLI (`codex`) | 0.156.1; tier models from 0.159's catalog | 2026-09-30 | Flags read from `--help` only |
+| `cursor` | Cursor Agent (`cursor-agent`) | 2026.09.28-64d2043 | 2026-09-30 | Flags read from `--help` only |
+| `agy` | Antigravity (`agy`) | 1.3.0 live; models and efforts listed on 1.3.1 and 1.4.8 | 2026-10-06 (listing 2026-10-27) | Live-checked on 1.3.0; 1.4.8 only listed, not launched |
+| `opencode` | OpenCode (`opencode`) | 1.18.34 | 2026-10-06 | Live-checked |
+
+`tests/test_adapters_smoke.py` runs every shipped adapter through `fleet launch`, `wait` and `stop` in headless tmux against a fake executable named after its `bin`, which accepts only the exact command line the adapter builds (model, effort, session and resume fragments, Codex's `-c` overrides, Cursor's `--trust`, OpenCode's `--prompt`) and quits only on the adapter's own quit sequence. Those tests use fakes: they prove the launch line's shape and the quit sequence, not that a CLI version accepts them, that the account is signed in or that a model is offered. Re-check a CLI live after it changes its flags, and update this table.
+
 ## Turning providers on and off
 
 Which providers are on is the owner's decision. `fleet doctor` shows each one as `off`, as a sign-in result, or as `PLACEHOLDER`.

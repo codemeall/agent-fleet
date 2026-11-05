@@ -114,6 +114,25 @@ class ProviderConfig(unittest.TestCase):
                          {"model": "gpt-6-luna", "effort": "medium"})
         self.assertEqual(cfg["providers"]["codex"]["bin"], "codex")
 
+    def test_scope_ignore_defaults_and_must_be_relative_paths(self):
+        self.assertEqual(self.cfg["defaults"]["scope_ignore"], [".scratch/", "node_modules/", "__pycache__/",
+                                                             ".pytest_cache/", ".mypy_cache/", ".ruff_cache/"])
+        for bad in ('"dist/"', '["/abs/"]', '["../up/"]', '[""]', '["a/../b"]'):
+            with self.subTest(value=bad):
+                with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
+                    fh.write(f"[defaults]\nscope_ignore = {bad}\n")
+                self.addCleanup(os.unlink, fh.name)
+                with self.assertRaisesRegex(fleet.FleetError, "scope_ignore"):
+                    fleet.load_config(Path(fh.name))
+
+    def test_scope_ignore_matches_directories_at_any_depth_and_exact_paths(self):
+        ignore = [".scratch/", "node_modules/", "web/dist/", "build/out.log"]
+        for path, ignored in ((".scratch/f/t.md", True), ("a/node_modules/x.js", True), ("web/dist/app.js", True),
+                              ("dist/app.js", False), ("build/out.log", True), ("build/other.log", False),
+                              ("node_modules", False), ("src/scratch.py", False)):
+            with self.subTest(path=path):
+                self.assertEqual(fleet.scope_ignored(path, ignore), ignored)
+
     def test_example_config_parses(self):
         with open(ROOT / "config.example.toml", "rb") as fh:
             tomllib.load(fh)
@@ -245,6 +264,13 @@ class Wait(unittest.TestCase):
         ns = self.report.stat().st_mtime_ns + 1_000_000  # distinct mtime even on fast filesystems
         os.utime(self.report, ns=(ns, ns))
 
+    def test_a_hand_back_an_earlier_fleet_already_showed_does_not_wake_again(self):
+        self.write("Status: needs-verification\n")
+        (self.seen / "07").write_text(f"needs-verification|{self.report.stat().st_mtime_ns}")  # status|mtime, as before
+        self.assertEqual(self.scan(), [])
+        self.write("Status: needs-verification\nnew content\n")
+        self.assertEqual(self.scan(), [("07", "needs-verification")])
+
     def test_verification_cycle_wakes_exactly_when_the_worker_hands_back(self):
         self.write("# R\n")                                               # half-written, no status
         self.assertEqual(self.scan(), [])
@@ -257,6 +283,35 @@ class Wait(unittest.TestCase):
         self.assertEqual(self.scan(), [("07", "needs-verification")])
         self.write("Status: verified\n\n## Lead verification\n")         # lead closes it
         self.assertEqual(self.scan(), [])
+
+    def write_in_one_tick(self, text, ns=1_700_000_000_000_000_000):
+        """A coarse-mtime filesystem (HFS+, some CI disks): every rewrite lands in the same mtime tick."""
+        self.report.write_text(text)
+        os.utime(self.report, ns=(ns, ns))
+
+    def test_hand_back_in_the_same_mtime_tick_wakes_again(self):
+        self.write_in_one_tick("Status: needs-verification\n")
+        self.assertEqual(self.scan(), [("07", "needs-verification")])
+        self.write_in_one_tick("Status: changes-requested\n\n## Lead notes\n")
+        self.assertEqual(self.scan(), [])
+        self.write_in_one_tick("Status: needs-verification\n\n## Fixes\n")
+        self.assertEqual(self.scan(), [("07", "needs-verification")])
+        self.assertEqual(self.scan(), [])
+
+    def test_identical_hand_back_in_the_same_mtime_tick_wakes_again(self):
+        for _ in range(2):
+            self.write_in_one_tick("Status: needs-verification\n")
+            self.assertEqual(self.scan(), [("07", "needs-verification")])
+            self.assertEqual(self.scan(), [])
+            self.write_in_one_tick("Status: changes-requested\n")
+            self.assertEqual(self.scan(), [])
+
+    def test_unseen_park_with_new_content_in_the_same_tick_wakes(self):
+        self.write_in_one_tick("Status: needs-verification\n")
+        self.assertEqual(self.scan(), [("07", "needs-verification")])
+        self.write_in_one_tick("Status: changes-requested\n")         # parked and handed back between scans
+        self.write_in_one_tick("Status: needs-verification\n\n## Fixes\n")
+        self.assertEqual(self.scan(), [("07", "needs-verification")])
 
     def test_blocked_wakes(self):
         self.write("**Status:** blocked\n")

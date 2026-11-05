@@ -14,7 +14,7 @@ From the repository, in the intended cmux workspace (or any terminal, for headle
 
 ```sh
 fleet doctor
-fleet init docs-demo --routing single:codex --review off
+fleet init docs-demo --routing single:codex --review off --reason "docs-only demo; lint and prose review are the agreed checks"
 fleet plan docs-demo --file examples/plan.json
 fleet prompt docs-demo overview
 fleet prompt docs-demo glossary

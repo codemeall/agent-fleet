@@ -18,13 +18,17 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`plan`](#plan) | Saves the ticket graph and routing | After the owner approves the plan, before any launch |
 | [`add`](#add) | Appends tickets or inline tasks to a run, before or after launch | The owner hands you new work mid-conversation or mid-run |
 | [`drop`](#drop) | Retires a pending ticket nobody will finish | The owner abandons work, so it stops holding files and keeping its run open |
+| [`grant`](#grant) | Adds files to a pending ticket's scope, before or after launch | A worker needs one more file, or the scope check names a file that is the ticket's own work |
 | [`prompt`](#prompt) | Writes a worker or reviewer prompt | Before each launch |
 | [`launch`](#launch) | Starts a worker in a cmux pane or a headless tmux window | A ticket is ready and its prompt is written |
 | [`peek`](#peek) | Shows the bottom of a worker's screen | After `STALLED`, or when the launch screen shows a prompt |
-| [`send`](#send) | Types a message into a worker's pane | Answering a blocked worker or requesting changes |
-| [`wait`](#wait) | Blocks until something needs the lead | Between actions, while workers run |
+| [`send`](#send) | Saves a message in the ticket's inbox and points the worker to it | Answering a blocked worker or requesting changes |
+| [`wait`](#wait) | Blocks until something needs the lead; with `--gate`, sends failing checks back to the worker first | Between actions, while workers run |
 | [`status`](#status) | Lists workers and report statuses | You need a snapshot after `EXITED` or a recovery |
+| [`review`](#review) | Stops the writer, saves its diff and launches a reviewer from another family | A writer hands back on a ticket that needs review |
+| [`accept`](#accept) | Stops the ticket's workers, verifies the reviewer then the writer, and lists what that unblocks | Your checks and any review are done and the evidence is written |
 | [`stop`](#stop) | Quits workers and confirms they exited | Before review or verification, or before shutdown |
+| [`gate`](#gate) | Runs a ticket's planned check commands and the scope check, and writes the results as evidence | Before verifying a ticket whose `checks` include commands |
 | [`diff`](#diff) | Captures a ticket's changes since launch | Before a cross-family review |
 | [`verify`](#verify) | Accepts a ticket with evidence | After checks and any required review pass |
 | [`recover`](#recover) | Records that a worker's process is gone | `stop` could not confirm the exit and you confirmed it yourself |
@@ -107,10 +111,10 @@ Adds a provider that reuses an adapter (`claude`, `codex`) with its own account 
 ### init
 
 ```text
-fleet init <run> [--backend auto|cmux|tmux] [--workspace <ref>] [--routing <mode>] [--review off|cross-heavy|cross-all]
+fleet init <run> [--backend auto|cmux|tmux] [--workspace <ref>] [--routing <mode>] [--review off|cross-heavy|cross-all] [--reason "<owner's words>"]
 ```
 
-Creates `.fleet/runs/<run>/`, adds it to `.fleet/.gitignore`, and records the HEAD and index baseline. It picks the run's terminal backend, which the run keeps: `--backend`, else `defaults.backend`, else `auto`, which uses cmux inside cmux or when a workspace is named, and headless tmux otherwise. A tmux run gets its own detached session (`fleet-<checkout>-<run>-<hash>`) on Fleet's tmux server (`tmux -L fleet`; `defaults.tmux_socket` changes it) and init prints the `fleet agents` line to relay to the owner. For a cmux run it validates the workspace (`--workspace`, the config default, or the current one) and stores its UUID, because cmux renumbers refs like `workspace:2` when it restarts. It refuses if the run already exists, or if another run in this checkout still has live workers.
+Creates `.fleet/runs/<run>/`, adds it to `.fleet/.gitignore`, and records the HEAD and index baseline. It picks the run's terminal backend, which the run keeps: `--backend`, else `defaults.backend`, else `auto`, which uses cmux inside cmux or when a workspace is named, and headless tmux otherwise. A tmux run gets its own detached session (`fleet-<checkout>-<run>-<hash>`) on Fleet's tmux server (`tmux -L fleet`; `defaults.tmux_socket` changes it) and init prints the `fleet agents` line to relay to the owner. For a cmux run it validates the workspace (`--workspace`, the config default, or the current one) and stores its UUID, because cmux renumbers refs like `workspace:2` when it restarts. It refuses if the run already exists, or if another run in this checkout still has live workers. Under `cross-all` it also refuses when the routing pool alone shows no reviewer could ever differ from a writer's family, for example `single:<provider>` with a single-family adapter; under `cross-heavy` it warns that plan will refuse heavy tickets. `--review off` while the config asks for review needs `--reason` with the owner's words, which the run's decisions keep: review is never turned off silently.
 
 **Use:** once per run. Map the owner's `backend=`, `workspace=`, routing (`auto`, `single:<provider>`, `agents=…`) and `review=` options to these flags. For an existing run, use `resume` instead.
 
@@ -120,9 +124,17 @@ Creates `.fleet/runs/<run>/`, adds it to `.fleet/.gitignore`, and records the HE
 fleet plan <run> --file <plan.json>
 ```
 
-Saves every ticket, blocker, exact file list, tier, provider and decision, and validates dependencies, cycles, scopes and assignments. The plan is frozen once a worker launches. The plan format is in [SKILL.md step 2](../SKILL.md#2-save-a-complete-plan). Each ticket may give `task` (inline text) instead of `ticket`, and `kind: "investigate"` for read-only work that owns no files.
+Saves every ticket, blocker, exact file list, tier, provider and decision, and validates dependencies, cycles, scopes and assignments. When the review mode requires review of a ticket, plan also checks that some provider in the routing pool could review it: turned on, its review-tier model allowed, a known family different from the writer's. That is `fleet review`'s own test without the capacity part. If none could, it refuses, naming the writer's family, the routing and each provider's reason, and saves nothing; see [routing](routing.md#model-family-and-review-policy) for the owner's ways out. The plan is frozen once a worker launches. The plan format is in [SKILL.md step 2](../SKILL.md#2-save-a-complete-plan). Each ticket may give `task` (inline text) instead of `ticket`, and `kind: "investigate"` for read-only work that owns no files.
 
-**Use:** after the owner approves the plan, before the first launch. Record later decisions in `notes.md`; new work goes in with `add`; a launched ticket's changed scope needs a follow-up run ([example 8](examples.md#8-change-scope-after-launch-a-follow-up-run)).
+`checks` is text, or a list that may mix text with commands Fleet can run for you:
+
+```json
+"checks": ["Read the copy against the ticket", {"run": "npm test -- src/api.test.ts", "cwd": "web", "timeout": 120}]
+```
+
+A command needs `run` (a shell command). `cwd` is a directory inside the repository, relative to its root (default `.`; no `..`, absolute paths or symlinks). `timeout` is whole seconds from 1 to 3600 (default 300). Any other key is refused. The worker's prompt lists each command with its directory, and [`gate`](#gate) runs them. A command Fleet cannot accept refuses the whole plan, naming the ticket, and nothing is saved.
+
+**Use:** after the owner approves the plan, before the first launch. Record later decisions in `notes.md`; new work goes in with `add`; a ticket that needs another file gets it with `grant`, and a follow-up run only when grant refuses ([example 8](examples.md#8-change-scope-after-launch)).
 
 ### add
 
@@ -130,9 +142,9 @@ Saves every ticket, blocker, exact file list, tier, provider and decision, and v
 fleet add <run> --file <tasks.json|->
 ```
 
-Appends tickets to a run, before or after its first launch; `-` reads stdin. Same JSON as `plan`. Saved tickets never change. Each entry gives `ticket` (a local file) or `task` (inline text, written to `.fleet/runs/<run>/tasks/<id>.md`), and may set `kind: "investigate"` for read-only work that owns no files. A new ticket whose files overlap an unverified ticket must list it in `blockers`. Added tickets show as `+<id>` in `resume`; added decisions end with `(added <time>)`.
+Appends tickets to a run, before or after its first launch; `-` reads stdin. Same JSON as `plan`. Saved tickets never change. Each entry gives `ticket` (a local file) or `task` (inline text, written to `.fleet/runs/<run>/tasks/<id>.md`), and may set `kind: "investigate"` for read-only work that owns no files. Its `checks` may include commands, as in [`plan`](#plan). A new ticket whose files overlap an unverified ticket must list it in `blockers`. Like `plan`, it refuses a ticket whose required review no provider in the pool could give. Added tickets show as `+<id>` in `resume`; added decisions end with `(added <time>)`.
 
-**Use:** for delegation from the conversation and new work in a live run ([delegation](delegation.md)). Changing an already-launched ticket's scope still needs a follow-up run.
+**Use:** for delegation from the conversation and new work in a live run ([delegation](delegation.md)). To give an existing ticket another file, use [`grant`](#grant).
 
 ### drop
 
@@ -143,6 +155,35 @@ fleet drop <run> <id> --reason <text>
 Marks a pending ticket `dropped`: its files are free for new work, it no longer keeps its run open, and its report (if any) says `Status: dropped` so it stops coming back as `PENDING`. The reason is saved with the run's decisions. It refuses while the ticket's worker or reviewer may be running, and while another pending ticket waits on it. Edits the worker already made stay in the checkout. A dropped ticket cannot be launched, verified or used as a new blocker.
 
 **Use:** only when the owner abandons the work. To change it instead, drop it and `add` a new ticket.
+
+### grant
+
+```text
+fleet grant <run> <id> <file>... --reason <text> [--accept-current]
+```
+
+Adds exact files to a pending `implement` ticket, before or after its launch, so one more file doesn't need a follow-up run. The files join the ticket's scope wherever Fleet reads it: `resume`, `diff`, launch's overlap checks and [the scope check](#the-scope-check). The grant is saved on the ticket and in the run's decisions as `Granted <files> to <id>: <reason> (<time>)`, which dependents' prompts hand down. A file already in the scope is skipped.
+
+Once the ticket has launched, a granted file's baseline is its content at the ticket's first launch, not its content now, so an edit the worker already made to it shows in the ticket's diff and goes to review. Fleet rebuilds that content from the launch snapshot:
+
+- a file that was clean at launch: its content in that launch's HEAD (absent if HEAD lacked it);
+- a file that was already changed at launch: Fleet kept only its fingerprint, so it uses the file while it is unchanged since, and otherwise refuses, because the diff could not show what the worker did to it. Look at the file with the owner; `--accept-current` then takes its current content as the baseline, and the decision says so;
+- a file another ticket owned while this one ran: its current content, because its changes are that ticket's.
+
+Before launch there is nothing to rebuild: launch captures the baseline.
+
+It refuses, granting nothing:
+
+- an `investigate`, verified or dropped ticket;
+- a file a live worker of another ticket holds;
+- a file another unverified ticket owns, unless one of the two waits on the other (the rule `add` uses);
+- any grant while the ticket's reviewer may be running.
+
+A live worker gets an inbox message naming the files and the reason, and its pane gets the pointer, as with [`send`](#send); if typing the pointer fails, grant exits 1 with the grant and message saved, so don't grant again. A worker that launched before but isn't running reads the message when relaunched. When the ticket's prompt is already written, grant says its scope line is stale: regenerate it with `fleet prompt <run> <id> --force` before the next launch.
+
+A review captured before the grant goes stale once a granted file differs from its baseline: `verify` refuses until you capture a fresh diff and review.
+
+**Use:** when a worker reports it needs another file, or the scope check names a file that is the ticket's own work. Ask the owner first when the file widens what the ticket set out to change. When grant refuses because another ticket holds the file, wait until that ticket is verified, or use a follow-up run ([example 8](examples.md#8-change-scope-after-launch)).
 
 ## Launching and talking to workers
 
@@ -155,18 +196,20 @@ fleet prompt <run> <review-id> --review-of <id> --diff <diff-file> [--force]
 
 Writes `.fleet/runs/<run>/prompts/<id>.md` from the saved ticket, the worker rules, `.fleet/rules.md`, and the ticket's `context` and `checks`. If either is missing from the plan, the prompt keeps a `<!-- LEAD: … -->` comment for you to fill; `launch` refuses until you do. With `--review-of`, it writes a reviewer prompt instead; the writer must be stopped and the diff must match its current changes. `--force` overwrites an existing prompt, but never a live worker's. For an `investigate` ticket it writes a read-only investigator prompt instead of the worker rules; `--review-of` refuses one, since it has no diff.
 
-**Use:** before each launch, and before each review.
+A ticket's prompt (not a reviewer's) also gets a "Since this ticket was planned" section, because the plan is frozen at the first launch and its `context` is what you knew then. For each blocker: once verified, the blocker's files that changed since its launch and its report above `## Appendix` (without its title, `Status:` line and `fleet` header; at most 40 lines, then the full report's path); before that, a line saying it is not verified yet. Then the decisions recorded after `plan` (by `add`, `drop` and accepted out-of-scope changes; in a run planned by an earlier Fleet, those stamped with a time), and the path of `notes.md` when it exists. A ticket with none of these gets no section. The prompt records which blockers were verified when it was written.
+
+**Use:** before each launch, and before each review. Write a dependent's prompt after its blockers are verified, or regenerate it then with `--force`, so it hands down their work.
 
 ### launch
 
 ```text
 fleet launch <run> <id> <provider> --tier heavy|standard|light|review
              [--model <m>] [--effort <e>] [--family <f>] [--pane <ref|uuid|index>] [--resume]
-             [--settle <seconds>]
+             [--settle <seconds>] [--extra-round <owner's words>]
 fleet launch <run> --ready [--pane <ref|uuid|index>]
 ```
 
-Starts the worker in its own cmux pane, or its own window of the run's tmux session, with the prompt. The provider, tier and pins must match the saved plan; a steer (see `steer`) may change the provider and model, and launch prints `steered (<tier>): …`. Launch enforces blockers, file ownership, capacity and any hold.
+Starts the worker in its own cmux pane, or its own window of the run's tmux session, with the prompt. The provider, tier and pins must match the saved plan; a steer (see `steer`) may change the provider and model, and launch prints `steered (<tier>): …`. Launch enforces blockers, file ownership, capacity, any hold and the ticket's [review rounds](#review-rounds). If a blocker was verified after the ticket's prompt was written, launch still starts the worker but warns on stderr that the prompt does not hand down that blocker's work; regenerate it with `fleet prompt <run> <id> --force` before the next launch. `--ready` writes a missing prompt itself, so that one is current; it does not rewrite one you wrote earlier.
 
 Under tmux each worker gets a new window, with no limit; the window stays after the worker exits, so its screen and scrollback stay readable until `stop --close`. Fleet strips the lead's session variables (such as `CLAUDECODE`) from the worker's environment.
 
@@ -182,14 +225,15 @@ screen after 5s:
     1. Yes, proceed
 ```
 
-`--ready` launches every ticket that can start now, heaviest first: never launched, blockers verified, files clear of running work, a complete prompt (written for it when the plan has `context` and `checks`), and room under `max_parallel` and the provider's `max` (the steered provider's, under a steer). It prints `LAUNCHED <id> <provider>:<model>[@<effort>] <tier> <surface>` or `SKIPPED <id>: <reason>` per ticket (`pane limit` when every pane has a live worker), `NONE ready` when nothing started, and no worker screens. If a launch fails after cmux was asked for a pane, it stops there, lists the tickets it did not attempt, and asks you to inspect that worker first. It takes no ticket, provider, pins or `--settle`, and never launches reviewers.
+`--ready` launches every ticket that can start now, heaviest first: never launched, blockers verified, files clear of running work, a complete prompt (written for it when the plan has `context` and `checks`), and room under `max_parallel` and the provider's `max` (the steered provider's, under a steer). It prints `LAUNCHED <id> <provider>:<model>[@<effort>] <tier> <surface>` or `SKIPPED <id>: <reason>` per ticket (`pane limit` when every pane has a live worker), `NONE ready` when nothing started, and no worker screens. If a launch fails after cmux was asked for a pane, it stops there, lists the tickets it did not attempt, and asks you to inspect that worker first. It takes no ticket, provider, pins, `--settle` or `--extra-round`, and never launches reviewers.
 
 - `--pane` (cmux only) picks the pane to split, replace or add a tab to.
 - `--family` names the model family when an account-specific model isn't recognized.
 - `--resume` continues the stopped worker's own session (same provider and account, adapters with `resume` such as Claude), for example after a usage limit resets.
 - `--settle` sets the seconds before the screen is printed (default 5, at most 30; 0 skips it).
+- `--extra-round` allows one more round once the ticket's review rounds are used up, in the owner's words ([review rounds](#review-rounds)).
 
-**Use:** for each ready ticket, and with `--tier review` for each reviewer. Read the printed screen; `wait` covers a prompt that appears later.
+**Use:** for each ready ticket, and with `--tier review` for a reviewer you launch yourself ([`review`](#review) launches one for you). Read the printed screen; `wait` covers a prompt that appears later.
 
 ### peek
 
@@ -204,12 +248,24 @@ Prints the last 20 lines of the worker's screen, or `N`.
 ### send
 
 ```text
-fleet send <run> <id> <text ...>
+fleet send <run> <id> (<text ...> | --file <path|->) [--changes] [--key <k>]
 ```
 
-Types the text into the worker's pane and presses Enter. `wait` then expects a response, so a silent worker shows as `STALLED`.
+Appends the message as `## Message N (<time>)` to the ticket's inbox, `.fleet/runs/<run>/inbox/<id>.md`, then types one line into the worker's pane and presses Enter:
 
-**Use:** answering a `blocked` report, or sending a bounded fix list after setting the report to `Status: changes-requested`. Save decisions to `notes.md`. Never use it to accept a trust, permission or login prompt for the owner. Trust prompts go away only when the owner sets `auto_trust` ([Folder trust](providers.md#folder-trust)).
+```text
+Lead message 2: read "## Message 2" in /repo/.fleet/runs/settings/inbox/api-client.md, then continue.
+```
+
+So a message can span lines and still arrive as one input, and every message stays on record. Numbers continue across relaunches of the same ticket. Every worker, investigator and reviewer prompt, and the `launch --resume` line, names the inbox and tells the worker to read it when it starts. `wait` then expects a response, so a silent worker shows as `STALLED`.
+
+- `--file` reads the message from a file, or from stdin with `-`. Give text or `--file`, not both.
+- `--changes` requests changes: the report must say `needs-verification`, and send sets it to `Status: changes-requested` before the message goes out, so `wait` ignores it until the worker hands back again.
+- `--key` names the message, so a retry is safe: a key already used for this ticket sends nothing and prints which message it was.
+- With no running worker for the ticket, the message is only saved; the worker reads it when launched.
+- If typing the pointer fails, the message is still saved and send exits 1 saying so. Don't resend it: the worker reads it when it next checks its inbox. `fleet peek` shows the pane.
+
+**Use:** answering a `blocked` report, or sending a bounded fix list with `--changes`. Save decisions to `notes.md`. Never use it to accept a trust, permission or login prompt for the owner. Trust prompts go away only when the owner sets `auto_trust` ([Folder trust](providers.md#folder-trust)).
 
 ## Watching
 
@@ -217,7 +273,7 @@ Types the text into the worker's pane and presses Enter. `wait` then expects a r
 
 ```text
 fleet wait <run> --timeout <seconds> [--stall <seconds>] [--interval <seconds>] [--any-change]
-           [--settle <seconds>]
+           [--settle <seconds>] [--gate | --no-gate]
 ```
 
 Blocks until something needs the lead, then prints it and exits 0. On timeout it prints `TIMEOUT` and exits 2.
@@ -232,12 +288,35 @@ Blocks until something needs the lead, then prints it and exits 0. On timeout it
 | `HOLD` | Launches are held and no worker is running | Handle `PENDING` lines, tell the owner, end your turn |
 | `TIMEOUT` | Nothing new | Handle `PENDING` lines, otherwise wait again |
 | `PENDING <id> [status]` | A report is still waiting on the lead | Handle it |
+| `SCOPE <path> (<kind>) …` | A file outside every ticket changed while workers ran; it never wakes the lead on its own | Find out who changed it ([the scope check](#the-scope-check)) |
+| `GATE-FAILED <id> after N rounds: <summary>; evidence <path>` | With `--gate`: the ticket's checks still fail after its gate rounds | Read the evidence, then decide ([the gate loop](#the-gate-loop)) |
 
 A `REPORT` line ends with the report's path and, for a report with an `## Appendix`, the lines above it: `(read lines 1-34 of 180; appendix below)`. Read those lines; the appendix holds supporting detail for a line you doubt.
+
+When the report opens with its `fleet` block (the JSON header in the report template), the summary sits between the status and the path:
+
+```text
+REPORT api [needs-verification] criteria 5/5, checks 2/2 exit 0, findings 0, questions 0, files in scope <path>  (read lines 1-34 of 180; appendix below)
+```
+
+`criteria` counts those met, `checks` those that exited 0, `findings` adds a count by severity when there are any (`findings 3 (1 high, 2 low)`), and `questions` counts open questions. Fleet then checks the header against the run and appends what contradicts it after `header:`: a path outside an implement ticket's files (`header: src/x.py outside scope`), any file listed by a reviewer or investigator, a planned check missing or without an integer exit (`header: npm test not reported`), or a criteria count unlike the source ticket's `- [ ]` / `- [x]` lines. A header Fleet cannot read shows only the reason, such as `header: invalid JSON`. A report without the block wakes exactly as before. The header only summarizes and never sets status. Read the prose whenever the summary shows unmet criteria, a failed check, a finding, a question or a `header:` problem, and whenever the summary is missing.
 
 `--timeout` is at most 600; use the longest your host allows (540 in Claude Code), or run it in the background. `--interval` (default 10) sets how often it polls. `--any-change` wakes on any report change. `--settle` (default 5, at most 30) keeps gathering events for that long after the first, never past `--timeout`, so workers finishing together cost one wake; 0 returns at once.
 
 **Use:** whenever workers are running and you have nothing else to do. Run one wait at a time: a wait consumes the events it prints. End a background wait before `handoff`.
+
+#### The gate loop
+
+`--gate` (or `gate = true` under `[defaults]` in the owner's config; off by default; `--no-gate` turns it off for one wait) runs [`gate`](#gate) for you on each hand-back that can still be fixed, before you hear of it, so a failing check goes straight back to the worker. It is the cross-vendor form of Claude Code's `TaskCompleted` hook and Codex's `SubagentStop` block. It acts when an `implement` ticket with planned commands reports `needs-verification` while its writer is still running; every other report wakes you exactly as without `--gate`. The checks run as `fleet gate` runs them (from the repository, the same environment rules, each `timeout`) and write the same evidence file, `.fleet/runs/<run>/evidence/<id>.gate.md`. Then:
+
+- **Pass:** one wake, the `REPORT` line with the gate's result after the header summary: `REPORT api [needs-verification] criteria 5/5, …, files in scope; gate 2/2 passed, scope ok <path>`. [`accept --gate`](#accept) can reuse this gate.
+- **A check fails, with rounds left:** no wake. Fleet appends an inbox message to the worker with each failing command, its exit code (or timeout) and the last 40 lines of its output, quoted as data, telling it to fix the cause in its own files and set `Status: needs-verification` again (or `blocked`, when the failure comes from a file it does not own). It parks the report as `changes-requested`, as `send --changes` does, types the inbox pointer and keeps waiting. A ticket gets `gate_rounds` of these messages (under `[defaults]`, a whole number from 1 to 5, default 2; counted per ticket in run state).
+- **Rounds used up:** `GATE-FAILED api after 2 rounds: 1/2 passed, scope ok (npm test: exit 1); evidence <path>`. The report stays at `needs-verification`, and each later failing hand-back of the ticket wakes you the same way. Repair it yourself with `send --changes`, or take it to the owner.
+- **Scope:** a file outside every ticket's scope that changed since the writer launched is never sent to the worker, whatever the checks did. You get the `REPORT` line with the gate's result and a `SCOPE` line per file; find out who changed it ([the scope check](#the-scope-check)). Files the loop's own commands wrote during this gate (Fleet compares the tree before and after them) never fail it and never show as `SCOPE` lines; the `REPORT` line says `checks wrote N file(s) outside every ticket`. A worker was running, so they are not recorded as check output either: `diff`, `verify` and `accept` still name them.
+
+`wait` still holds no lock and saves nothing while checks run. Sending a round needs the run's lock for a moment (to save the message, park the report and count the round, with run state reloaded inside the lock). Fleet tries it without waiting: if one of your commands holds it, that ticket is skipped for now and retried on the next poll from the same result, without running the checks again. A wait that times out first prints the report as `PENDING`, and the next wait gates it again; so does the next wait after one that was ended mid-gate. A gate that cannot run at all (a Git error, say) wakes you with `gate not run (<reason>)` on the `REPORT` line, so a hand-back is never lost. If typing the pointer fails, the message is still saved and the report parked; you get `UNREACHABLE <id>: gate round N is saved …` (don't resend it).
+
+Other tickets' events are picked up as soon as a gate finishes, and wake you together with it. A check is never cut short by `--timeout`: a gate that runs past it finishes first, so `wait` then returns late, by up to the ticket's check timeouts; give long checks a background wait. Run state keeps `gate` and `gate_rounds` from when the run started, like `review_rounds`.
 
 ### status
 
@@ -251,6 +330,90 @@ Reconciles exit receipts, then lists each worker's provider and model, pane, sta
 
 ## Review and acceptance
 
+`review` and `accept` are the usual path. Each runs the commands after them (`stop`, `diff`, `prompt`, `launch`, `gate`, `verify`) in order, so every check those make still applies; use the commands one at a time when you need a step in between, such as reading the reviewer prompt before launch ([example 4](examples.md#4-cross-family-review-with-a-fix-round)).
+
+### review
+
+```text
+fleet review <run> <id> [--provider <p> [--model <m>] [--effort <e>] [--family <f>]] [--as <reviewer-id>]
+             [--pane <ref|uuid|index>] [--settle <seconds>] [--unowned-ok <reason>]
+             [--extra-round <owner's words>]
+```
+
+Starts a cross-family review of a ticket in one call:
+
+1. `stop` the writer and confirm its exit (a writer already stopped is left as it is);
+2. `diff` into `.fleet/runs/<run>/evidence/<id>.diff`, so [the scope check](#the-scope-check) and the diff's other refusals apply; `--unowned-ok` is passed to it;
+3. `prompt --review-of` for the reviewer, `review-<id>` unless `--as` names it; a new round replaces the last round's prompt, never a running reviewer's;
+4. `launch --tier review`, which prints the reviewer's first screen as `launch` does.
+
+Without `--provider` it chooses the reviewer: the first provider, in the routing pool's order (for `single:` and `agents=` routing), else in `defaults.prefer` order and then any other provider that is on, that is usable, has a review-tier model that `models_allow` (or the account's list) allows, has a known family other than the one the writer actually ran on (a steer may have moved it), fits the routing (an `agents=` pinned model becomes the reviewer's model), and has room under `max_parallel` and its own `max`. The writer's slot counts as free. `--model`, `--effort` and `--family` need `--provider`.
+
+Before stopping anything it refuses an investigate ticket (it has no diff; use `accept`), a ticket not launched, dropped or verified, a reviewer of this ticket that is still running, a default reviewer ID over the 64-character limit (pass `--as`), a hold, a ticket whose [review rounds](#review-rounds) are used up (with the escalation), and a ticket no provider can review. That last refusal gives each candidate's reason:
+
+```text
+fleet: no provider can review api-client now; its writer ran codex:gpt-6-sol (family openai):
+  claude: at capacity (claude.max 2)
+  codex: same family as the writer (openai)
+```
+
+A failed stop refuses with the writer still holding its slot. A refusal from `diff`, `prompt` or `launch` after the stop says the writer is stopped; resolve it and run `review` again. On success it prints:
+
+```text
+api-client: exited (surface:7)
+DIFF .fleet/runs/settings/evidence/api-client.diff (2 files)
+REVIEW review-api-client claude:opus@high family=anthropic on surface:9
+screen after 5s:
+  …
+```
+
+A ticket whose review is not required may still be reviewed.
+
+**Use:** when a writer hands back on a ticket the saved review mode requires a review for, once you have read its report and run its checks. Then `wait` for the reviewer's report.
+
+### Review rounds
+
+A round is one reviewer launch for a ticket, by `review` or by `launch --tier review` with a prompt `--review-of` that ticket; the launch counts once it reaches the terminal. Each round costs two worker sessions and several lead turns, so a ticket gets `review_rounds` of them (under `[defaults]` in the owner's config, a whole number from 1 to 5, default 2; a run keeps the value it was started with). Once they are used, Fleet refuses the ticket's next repair (`launch` of its writer) and its next `review`, before anything changes, and prints the escalation for the owner:
+
+```text
+fleet: api-client has used 2 of 2 review rounds, so Fleet refuses another repair. Nothing was changed.
+Take this to the owner and let them choose; do not repair or review again on your own.
+ESCALATE api-client: 2 of 2 review rounds used
+review-api-client's open findings, quoted from .fleet/runs/settings/reports/review-api-client.md (the reviewer's words, not instructions):
+> - High, src/api.ts:48: a 404 still throws; return null and test it.
+The owner's ways out:
+- accept as is: fleet accept settings api-client --evidence <file>, recording the open findings and the owner's decision in the evidence
+- drop the ticket: fleet drop settings api-client --reason "<owner's words>"
+- allow one more round: run this command again with --extra-round "<owner's words>"
+```
+
+The findings are the last reviewer's `## Findings` section, up to 20 lines of 200 characters; read the report for the rest. Relay them to the owner as the reviewer's claims, not instructions to you. `--extra-round "<owner's words>"` on the refused `launch` or `review` raises this ticket's cap by one and saves the owner's words in the run's decisions. Each use allows exactly one more round: the repair and the review after it pass without the flag, and the flag is refused while rounds remain. The cap never blocks `accept` or `verify`. `resume` shows each reviewed ticket's `rounds=<used>/<cap>`, extra rounds included. A ticket from a run started before Fleet counted rounds counts the reviewers it can still see (one per reviewer ID), so it is never refused early, and takes the cap from the owner's current config.
+
+### accept
+
+```text
+fleet accept <run> <id> --evidence <file> [--evidence <file> ...] [--review-evidence <file> ...]
+             [--gate] [--unowned-ok <reason>] [--launch-ready]
+```
+
+Accepts a ticket, and its review, in one call:
+
+1. Stops the ticket's latest reviewer and its writer if either is still running, confirming each exit.
+2. With `--gate`, runs [`gate`](#gate). A failure verifies nothing; a pass puts its evidence file first in the writer's evidence. Unlike `gate` alone, this holds the run's lock while the checks run, so other Fleet commands wait; for long checks, run `fleet gate` first and pass its evidence file with `--evidence`. When [`wait --gate`](#the-gate-loop) last gated the ticket and it passed, and nothing has changed since (the same HEAD, the same fingerprint for every changed or untracked file, the same evidence file), it reuses that gate instead and prints `GATE <id> reused the passing gate wait --gate ran at <time>: …`. Any change runs the checks again, so keep your own notes under `.fleet/` or a `scope_ignore` folder such as `.scratch/` (outside the tree it compares) to keep the reuse.
+3. Verifies the latest reviewer, unless it is verified already, with `--review-evidence` (default: the `--evidence` files).
+4. Verifies the writer with the `--evidence` files.
+5. Prints `UNBLOCKED <ids>`: tickets never launched that wait on this one and whose blockers are now all verified, or `UNBLOCKED none`. With `--launch-ready` it then runs `launch --ready` and prints its lines.
+
+An investigate ticket, or one whose review is not required, is accepted without a reviewer. If you reviewed it anyway, that reviewer is verified first, and one that has not handed back blocks `accept` (use `verify` to accept without it).
+
+Before stopping anything, and again before the first verify, it checks what `verify` and the gate would refuse for both workers and names every problem in one refusal: a missing or stale required review, a report not at `Status: needs-verification`, a missing or empty evidence file, `--gate` on a ticket with no runnable checks, and files outside every ticket's scope. `--unowned-ok` records the owner's reason for those before the gate runs, so the gate's own scope check passes too. If `verify` still refuses the writer after the reviewer was verified, `accept` says the reviewer's verification is recorded and the writer's is not; resolve it and run `accept` again with the same evidence, which skips the verified reviewer.
+
+Header problems in either report print as `verify` warnings on stderr and never refuse.
+
+It holds the run's lock throughout, gate included. To send a failing check back to a writer that is still running, use [`wait --gate`](#the-gate-loop) or run `gate` on its own first: after `accept --gate` fails, the writer is stopped and needs a relaunch to fix it.
+
+**Use:** once the reviewer's report is in (or the writer's, when no review is required) and your evidence is written. Only then update the source ticket.
+
 ### stop
 
 ```text
@@ -261,30 +424,47 @@ Sends each worker its quit keys and waits up to `--timeout` seconds (default 10,
 
 **Use:** before capturing a review diff, before verifying, after a reviewer finishes, and with `--all` before the machine, cmux or the tmux server shuts down.
 
+### gate
+
+```text
+fleet gate <run> <id> [--output <file>]
+```
+
+Runs the ticket's `checks` commands in plan order, each with `/bin/sh -c` from its `cwd`, with no stdin, without the lead's session variables (`CLAUDECODE`, `TMUX` and the like), and killed at its `timeout`. Then it runs [the scope check](#the-scope-check) against the ticket's launch snapshot. It writes the evidence to `.fleet/runs/<run>/evidence/<id>.gate.md` (or `--output`): each command, its directory, exit code or `timed out after <N>s`, and duration; the last 40 lines of each failing command's output; and the scope result. It prints one line, then a line per failure and per file outside every ticket's scope:
+
+```text
+GATE api 2/3 passed, scope ok; evidence .fleet/runs/demo/evidence/api.gate.md
+FAIL npm test -- src/api.test.ts: exit 1
+```
+
+It exits 1 when a command fails or times out, or a file outside every ticket's scope changed; otherwise 0. The scope reads `scope not checked (not launched yet)` before launch, and `(no whole-tree snapshot)` for a worker launched by an earlier Fleet. It works for `implement` and `investigate` tickets, whether or not the worker is still running; a ticket with only prose checks is refused (run those by hand), and so is a reviewer's ID. It changes no run state and takes no lock, so other commands keep working during long checks. Prose checks are not run: record them in your own evidence file.
+
+**Use:** after a worker hands back, instead of retyping its checks. Read the evidence, then pass it to `verify` with your own notes: `fleet verify <run> <id> --evidence <gate-file> --evidence <your-notes>`. The combined-tree checks (full suite, typecheck, build) stay your batch step. With [`wait --gate`](#the-gate-loop), wait runs it on each hand-back of a running writer and writes the same file, so you need not run it again.
+
 ### diff
 
 ```text
-fleet diff <run> <id> [--output <file>]
+fleet diff <run> <id> [--output <file>] [--unowned-ok <reason>]
 ```
 
-Prints or saves the ticket's changes since launch, including new files. The writer must be stopped and no live worker may own its files.
+Prints or saves the ticket's changes since launch, including new files. The writer must be stopped and no live worker may own its files. It refuses, like `verify`, while [files outside every ticket's scope](#the-scope-check) have changed since the writer launched.
 
-**Use:** to capture the diff for `prompt --review-of`.
+**Use:** to capture the diff for `prompt --review-of`; [`review`](#review) runs it for you.
 
 ### verify
 
 ```text
-fleet verify <run> <id> --evidence <file>
+fleet verify <run> <id> --evidence <file> [--evidence <file> ...] [--unowned-ok <reason>]
 ```
 
-Accepts a ticket or a review. The worker must have exited, its report must say `Status: needs-verification`, and for a writer, any required review must be verified and match the current diff. It sets the report to `verified`, appends the evidence, records `verified_at` on the worker (shown by `resume --json`), and unblocks dependents.
+Accepts a ticket or a review. Repeat `--evidence` to record several files, such as a `gate` file and your own notes; they are read in order, each must be non-empty, and they are recorded together. The worker must have exited, its report must say `Status: needs-verification`, and for a writer, any required review must be verified and match the current diff. No file outside every ticket's scope may have changed since the worker launched ([the scope check](#the-scope-check)). It sets the report to `verified`, appends the evidence, records `verified_at` on the worker (shown by `resume --json`), and unblocks dependents. A missing header, or one with a problem [`wait`](#wait) would name, prints a `WARNING <id> header…` line on stderr; it never refuses on the header alone.
 
-**Use:** after running the ticket's checks yourself. Verify the reviewer first, then the writer, each with its own evidence file. Only then update the source ticket.
+**Use:** after running the ticket's checks yourself. Verify the reviewer first, then the writer, each with its own evidence file; [`accept`](#accept) does both. Only then update the source ticket.
 
 ### recover
 
 ```text
-fleet recover <run> <id> --evidence <file>
+fleet recover <run> <id> --evidence <file> [--evidence <file> ...]
 ```
 
 Records that a worker's process is gone when `stop` couldn't confirm it, for example after a crash or a shutdown. It frees the slot. It doesn't accept the work.
@@ -297,9 +477,18 @@ Records that a worker's process is gone when `stop` couldn't confirm it, for exa
 fleet check <run>
 ```
 
-Compares the current HEAD and index with the baseline from `init`. Exits 1 and lists changes if someone committed or staged during the run. It can't prove no Git action happened in between.
+Compares the current HEAD and index with the baseline from `init`. Exits 1 and lists changes if someone committed or staged during the run. It can't prove no Git action happened in between. A `NOTE` also lists files outside every ticket's scope that changed since `init` (the owner's edits, or a worker's outside its scope); it does not change the exit code.
 
 **Use:** before finishing a run. Investigate any difference with the owner.
+
+### The scope check
+
+A worker's diff covers only its own files, so Fleet also compares the whole checkout. At each launch it records HEAD and a fingerprint (mode and Git blob ID) of every changed or untracked file; nothing is written to `.git`. `diff` and `verify` (and so `review` and `accept`) then refuse while any file changed since that worker launched, unless a ticket owns it:
+
+- a ticket owns its files from its first launch until it is verified or dropped, so work running alongside is never blamed on this worker;
+- never counted: `.fleet/`, gitignored files, the run's ticket files, files the lead handed Fleet (`plan`/`add --file`, `diff --output`, `--evidence` and `--review-evidence`, `prompt --diff`; a `gate --output` inside the checkout counts once `verify` takes it as `--evidence`), files `fleet gate`'s own commands wrote while no worker was running (until they change again), and the owner's `scope_ignore` list under `[defaults]` (default `[".scratch/", "node_modules/"]` plus the `__pycache__/`, `.pytest_cache/`, `.mypy_cache/` and `.ruff_cache/` caches; `name/` is a directory at any depth, `a/b/` is anchored at the root, anything else an exact path; your list replaces the default).
+
+Reviewers and investigators own no files, so any change during their run counts. The refusal lists each file as `changed`, `created`, `deleted` or `mode changed`. Ways out, each recorded in the run's decisions: the owner reverts the file; when it is the ticket's own work, [`fleet grant`](#grant) adds it to the ticket, so it enters the ticket's diff against its launch content, and its review; `fleet drop` retires the ticket; or, for the owner's own edits only, `--unowned-ok "<owner's words>"` on `diff`, `verify`, `review` or `accept` accepts that exact content (a later change to the file counts again). `stop` lists such files as soon as a worker exits, and `wait` adds a `SCOPE` line to a wake it is already making. With [`wait --gate`](#the-gate-loop), files the loop's own commands wrote never wake you and are never sent to the worker, but they still count here, since a worker was running. Workers launched by an earlier Fleet have no snapshot; their check is skipped with a note.
 
 ## Continuity
 
@@ -309,7 +498,7 @@ Compares the current HEAD and index with the baseline from `init`. Exits 1 and l
 fleet resume <run> [--json]
 ```
 
-Reconciles exit receipts and prints the run's options, any active steer or hold, one line per ticket, the decisions, each worker's state, report and `pid`, and the path to `notes.md`. `--json` prints the full records. A run created before init stored the workspace's UUID gets a `workspace: … is a cmux ref` line: after a cmux restart, confirm the ref still names the run's workspace before launching.
+Reconciles exit receipts and prints the run's options, any active steer or hold, one line per ticket (with `rounds=<used>/<cap>` for a ticket that needs review or has had one, see [review rounds](#review-rounds)), the decisions, each worker's state, report and `pid`, and the path to `notes.md`. `--json` prints the full records. A run created before init stored the workspace's UUID gets a `workspace: … is a cmux ref` line: after a cmux restart, confirm the ref still names the run's workspace before launching.
 
 **Use:** when the named run already exists, after a compaction (`LEAD compacted …`), and when starting as a fresh lead. Then read `notes.md` and handle what the latest `## Handoff` entry lists as awaiting you. Never `init` a replacement run.
 

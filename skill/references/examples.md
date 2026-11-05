@@ -11,7 +11,7 @@ Command sequences for the cases the skill describes in prose. Each uses the run 
 - [5. An evidence file](#5-an-evidence-file)
 - [6. Repair or relaunch a stopped worker](#6-repair-or-relaunch-a-stopped-worker)
 - [7. Recover a worker whose exit cannot be confirmed](#7-recover-a-worker-whose-exit-cannot-be-confirmed)
-- [8. Change scope after launch: a follow-up run](#8-change-scope-after-launch-a-follow-up-run)
+- [8. Change scope after launch](#8-change-scope-after-launch)
 - [9. Finish the run](#9-finish-the-run)
 - [10. Delegate mid-conversation](#10-delegate-mid-conversation)
 - [Handing off the lead](#handing-off-the-lead)
@@ -22,7 +22,7 @@ Command sequences for the cases the skill describes in prose. Each uses the run 
 | --- | --- |
 | `/fleet -- .scratch/settings/issues` | `fleet init settings` (routing and review from the owner's config) |
 | `/fleet auto review=cross-all -- …` | `fleet init settings --routing auto --review cross-all` |
-| `/fleet single:codex review=off -- …` | `fleet init settings --routing single:codex --review off` |
+| `/fleet single:codex review=off -- …` | `fleet init settings --routing single:codex --review off --reason "owner: review=off"` |
 | `/fleet agents=codex,claude:sonnet -- …` | `fleet init settings --routing agents=codex,claude:sonnet` |
 | `/fleet workspace=workspace:3 -- …` | `fleet init settings --workspace workspace:3` |
 | "Resume the settings run" | `fleet resume settings` (init refuses an existing run) |
@@ -41,6 +41,8 @@ Read `.fleet/runs/settings/reports/banner-copy.md`. If the answer is an authoriz
 fleet send settings banner-copy "Use the short copy from the spec: 'Saved'. Keep the existing aria-live region."
 ```
 
+Fleet saves the answer as the next message in `.fleet/runs/settings/inbox/banner-copy.md` and types a one-line pointer to it, so a relaunched worker still has it.
+
 ```markdown
 <!-- appended to .fleet/runs/settings/notes.md -->
 - banner-copy: banner text is "Saved" (spec section 3); aria-live region unchanged.
@@ -50,44 +52,73 @@ If it needs the owner (scope, a permission, a login), ask them first and send no
 
 ## 3. Request changes while the worker is still running
 
-`fleet send` does not change a report's status, so park the report yourself first:
-
-1. Edit the report's status line to `Status: changes-requested`. `fleet wait` ignores a parked report, and it is not listed as `PENDING`.
-2. Send a bounded fix list, and say how to hand back:
+1. Send a bounded fix list with `--changes`, and say how to hand back. The fix list can span lines; `--file -` reads a longer one from stdin. `--key` makes a retry safe:
    ```sh
-   fleet send settings api-client "Changes requested: 1) return null on 404 in fetchSettings (src/api.ts); 2) add that case to src/api.test.ts. Set your report to needs-verification when done."
+   fleet send settings api-client --changes --key fix-1 "Changes requested:
+   1) return null on 404 in fetchSettings (src/api.ts)
+   2) add that case to src/api.test.ts
+   Set your report to needs-verification when done."
    ```
-3. `fleet wait`. When the worker flips the report back, you get `REPORT api-client [needs-verification]` again.
+   Send first sets the report to `Status: changes-requested` (it refuses unless the report says `needs-verification`). `fleet wait` ignores a parked report, and it is not listed as `PENDING`.
+2. `fleet wait`. When the worker flips the report back, you get `REPORT api-client [needs-verification]` again.
 
 ## 4. Cross-family review, with a fix round
 
-The writer `api-client` (codex, heavy) reported `needs-verification` and you checked it (skill step 5). Keep diffs and evidence in the run's `evidence/` folder:
+The writer `api-client` (codex, heavy) reported `needs-verification` and you checked it (skill step 5). One command stops it, saves its diff to the run's `evidence/` folder, writes the reviewer prompt and launches a reviewer from another family:
+
+```sh
+fleet review settings api-client
+fleet wait settings --timeout 540            # REPORT review-api-client [needs-verification]
+```
+
+```text
+api-client: exited (surface:7)
+DIFF .fleet/runs/settings/evidence/api-client.diff (2 files)
+REVIEW review-api-client claude:opus@high family=anthropic on surface:9
+```
+
+`review` chose the first provider that fits (see [`review`](commands.md#review)); `--provider claude` names one yourself. When none fits, it lists each candidate's reason and you tell the owner. Read the reviewer's report.
+
+**No findings to fix:** write the evidence files (example 5), then accept. It stops the reviewer, verifies it, verifies the writer and lists the tickets this unblocked:
+
+```sh
+fleet accept settings api-client --evidence .fleet/runs/settings/evidence/api-client.md \
+  --review-evidence .fleet/runs/settings/evidence/review-api-client.md
+```
+
+```text
+review-api-client: exited (surface:9)
+review-api-client: verified; update the source ticket only after implementation acceptance
+api-client: verified; update the source ticket only after implementation acceptance
+UNBLOCKED settings-ui
+```
+
+Add `--launch-ready` to launch them at once, and `--gate` to run the ticket's planned commands first (a failing check verifies nothing). Then update the source ticket.
+
+**Findings to fix:** repair the writer within its assignment (example 6); when it reports `needs-verification` again, check it and run `fleet review settings api-client` again. That round's diff still runs from the writer's first launch, so it covers both rounds; until then, `accept` refuses the first review as stale. Then accept as above.
+
+**Out of rounds:** after `review_rounds` reviews (default 2), the next repair or review is refused with an `ESCALATE` block: the rounds used, the last reviewer's open findings and the owner's ways out ([review rounds](commands.md#review-rounds)). Stop and ask the owner. To accept as is, record the open findings and their decision in the evidence and `fleet accept`; to give up, `fleet drop settings api-client --reason "<owner's words>"`; to try once more, add their words to the refused command:
+
+```sh
+fleet launch settings api-client codex --tier heavy --extra-round "Owner: one more try at the 404 case"
+```
+
+That allows one more repair and its review; the next refusal needs the owner again.
+
+**The long form.** `review` and `accept` run these commands, which you can still use one at a time, for example to read the reviewer prompt before it launches:
 
 ```sh
 fleet stop settings api-client
 fleet diff settings api-client --output .fleet/runs/settings/evidence/api-client.diff
-fleet prompt settings review-api-client --review-of api-client --diff .fleet/runs/settings/evidence/api-client.diff
+fleet prompt settings review-api-client --review-of api-client --diff .fleet/runs/settings/evidence/api-client.diff   # --force in a later round
 fleet launch settings review-api-client claude --tier review
-fleet wait settings --timeout 540            # REPORT review-api-client [needs-verification]
+fleet wait settings --timeout 540
 fleet stop settings review-api-client
-```
-
-**No findings to fix:** verify the reviewer, then the writer, each with its own evidence file (example 5):
-
-```sh
 fleet verify settings review-api-client --evidence .fleet/runs/settings/evidence/review-api-client.md
 fleet verify settings api-client --evidence .fleet/runs/settings/evidence/api-client.md
 ```
 
-**Findings to fix:** repair the writer within its assignment (example 6); when it reports `needs-verification` again, check it and `fleet stop settings api-client`. Then review again. The first review is now stale (`fleet verify` refuses it), and the new diff still runs from the writer's first launch, so it covers both rounds:
-
-```sh
-fleet diff settings api-client --output .fleet/runs/settings/evidence/api-client.diff
-fleet prompt settings review-api-client --review-of api-client --diff .fleet/runs/settings/evidence/api-client.diff --force
-fleet launch settings review-api-client claude --tier review
-```
-
-Then stop, verify the reviewer and verify the writer as above. Only after the writer is verified, update the source ticket and launch its dependents.
+Only after the writer is verified, update the source ticket and launch its dependents.
 
 ## 5. An evidence file
 
@@ -102,7 +133,7 @@ Commands (repository root):
 
 Acceptance criteria:
 - [x] fetchSettings returns null on 404: new test "returns null on 404" passes; read src/api.ts lines 40–52.
-- [x] No change outside src/api.ts and src/api.test.ts: `fleet diff` lists only those files.
+- [x] No change outside src/api.ts and src/api.test.ts: `fleet verify` found no file outside every ticket's scope.
 - [ ] Retry on 503: not in this ticket; the worker noted it as out of scope.
 
 Review: review-api-client (claude, anthropic) found 1 issue (missing 404 test), fixed in round 2; re-review found none.
@@ -120,11 +151,11 @@ Use this after `EXITED api-client`, or when a stopped worker needs fixes within 
    ## Repair
    Your earlier edits to src/api.ts are in place; keep them. Remaining: the 404 case and its test (review finding 1).
    ```
-3. `fleet launch settings api-client codex --tier heavy`. The previous report is kept as `reports/api-client.<hex>.previous`, and the diff baseline stays at the first launch.
+3. `fleet launch settings api-client codex --tier heavy`. The previous report is kept as `reports/api-client.<hex>.previous`, and the diff baseline stays at the first launch. Once the ticket's review rounds are used up, this launch is refused with the escalation for the owner (example 4, out of rounds).
 
 If the worker stopped on a usage limit and its adapter can resume (Claude), relaunch after the limit resets and add `--resume`: the worker continues its own session, so step 2 is only needed for new instructions.
 
-A change of scope is not a repair; use a follow-up run (example 8). To move future launches to another provider or model, use `fleet steer` (skill step 1, Steering routing).
+A change of scope is not a repair; grant the file, or use a follow-up run when grant refuses (example 8). To move future launches to another provider or model, use `fleet steer` (skill step 1, Steering routing).
 
 ## 7. Recover a worker whose exit cannot be confirmed
 
@@ -141,9 +172,22 @@ api-client: quit sent but process exit unconfirmed; slot retained
 
 Recovery frees the slot only. Verify or relaunch the ticket as usual afterwards.
 
-## 8. Change scope after launch: a follow-up run
+## 8. Change scope after launch
 
-The plan of `settings` is frozen. To add a file to `api-client` (moving launches to another provider or model needs only `fleet steer`):
+The plan of `settings` is frozen, but a ticket can still be granted files. `api-client` reports `blocked`: retry on 503 belongs in `src/retry.ts` and `src/retry.test.ts`, which no ticket owns.
+
+1. Check that the files are this ticket's work; ask the owner first when they widen what the ticket set out to do. Then:
+   ```sh
+   fleet grant settings api-client src/retry.ts src/retry.test.ts --reason "retry on 503 lives in src/retry.ts (owner, 2026-10-06)"
+   ```
+   Fleet adds the files to the ticket and records `Granted src/retry.test.ts, src/retry.ts to api-client: … (<time>)` in the decisions. The worker is live, so the grant goes to its inbox and its pane gets the pointer, as with `fleet send`. A stopped worker reads it when relaunched; regenerate a written prompt with `fleet prompt settings api-client --force` before that launch, since its scope line is stale.
+2. `fleet wait` as usual. The ticket's `fleet diff` now compares the granted files with their content when `api-client` first launched, so an edit the worker made before the grant goes to review too. A review captured before the grant goes stale once a granted file differs: capture a fresh diff and review.
+
+The same command resolves a scope-check refusal when the stray file is the ticket's own work: grant it, then run `diff` and `verify` again. If the file was already changed when the ticket launched and has changed since, Fleet has no copy of its launch content and refuses; look at the file with the owner, and add `--accept-current` when its current content is the right starting point.
+
+### When grant refuses: a follow-up run
+
+Grant refuses a file that a live worker of another ticket holds, or that another unverified ticket owns when neither waits on the other. If waiting for that ticket to be verified is not an option, use a follow-up run (moving launches to another provider or model needs only `fleet steer`):
 
 1. Stop every worker that could overlap: `fleet stop settings --all`. A new `fleet init` refuses ("one active run per checkout") until every worker in `settings` has a confirmed exit.
 2. **Review the partial edits yourself first:** `git diff -- src/api.ts src/api.test.ts`. The follow-up run's launch baseline includes them, so its `fleet diff` and any cross-family reviewer will not see them.
@@ -203,8 +247,7 @@ fleet wait settings --timeout 540        # in the background; keep talking with 
 `REPORT why-slow [needs-verification]` names `src/cache.py:88` rebuilding the index on every call:
 
 ```sh
-fleet stop settings why-slow
-fleet verify settings why-slow --evidence .fleet/runs/settings/evidence/why-slow.md   # no combined-tree checks
+fleet accept settings why-slow --evidence .fleet/runs/settings/evidence/why-slow.md   # stops it, then verifies; no combined-tree checks
 ```
 
 Propose `cache-fix → implement · claude · standard · src/cache.py · checks: pytest -q tests/test_perf.py`; on "yes", `fleet add` it with the finding in `context`, then `fleet launch settings --ready`.
