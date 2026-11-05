@@ -117,8 +117,13 @@ class RuntimeCase(unittest.TestCase):
     def state(self):
         return json.loads((self.repo / ".fleet/runs/demo/run.json").read_text())
 
+    @staticmethod
+    def off_reason(review):
+        """The owner's words init needs to turn off the config's default review."""
+        return ["--reason", "tests verify without review"] if review == "off" else []
+
     def setup_run(self, review="off", tickets=None):
-        self.call("init", "demo", "--workspace", "workspace:1", "--review", review)
+        self.call("init", "demo", "--workspace", "workspace:1", "--review", review, *self.off_reason(review))
         if tickets is None:
             tickets = [{"id": "01", "files": ["owned.txt"]},
                        {"id": "02", "files": ["next.txt"], "blockers": ["01"]}]
@@ -340,7 +345,9 @@ class Runtime(RuntimeCase):
         self.assertEqual(state["tickets"]["02"]["blockers"], ["01"])
         self.assertEqual(state["tickets"]["02"]["files"], ["next.txt"])
         self.assertEqual(state["tickets"]["02"]["provider"], "writer")
-        self.assertEqual(state["decisions"], ["Use bounded local checks."])
+        self.assertEqual(state["decisions"], [
+            "Review off (config default: cross-heavy), by the owner: tests verify without review",
+            "Use bounded local checks."])
         self.assertFalse(fleet.active(state))
 
     def test_check_detects_restaging_an_already_staged_file(self):
@@ -399,9 +406,9 @@ class Runtime(RuntimeCase):
         self.assertEqual(self.state()["tickets"]["01"]["status"], "pending")
 
     def test_same_family_reviewer_is_rejected_even_with_different_provider(self):
+        self.setup_run(review="cross-all")  # plan refuses an impossible review, so the family changes after it
         self.cfg["providers"]["reviewer"]["family"] = "openai"
         self.cfg["providers"]["reviewer"]["tiers"]["review"]["family"] = "openai"
-        self.setup_run(review="cross-all")
         self.launch()
         self.receipt()
         self.call("resume", "demo")
@@ -435,7 +442,7 @@ class Runtime(RuntimeCase):
 
 
     def test_plan_context_and_checks_complete_the_prompt(self):
-        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off")
+        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off", *self.off_reason("off"))
         ticket = self.repo / "01.md"
         ticket.write_text("# Ticket 01\n")
         plan = self.repo / "plan.json"
@@ -473,7 +480,7 @@ class Runtime(RuntimeCase):
         return str(plan)
 
     def test_plan_writes_an_inline_task_into_the_run(self):
-        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off")
+        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off", *self.off_reason("off"))
         self.call("plan", "demo", "--file", self.plan_file([
             {"id": "fix", "task": "  Make the banner copy shorter.\n", "files": ["owned.txt"], "provider": "writer"}]))
         t = self.state()["tickets"]["fix"]
@@ -548,7 +555,7 @@ class Runtime(RuntimeCase):
         self.assertIn("  01  pending", resume)
 
     def test_add_on_a_fresh_run_needs_no_plan(self):
-        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off")
+        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off", *self.off_reason("off"))
         self.add([{"id": "solo", "task": "Fix the typo.", "files": ["owned.txt"],
                    "context": "Typo on line 1.", "checks": "Read the file."}])
         self.assertNotIn("fill before launch", self.call("prompt", "demo", "solo"))
@@ -646,7 +653,7 @@ class Runtime(RuntimeCase):
         self.launch("fix")
 
     def ready_plan(self, *tickets):
-        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off")
+        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off", *self.off_reason("off"))
         for t in tickets:
             t.setdefault("provider", "writer")
             t.setdefault("context", "Agreed scope only.")
@@ -1052,7 +1059,7 @@ class Runtime(RuntimeCase):
     def test_braces_in_context_checks_and_rules_are_content(self):
         (self.repo / ".fleet").mkdir()
         (self.repo / ".fleet/rules.md").write_text("CI reads ${{ secrets.TOKEN }}; never print it.\n")
-        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off")
+        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off", *self.off_reason("off"))
         ticket = self.repo / "01.md"
         ticket.write_text("# Ticket 01\n")
         plan = self.repo / "plan.json"

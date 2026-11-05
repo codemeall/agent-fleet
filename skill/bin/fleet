@@ -1365,7 +1365,10 @@ def cmd_init(a, cfg):
         extra["tmux_socket"] = cfg["defaults"]["tmux_socket"]
     options = dict(cfg["defaults"], routing=a.routing or cfg["defaults"]["routing"],
                    review=a.review or cfg["defaults"]["review"])
-    routing_pool(options["routing"], cfg)
+    pool = routing_pool(options["routing"], cfg)
+    if reason := review_off_reason(a, cfg):
+        options["review_off"] = f"Review off (config default: {cfg['defaults']['review']}), by the owner: {reason}"
+    init_review_check(cfg, options, pool)
     for sub in ("prompts", "reports", ".seen", "exits", "snapshots", "evidence"):
         (d / sub).mkdir(parents=True, exist_ok=True)
     gi = repo / ".fleet" / ".gitignore"
@@ -1374,7 +1377,7 @@ def cmd_init(a, cfg):
         gi.write_text(previous + ("\n" if previous and not previous.endswith("\n") else "") + "runs/\n")
     state = {"schema": 2, "run": a.run, "repo": str(repo), "workspace": workspace, **extra,
              "created": time.strftime("%Y-%m-%dT%H:%M:%S"), "baseline": git_snapshot(repo),
-             "options": options, "tickets": {}, "workers": {}, "prompts": {}, "decisions": []}
+             "options": options, "tickets": {}, "workers": {}, "prompts": {}, "decisions": init_decisions(options)}
     atomic_json(d / "tree.json", tree_state(repo, options["scope_ignore"]))  # fleet check lists what changed outside every ticket since
     save_run(repo, a.run, state)
     if backend == "cmux":
@@ -1383,6 +1386,38 @@ def cmd_init(a, cfg):
         print(f"run dir: {d}\nbackend: tmux (headless): workers start in session {workspace}; the owner watches them "
               f"with `fleet agents {a.run}`")
     print(f"Next: fleet plan {a.run} --file <plan.json>")
+
+
+def review_off_reason(a, cfg) -> str | None:
+    """The owner's words for turning review off when their config asks for it: never a silent downgrade."""
+    reason = (a.reason or "").strip()
+    if a.reason is not None and a.review != "off":
+        raise FleetError("--reason records why the owner turned review off; pass it only with --review off")
+    if a.review != "off" or cfg["defaults"]["review"] == "off":
+        return reason or None
+    if not reason:
+        raise FleetError(f"--review off drops the config's review {cfg['defaults']['review']}, so it needs the owner's "
+                         "explicit choice: ask them, then pass --reason \"<owner's words>\"; it is saved with the run's "
+                         "decisions")
+    return reason
+
+
+def init_decisions(options: dict) -> list[str]:
+    """Decisions init records, which a saved plan keeps ahead of its own."""
+    return [options["review_off"]] if options.get("review_off") else []
+
+
+def init_review_check(cfg: dict, options: dict, pool: dict | None) -> None:
+    """Refuse a cross-all run whose pool could review no writer, and warn for cross-heavy, whose heavy tickets
+    plan will refuse; a mixed adapter leaves the writer's family open, so plan checks each ticket instead."""
+    if options["review"] == "off" or not (gap := init_review_gap(cfg, options["routing"], pool)):
+        return
+    families, reasons = gap
+    writer = f"every writer's ({', '.join(families)})"
+    if options["review"] == "cross-all":
+        raise FleetError(review_impossible("cross-all", options["routing"], writer, reasons, "No run was created. "))
+    print("note: plan will refuse heavy implementation tickets: " +
+          review_impossible(options["review"], options["routing"], writer, reasons), file=sys.stderr)
 
 
 CHECK_KEYS = {"run", "cwd", "timeout"}  # a future key (such as a manual marker) is refused until Fleet knows it
@@ -1570,9 +1605,10 @@ def cmd_plan(a, cfg):
     if not tickets:
         raise FleetError("plan must contain at least one ticket")
     check_graph(tickets)
+    check_reviewable(cfg, state, pool, tickets)
     write_tasks(d, texts)
     state["tickets"] = tickets
-    state["decisions"] = data.get("decisions", [])
+    state["decisions"] = init_decisions(state["options"]) + data.get("decisions", [])
     state["plan_decisions"] = len(state["decisions"])  # a prompt hands down only the decisions after these
     save_run(repo, a.run, state)
     print(f"saved {len(tickets)} tickets; routing, dependencies and assignments persist across sessions")
@@ -1613,6 +1649,7 @@ def cmd_add(a, cfg):
         raise FleetError("add needs at least one ticket")
     tickets = {**state["tickets"], **added}
     check_graph(tickets)
+    check_reviewable(cfg, state, pool, added)
     for i, t in added.items():
         for b in t["blockers"]:
             if tickets[b]["status"] == "dropped":
@@ -3357,15 +3394,15 @@ def review_candidates(cfg: dict, pool: dict | None) -> list[str]:
                     if n not in names and p.get("enabled", True) and not p.get("placeholder")]
 
 
-def review_route(cfg: dict, state: dict, pool: dict | None, name: str, writer_family: str, running: list[dict],
-                 model: str | None = None, effort: str | None = None,
-                 family: str | None = None) -> tuple[str | None, dict]:
-    """Why provider `name` cannot review now (None when it can) and the route it would take. These are launch's
-    own checks, so the route picked here is one launch accepts; a pool's pinned model is the reviewer's model."""
+def review_fit(cfg: dict, routing: str, pool: dict | None, name: str, writer_family: str,
+               model: str | None = None, effort: str | None = None,
+               family: str | None = None) -> tuple[str | None, dict]:
+    """Why provider `name` could never review a `writer_family` writer under this routing (None when it could)
+    and the route it would take. Capacity is left out: it frees up as workers exit, so plan time can ask too."""
     try:
         pcfg = usable_provider(cfg, name)
         if pool is not None and name not in pool:
-            return f"outside the run's routing {state['options']['routing']}", {}
+            return f"outside the run's routing {routing}", {}
         model, effort = resolve_model(pcfg, "review", model or (pool or {}).get(name), effort)
         check_allowed(pcfg, name, model)
         check_effort(pcfg, name, effort)
@@ -3378,6 +3415,92 @@ def review_route(cfg: dict, state: dict, pool: dict | None, name: str, writer_fa
         return f"{model} has no known family ({name}.model_families or family_prefixes)", route
     if family == writer_family:
         return f"same family as the writer ({family})", route
+    return None, route
+
+
+def review_gap(cfg: dict, routing: str, pool: dict | None, writer_family: str) -> list[str] | None:
+    """Why each candidate could never review a `writer_family` writer, or None when one could: `fleet review`'s
+    own test without capacity, so what it refuses is a review that could never launch."""
+    reasons = []
+    for name in review_candidates(cfg, pool):
+        why, _ = review_fit(cfg, routing, pool, name, writer_family)
+        if not why:
+            return None
+        reasons.append(f"  {name}: {why}")
+    return reasons or ["  no provider is turned on"]
+
+
+def review_impossible(mode: str, routing: str, writer: str, reasons: list[str], done: str = "") -> str:
+    """Why a required review could never launch, what was left undone, and the owner's two ways out."""
+    return (f"review {mode} needs a reviewer whose family differs from {writer}, and routing {routing} cannot "
+            "supply one:\n" + "\n".join(reasons) + f"\n{done}Tell the owner before any work starts: either they enable another provider (fleet provider enable <name>) or widen the "
+            "routing (a new run: fleet init <run> --routing …), or they explicitly choose no cross-family review (a "
+            "new run: fleet init <run> --review off --reason \"<owner's words>\"). Never set a family just to pass "
+            "(references/routing.md)")
+
+
+def check_reviewable(cfg: dict, state: dict, pool: dict | None, tickets: dict) -> None:
+    """Refuse tickets whose required review no provider in the pool could ever give, before a writer spends a
+    whole implementation on it. Grouped by writer family, so each candidate is checked once per family."""
+    routing, mode = state["options"]["routing"], state["options"]["review"]
+    by_family: dict[str, list[str]] = {}
+    for i, t in tickets.items():
+        if not t["review_required"]:
+            continue
+        if not t["family"]:  # launch must match this family, and review refuses a writer of unknown family
+            raise FleetError(f"{i}: {t['provider']}:{t['model']} has no known family, so its required review "
+                             f"(review {mode}) could never launch; set it in {t['provider']}.model_families or "
+                             "family_prefixes, or give the ticket its accurate family")
+        by_family.setdefault(t["family"], []).append(i)
+    for family, ids in by_family.items():
+        reasons = review_gap(cfg, routing, pool, family)
+        if reasons:
+            raise FleetError(f"{', '.join(ids)}: " + review_impossible(mode, routing, f"the writer's ({family})",
+                                                                       reasons, "Nothing was saved. "))
+
+
+def adapter_families(pcfg: dict) -> set[str] | None:
+    """Every family a single-family adapter's config can give a model, or None for a mixed or unknown adapter,
+    whose writer's family stays open until the plan names its model."""
+    family = pcfg.get("family")
+    if not family or family in ("mixed", "unknown"):
+        return None
+    allow = pcfg.get("models_allow")
+    return ({family} | set(pcfg.get("model_families", {}).values()) | set(pcfg.get("family_prefixes", {}).values())
+            | {t["family"] for t in pcfg.get("tiers", {}).values() if t.get("family")}
+            | ({f for f in allow.values() if f} if isinstance(allow, dict) else set()))
+
+
+def init_review_gap(cfg: dict, routing: str, pool: dict | None) -> tuple[list[str], list[str]] | None:
+    """What init can tell from the routing pool alone: when every writer it allows is a single-family adapter and
+    no reviewer differs from any of their families, those families and each candidate's reason; else None."""
+    families = set()
+    for name in review_candidates(cfg, pool):
+        try:
+            found = adapter_families(usable_provider(cfg, name))
+        except FleetError:
+            continue  # init has already refused an unusable provider the routing names
+        if found is None:
+            return None  # plan checks each ticket's actual family instead
+        families |= found
+    reasons = []
+    for family in sorted(families):
+        gap = review_gap(cfg, routing, pool, family)
+        if gap is None:
+            return None
+        reasons += [f"  for a {family} writer:"] + ["  " + x for x in gap]
+    return (sorted(families), reasons) if families else None
+
+
+def review_route(cfg: dict, state: dict, pool: dict | None, name: str, writer_family: str, running: list[dict],
+                 model: str | None = None, effort: str | None = None,
+                 family: str | None = None) -> tuple[str | None, dict]:
+    """Why provider `name` cannot review now (None when it can) and the route it would take. These are launch's
+    own checks, so the route picked here is one launch accepts; a pool's pinned model is the reviewer's model."""
+    why, route = review_fit(cfg, state["options"]["routing"], pool, name, writer_family, model, effort, family)
+    if why:
+        return why, route
+    pcfg = provider(cfg, name)
     if len(running) >= state["options"]["max_parallel"]:
         return f"no free slot (max_parallel {state['options']['max_parallel']})", route
     if sum(w["provider"] == name for w in running) >= pcfg.get("max", 2):
@@ -4123,6 +4246,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--workspace", help="cmux workspace ref or UUID")
     s.add_argument("--routing")
     s.add_argument("--review", choices=["off", "cross-heavy", "cross-all"])
+    s.add_argument("--reason", help="with --review off when the config asks for review: the owner's words, saved "
+                                    "with the run's decisions")
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("plan", help="persist a ticket graph and routing assignments")

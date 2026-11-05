@@ -111,10 +111,10 @@ Adds a provider that reuses an adapter (`claude`, `codex`) with its own account 
 ### init
 
 ```text
-fleet init <run> [--backend auto|cmux|tmux] [--workspace <ref>] [--routing <mode>] [--review off|cross-heavy|cross-all]
+fleet init <run> [--backend auto|cmux|tmux] [--workspace <ref>] [--routing <mode>] [--review off|cross-heavy|cross-all] [--reason "<owner's words>"]
 ```
 
-Creates `.fleet/runs/<run>/`, adds it to `.fleet/.gitignore`, and records the HEAD and index baseline. It picks the run's terminal backend, which the run keeps: `--backend`, else `defaults.backend`, else `auto`, which uses cmux inside cmux or when a workspace is named, and headless tmux otherwise. A tmux run gets its own detached session (`fleet-<checkout>-<run>-<hash>`) on Fleet's tmux server (`tmux -L fleet`; `defaults.tmux_socket` changes it) and init prints the `fleet agents` line to relay to the owner. For a cmux run it validates the workspace (`--workspace`, the config default, or the current one) and stores its UUID, because cmux renumbers refs like `workspace:2` when it restarts. It refuses if the run already exists, or if another run in this checkout still has live workers.
+Creates `.fleet/runs/<run>/`, adds it to `.fleet/.gitignore`, and records the HEAD and index baseline. It picks the run's terminal backend, which the run keeps: `--backend`, else `defaults.backend`, else `auto`, which uses cmux inside cmux or when a workspace is named, and headless tmux otherwise. A tmux run gets its own detached session (`fleet-<checkout>-<run>-<hash>`) on Fleet's tmux server (`tmux -L fleet`; `defaults.tmux_socket` changes it) and init prints the `fleet agents` line to relay to the owner. For a cmux run it validates the workspace (`--workspace`, the config default, or the current one) and stores its UUID, because cmux renumbers refs like `workspace:2` when it restarts. It refuses if the run already exists, or if another run in this checkout still has live workers. Under `cross-all` it also refuses when the routing pool alone shows no reviewer could ever differ from a writer's family, for example `single:<provider>` with a single-family adapter; under `cross-heavy` it warns that plan will refuse heavy tickets. `--review off` while the config asks for review needs `--reason` with the owner's words, which the run's decisions keep: review is never turned off silently.
 
 **Use:** once per run. Map the owner's `backend=`, `workspace=`, routing (`auto`, `single:<provider>`, `agents=…`) and `review=` options to these flags. For an existing run, use `resume` instead.
 
@@ -124,7 +124,7 @@ Creates `.fleet/runs/<run>/`, adds it to `.fleet/.gitignore`, and records the HE
 fleet plan <run> --file <plan.json>
 ```
 
-Saves every ticket, blocker, exact file list, tier, provider and decision, and validates dependencies, cycles, scopes and assignments. The plan is frozen once a worker launches. The plan format is in [SKILL.md step 2](../SKILL.md#2-save-a-complete-plan). Each ticket may give `task` (inline text) instead of `ticket`, and `kind: "investigate"` for read-only work that owns no files.
+Saves every ticket, blocker, exact file list, tier, provider and decision, and validates dependencies, cycles, scopes and assignments. When the review mode requires review of a ticket, plan also checks that some provider in the routing pool could review it: turned on, its review-tier model allowed, a known family different from the writer's. That is `fleet review`'s own test without the capacity part. If none could, it refuses, naming the writer's family, the routing and each provider's reason, and saves nothing; see [routing](routing.md#model-family-and-review-policy) for the owner's ways out. The plan is frozen once a worker launches. The plan format is in [SKILL.md step 2](../SKILL.md#2-save-a-complete-plan). Each ticket may give `task` (inline text) instead of `ticket`, and `kind: "investigate"` for read-only work that owns no files.
 
 `checks` is text, or a list that may mix text with commands Fleet can run for you:
 
@@ -142,7 +142,7 @@ A command needs `run` (a shell command). `cwd` is a directory inside the reposit
 fleet add <run> --file <tasks.json|->
 ```
 
-Appends tickets to a run, before or after its first launch; `-` reads stdin. Same JSON as `plan`. Saved tickets never change. Each entry gives `ticket` (a local file) or `task` (inline text, written to `.fleet/runs/<run>/tasks/<id>.md`), and may set `kind: "investigate"` for read-only work that owns no files. Its `checks` may include commands, as in [`plan`](#plan). A new ticket whose files overlap an unverified ticket must list it in `blockers`. Added tickets show as `+<id>` in `resume`; added decisions end with `(added <time>)`.
+Appends tickets to a run, before or after its first launch; `-` reads stdin. Same JSON as `plan`. Saved tickets never change. Each entry gives `ticket` (a local file) or `task` (inline text, written to `.fleet/runs/<run>/tasks/<id>.md`), and may set `kind: "investigate"` for read-only work that owns no files. Its `checks` may include commands, as in [`plan`](#plan). A new ticket whose files overlap an unverified ticket must list it in `blockers`. Like `plan`, it refuses a ticket whose required review no provider in the pool could give. Added tickets show as `+<id>` in `resume`; added decisions end with `(added <time>)`.
 
 **Use:** for delegation from the conversation and new work in a live run ([delegation](delegation.md)). To give an existing ticket another file, use [`grant`](#grant).
 
