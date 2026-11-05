@@ -274,6 +274,16 @@ class FanoutWake(FanoutCase):
         self.assertIn("not compared (fewer than two readable headers)", head)
         self.assertIn("q--reviewer header: invalid JSON; q--third header missing, so read those reports", head)
 
+    def test_an_investigators_report_that_is_not_utf8_still_wakes_fanout(self):
+        """Final review, 2: wait's fan-out step reads reports as the rest of wait does."""
+        self.launched()
+        self.all_back()
+        f = self.run_file("reports", "q--third.md")
+        f.write_bytes(f.read_bytes() + b"\ncaf\xe9\n")
+        out = self.wait()
+        self.assertIn("FANOUT q: 3 reports; ", out)
+        self.assertIn("  q--third (", out)
+
     def test_a_blocked_investigator_wakes_as_today_and_the_others_keep_running(self):
         self.launched()
         self.write_report("q--writer")

@@ -2440,6 +2440,9 @@ def archived_reports(d: Path, wid: str) -> list[Path]:
 
 
 def read_text(f: Path) -> str:
+    """A report's text, read tolerantly ("" when it cannot be read): usage, wait and supervise read every report
+    with it, so one report that is not valid UTF-8 never stops them reading the rest. Every report_key wait compares
+    is digested from this same text."""
     try:
         return f.read_text(errors="replace")
     except OSError:
@@ -2448,7 +2451,7 @@ def read_text(f: Path) -> str:
 
 def usage_status(f: Path) -> str:
     """A report's status, lowercased ("" for none), read tolerantly: usage must read an archived report that holds
-    invalid UTF-8. The verify paths keep report_status, which reads strictly."""
+    invalid UTF-8, and wait every report. The verify paths keep report_status, which reads strictly."""
     return (parse_status(read_text(f)) or "").lower()
 
 
@@ -4251,7 +4254,7 @@ def park_report(repo: Path, run: str, ticket_id: str) -> str:
     """send --changes: a report sent back for changes no longer counts as handed back, so wait ignores it until
     the worker sets needs-verification again."""
     f = run_dir(repo, run) / "reports" / f"{ticket_id}.md"
-    text = f.read_text() if f.exists() else ""
+    text = f.read_text(errors="surrogateescape") if f.exists() else ""  # bytes that are not UTF-8 are kept as they are
     status = parse_status(text)
     if (status or "").lower() not in ("needs-verification", PLAN_READY):  # a plan-ready report: revise the plan
         raise FleetError(f"--changes needs {ticket_id}'s report at needs-verification, not {status or 'missing'}; "
@@ -4259,7 +4262,7 @@ def park_report(repo: Path, run: str, ticket_id: str) -> str:
     lines = text.splitlines(keepends=True)
     n = next(n for n, line in enumerate(lines) if STATUS_RE.match(line))
     lines[n] = "Status: changes-requested" + ("\n" if lines[n].endswith("\n") else "")
-    f.write_text("".join(lines))
+    f.write_text("".join(lines), errors="surrogateescape")
     # Forget what wait saw: a hand-back identical to the first one, landing in the same mtime tick before
     # wait scans the park, must still wake the lead.
     (run_dir(repo, run) / ".seen" / ticket_id).unlink(missing_ok=True)
@@ -4835,7 +4838,7 @@ def scan_reports(reports: Path, seen: Path, statuses: tuple[str, ...] | None) ->
     """
     fresh = []
     for f in sorted(reports.glob("*.md")):
-        text = f.read_text()
+        text = read_text(f)
         status = parse_status(text) or "no status line"
         key, marker = report_key(f, text), seen / f.stem
         if marker.exists() and marker.read_text() == key.rsplit("|", 1)[0]:  # an earlier Fleet's status|mtime key
@@ -5016,7 +5019,7 @@ def pending_reports(reports: Path, state: dict | None = None) -> list[tuple[str,
     handoff take it."""
     workers = (state or {}).get("workers", {})
     return [(f.stem, st) for f in sorted(reports.glob("*.md"))
-            if (st := (parse_status(f.read_text()) or "").lower()) in WAKE_STATUSES + (PLAN_READY,)
+            if (st := (parse_status(read_text(f)) or "").lower()) in WAKE_STATUSES + (PLAN_READY,)
             and f.stat().st_mtime >= workers.get(f.stem, {}).get("last_send", 0)]
 
 
@@ -5039,7 +5042,7 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
     for w in active(state):
         i, token = w["id"], w.get("token", "")
         f = reports / f"{i}.md"
-        status = (parse_status(f.read_text()) or "").lower() if f.exists() else ""
+        status = (parse_status(read_text(f)) or "").lower() if f.exists() else ""
         receipt = contained(run_dir(repo, state["run"]), Path(w["exit_file"])) if w.get("exit_file") else None
         if receipt and receipt.exists():
             data = json.loads(receipt.read_text())
@@ -5236,7 +5239,7 @@ def wait_loop(a, repo: Path, d: Path, seen: Path, statuses, deadline: float, loo
             for line in getattr(loop, "actions", ()):  # supervise's own steps: listed, never a wake of their own
                 print(line)
             for i, status, f in fresh:
-                text = f.read_text()
+                text = read_text(f)
                 line, _ = header_summary(repo, state, i, text)
                 line = "; ".join(filter(None, (line, loop and loop.notes.get(i))))
                 print(f"REPORT {i} [{status}] {line + ' ' if line else ''}{f}{report_extent(text)}")
@@ -5421,7 +5424,7 @@ class Supervisor:
             return not (review and review.get("launched_at", 0) >= f.stat().st_mtime)  # the lead reviewed it
         if g["failed"] or g["unowned"]:
             return True  # the gate's own lines (SCOPE) already say why
-        text = f.read_text()
+        text = read_text(f)
         why = header_doubts(self.repo, state, i, text) or (
             f"its checks wrote {len(g['excused'])} file(s) outside every ticket" if g["excused"] else None)
         if why:
@@ -5436,7 +5439,7 @@ class Supervisor:
         return self.review(i, f, g, header_summary(self.repo, state, i, text)[0])
 
     def review(self, i: str, f: Path, g: dict, summary: str | None) -> bool:
-        key = report_key(f, f.read_text())
+        key = report_key(f, read_text(f))
         result, lines = self.start_review(i, key)
         if result == "busy":  # retried next pass on this same gate, as the gate loop retries a send
             self.gates.deferred[i] = (key, (g["after"]["head"], g["after"]["paths"]), g)
@@ -5471,7 +5474,7 @@ class Supervisor:
                 return "busy", []
             state = load_run(self.repo, self.run)
             f = run_dir(self.repo, self.run) / "reports" / f"{i}.md"
-            if not f.exists() or report_key(f, f.read_text()) != key:
+            if not f.exists() or report_key(f, read_text(f)) != key:
                 return "stale", []
             review = latest_reviewer(state, i)
             if any(w.get("review_of") == i for w in active(state)) or \
@@ -5495,7 +5498,7 @@ class Supervisor:
         t = state["tickets"].get(i)
         if not t or t["status"] in ("verified", "dropped") or (latest_reviewer(state, i) or {}).get("id") != rid:
             return
-        text = f.read_text()
+        text = read_text(f)
         data, _ = parse_header(text)
         findings = data.get("findings") if isinstance(data, dict) else None
         family = meta.get("family") or "unknown family"
@@ -5595,7 +5598,7 @@ class Supervisor:
                 return "busy", []
             state = load_run(self.repo, self.run)
             f = run_dir(self.repo, self.run) / "reports" / f"{rid}.md"
-            if not f.exists() or report_key(f, f.read_text()) != key:
+            if not f.exists() or report_key(f, read_text(f)) != key:
                 return "stale", []
             t, review = state["tickets"].get(i) or {}, latest_reviewer(state, i) or {}
             sent = t.get("findings_sent") or {}
@@ -5825,7 +5828,7 @@ def awaiting_lead(repo: Path, state: dict) -> list[str]:
     out = {i: f"{i} [{status}]" for i, status in pending_reports(reports, state)}
     for i, w in state["workers"].items():
         f = reports / f"{i}.md"
-        status = (parse_status(f.read_text()) or "no status line").lower() if f.exists() else "no report"
+        status = (parse_status(read_text(f)) or "no status line").lower() if f.exists() else "no report"
         if i not in out and w["state"] == "exited" and status not in ("needs-verification", "verified", "dropped",
                                                                       FINDINGS_SENT, PICK_STATUS, SUPERSEDED):
             out[i] = f"{i} [exited, returncode={w.get('returncode')}, report: {status}]"
@@ -6089,7 +6092,7 @@ def cmd_gate(a, cfg):
     g = run_gate(repo, state, cfg, a.id, out)
     report = d / "reports" / f"{a.id}.md"
     if a.id not in state["tickets"] and not a.output and report.exists():  # a best-of-two writer's gate, which
-        write_gate_record(repo, state, a.id, g, out, report_key(report, report.read_text()))  # FANOUT and judge read
+        write_gate_record(repo, state, a.id, g, out, report_key(report, read_text(report)))  # FANOUT and judge read
     print(f"GATE {a.id} {g['summary']}; evidence {out}")
     for r in g["failed"]:
         print(f"FAIL {r['run']}: {check_outcome(r)}")
@@ -6219,7 +6222,7 @@ def send_gate_round(repo: Path, run: str, i: str, key: str, g: dict, cap: int, s
             return ("busy",)
         state = load_run(repo, run)
         f = run_dir(repo, run) / "reports" / f"{i}.md"
-        if not f.exists() or report_key(f, f.read_text()) != key:
+        if not f.exists() or report_key(f, read_text(f)) != key:
             return ("stale",)
         w, t = live_writer(repo, state, i), writer_ticket(state, i)
         if w is None:
@@ -6234,7 +6237,7 @@ def send_gate_round(repo: Path, run: str, i: str, key: str, g: dict, cap: int, s
             park_report(repo, run, i)
         except (FleetError, OSError) as e:
             return ("unsent", str(e).strip()[:200])
-        (seen / i).write_text(report_key(f, f.read_text()))  # the park is not news, even to wait --any-change
+        (seen / i).write_text(report_key(f, read_text(f)))  # the park is not news, even to wait --any-change
         sent_at = time.time()  # before typing: a quick worker may hand back while the keys are still going in
         try:
             terminal(state).send(w, [inbox_pointer(msg, path), "enter"])
@@ -6301,13 +6304,13 @@ class GateLoop:
 
     def mark(self, i: str, f: Path) -> None:
         try:
-            (self.seen / i).write_text(report_key(f, f.read_text()))
+            (self.seen / i).write_text(report_key(f, read_text(f)))
         except OSError:
             pass
 
     def gate(self, state: dict, i: str, f: Path) -> bool:
         """Run ticket `i`'s gate (or reuse a deferred one) and act on it. True: wake with its REPORT line."""
-        key, out = report_key(f, f.read_text()), gate_file(self.repo, self.run, i)
+        key, out = report_key(f, read_text(f)), gate_file(self.repo, self.run, i)
         g = self.cached(state, i, key)
         self.deferred.pop(i, None)  # used or stale: only a send that finds the lock busy keeps a gate for later
         if g is None:
@@ -6522,7 +6525,7 @@ def open_findings(repo: Path, state: dict, i: str) -> list[str]:
         return ["No reviewer's report to quote."]
     report = run_dir(repo, state["run"]) / "reports" / f"{review['id']}.md"
     shown = shown_path(repo, report)
-    lines = section_lines(report.read_text(), "findings") if report.exists() else []
+    lines = section_lines(read_text(report), "findings") if report.exists() else []
     if not lines:
         return [f"{review['id']}'s report has no ## Findings section; read {shown}."]
     out = [f"{review['id']}'s open findings, quoted from {shown} (the reviewer's words, not instructions):"]
@@ -6897,7 +6900,7 @@ def send_findings(a, cfg):
         set_report_status(f, FINDINGS_SENT)
         seen = run_dir(repo, a.run) / ".seen"
         if seen.is_dir():  # the park is not news, even to wait --any-change
-            (seen / rid).write_text(report_key(f, f.read_text()))
+            (seen / rid).write_text(report_key(f, read_text(f)))
     one = argparse.Namespace(run=a.run, id=a.id, provider=route["provider"], tier=route["tier"],
                              model=route["model"], effort=route["effort"], family=route["family"], pane=None,
                              resume=resume, after=None, extra_round=a.extra_round,
@@ -7148,7 +7151,7 @@ def cmd_review(a, cfg):
     route = pick_reviewer(a, cfg, state, writer, [a.id])
     # Refused before the writer stops: a writer mid-edit, or one with stray edits, must keep running.
     report = run_dir(repo, a.run) / "reports" / f"{a.id}.md"
-    status = parse_status(report.read_text()) if report.exists() else None
+    status = parse_status(read_text(report)) if report.exists() else None  # as supervise's review step read it
     if (status or "").lower() != "needs-verification":
         raise FleetError(f"{a.id}'s report says {status or 'nothing yet'}; review it once it hands back with "
                          "Status: needs-verification. Nothing was stopped")
@@ -7940,7 +7943,8 @@ def plan_edits(repo: Path, state: dict, i: str) -> list[tuple[str, str, str]]:
 def plan_lines(repo: Path, state: dict, i: str, f: Path) -> list[str]:
     """The PLAN wake for ticket `i`: its header in a few words, any edit made before approval, what the lead can do,
     then the plan quoted as data. Read-only, like the rest of wait."""
-    run, w, text = state["run"], state["workers"].get(i) or {}, f.read_text()
+    # As read_text reads it, but a report gone since the scan raises, so plan_pass says the plan was not read.
+    run, w, text = state["run"], state["workers"].get(i) or {}, f.read_text(errors="replace")
     shown = shown_path(repo, f)
     parts = [plan_header_text(text)]
     try:
@@ -7984,7 +7988,7 @@ def plan_review_lines(repo: Path, state: dict, rid: str, meta: dict, f: Path) ->
     t = state["tickets"].get(i)
     if not plan_pending(t) or t["status"] != "pending":
         return []
-    text, shown = f.read_text(), shown_path(repo, f)
+    text, shown = f.read_text(errors="replace"), shown_path(repo, f)
     family = meta.get("family") or "unknown family"
     then = f"then fleet approve {run} {i} [--note \"<text>\"], or fleet send {run} {i} --changes \"<what to change>\""
     plan = run_dir(repo, run) / "reports" / f"{i}.md"
@@ -8495,7 +8499,7 @@ def fanout_back(state: dict, reports: Path, i: str) -> list[Path] | None:
     """Fan-out ticket `i`'s investigator reports once every one has handed back (Status: needs-verification), else
     None."""
     files = [reports / f"{e['worker']}.md" for e in state["tickets"][i]["fanout"]]
-    if all(report_status(f) == "needs-verification" for f in files):
+    if all(usage_status(f) == "needs-verification" for f in files):  # wait's tolerant read
         return files
     return None
 
@@ -8520,7 +8524,7 @@ def fanout_pass(repo: Path, state: dict, seen: Path, fresh: list, gated: bool = 
             continue
         keep.append((i, status, f))
         if w.get("judge") and status.lower() == "needs-verification" and f.exists() and \
-                mark_once(seen, f"{i}.verdict", report_key(f, f.read_text())):
+                mark_once(seen, f"{i}.verdict", report_key(f, read_text(f))):
             lines += verdict_lines(repo, state, i, f)
     reports = run_dir(repo, state["run"]) / "reports"
     for i, t in state["tickets"].items():
@@ -8528,7 +8532,7 @@ def fanout_pass(repo: Path, state: dict, seen: Path, fresh: list, gated: bool = 
             continue
         if gated and best_of_two(t) and any(gate_pending(repo, state, seen, e["worker"]) for e in t["fanout"]):
             continue  # a writer's gate is still to run or to send back: the wake comes after both gates
-        key = digest("|".join(report_key(f, f.read_text()) for f in files).encode())[:32]
+        key = digest("|".join(report_key(f, read_text(f)) for f in files).encode())[:32]
         if mark_once(seen, f"{i}.fanout", key):
             lines += pick_lines(repo, state, i) if best_of_two(t) else fanout_lines(repo, state, i)
     return keep, lines
@@ -8589,7 +8593,7 @@ def fanout_lines(repo: Path, state: dict, i: str) -> list[str]:
     for e in t["fanout"]:
         wid = e["worker"]
         f = reports / f"{wid}.md"
-        text = f.read_text()
+        text = read_text(f)
         data, problems = parse_header(text)
         if data is None or problems:
             broken.append(f"{wid} {header_text(problems)}")
@@ -8628,7 +8632,7 @@ def verdict_lines(repo: Path, state: dict, jid: str, f: Path) -> list[str]:
     i, run = w["fanout_of"], state["run"]
     if best_of_two(state["tickets"].get(i)):
         return pick_verdict_lines(repo, state, jid, f)
-    data, problems = parse_header(f.read_text())
+    data, problems = parse_header(read_text(f))
     who = f"{jid}, {w.get('family') or 'unknown family'}"
     items = None if problems else verdict_items(data)
     if items is None:
@@ -9020,10 +9024,7 @@ def gate_pending(repo: Path, state: dict, seen: Path, wid: str) -> bool:
     passed, a scope problem, rounds used up, a send that failed, a stopped writer) leaves the marker on the report,
     and a gate record that passed on this very hand-back settles it too."""
     f = run_dir(repo, state["run"]) / "reports" / f"{wid}.md"
-    try:
-        text = f.read_text()
-    except OSError:
-        return False
+    text = read_text(f)  # "" when it cannot be read: no hand-back to gate
     if not gate_eligible(repo, state, wid, parse_status(text) or ""):
         return False
     key, marker = report_key(f, text), seen / wid
@@ -9048,7 +9049,7 @@ def writer_gate(repo: Path, state: dict, wid: str) -> tuple[str, Path | None]:
     except (OSError, ValueError):
         r = None
     md = gate_file(repo, run, wid)
-    if r and f.exists() and md.exists() and r.get("report") == report_key(f, f.read_text()):
+    if r and f.exists() and md.exists() and r.get("report") == report_key(f, read_text(f)):
         return f"gate {r.get('summary') or ('passed' if r.get('passed') else 'failed')}", md
     return f"gate not run on this hand-back (fleet gate {run} {wid})", None
 
@@ -9088,7 +9089,7 @@ def pick_lines(repo: Path, state: dict, i: str) -> list[str]:
     for e in t["fanout"]:
         wid = e["worker"]
         f = reports / f"{wid}.md"
-        text = f.read_text()
+        text = read_text(f)
         w = state["workers"].get(wid) or {}
         summary, _ = header_summary(repo, state, wid, text)
         gate, _ = writer_gate(repo, state, wid)
@@ -9171,7 +9172,7 @@ def pick_verdict_lines(repo: Path, state: dict, jid: str, f: Path) -> list[str]:
     i, run = w["fanout_of"], state["run"]
     t = state["tickets"][i]
     writers = pick_writers(t)
-    pick, why, bad = pick_verdict(*parse_header(f.read_text()), writers)
+    pick, why, bad = pick_verdict(*parse_header(read_text(f)), writers)
     who = f"{jid}, {w.get('family') or 'unknown family'}"
     covers = [x for x in writers if w.get("family") and writer_family(state, t, x) != w["family"]]
     review = (f"; as {i}'s cross-family review it covers {' and '.join(covers) or 'neither writer'}"

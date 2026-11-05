@@ -191,6 +191,27 @@ class Supervise(RuntimeCase):
         self.assertNotIn("verified", self.state()["workers"]["review-01"])
         self.assertIn("TIMEOUT", self.supervise("--auto", "gate,review", timeout="1", expected=2))  # once
 
+    def test_reports_that_are_not_utf8_are_gated_reviewed_and_judged_like_any_other(self):
+        """Final review, 2: supervise reads every report as wait does, so bytes that are not UTF-8 in a writer's or
+        a reviewer's report never stop it."""
+        self.handed_back()
+        report = self.run_file("reports", "01.md")
+        report.write_bytes(report.read_bytes() + b"\nNotes: caf\xe9\n")
+        real_launch = fleet.launch_one
+
+        def launch_one(a, cfg):
+            label, w = real_launch(a, cfg)
+            if w.get("role") == "review":
+                self.write_report(w["id"])
+                f = self.run_file("reports", f"{w['id']}.md")
+                f.write_bytes(f.read_bytes() + b"\n\xff\n")
+            return label, w
+
+        with patch.object(fleet, "launch_one", side_effect=launch_one):
+            out = self.supervise("--auto", "gate,review")
+        self.assertIn("REVIEWING 01: review-01 ", out)
+        self.assertIn("READY 01: gate passed (1/1), review clean (anthropic, findings 0)", out)
+
     def test_a_ticket_the_policy_does_not_review_wakes_ready_after_its_gate(self):
         self.handed_back(tier="standard")                                    # cross-heavy reviews heavy only
         out = self.supervise("--auto", "gate,review")
