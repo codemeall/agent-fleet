@@ -352,8 +352,8 @@ class Loop(RuntimeCase):
         self.assertTrue(lines[1].startswith("REPAIRING 01: F1, F2 from review-01 as message 1 in "), out)
         self.assertTrue(lines[2].startswith("REVIEWING 01: review-01 "), out)
         self.assertIn("responses 2 fixed", lines[2])
-        self.assertIn("READY 01: gate passed (1/1), review clean (anthropic, findings 0); fleet accept demo 01 --gate "
-                      "--evidence <file>", out)
+        self.assertIn("READY 01: gate passed (1/1), review clean (anthropic, findings 0), strict ok; fleet accept "
+                      "demo 01 --gate --evidence <file>", out)
         self.assertNotIn("FINDINGS", out)
         self.assertNotIn(INJECTED, out)
         self.assertEqual(self.lead_calls, ["supervise"])
@@ -565,8 +565,15 @@ class Loop(RuntimeCase):
         out = self.wait_now(expected=2)
         self.assertNotIn("review-01", out)                                   # not awaiting the lead any more
         self.assertFalse([x for x in fleet.awaiting_lead(self.repo, self.state()) if x.startswith("review-01")])
-        self.lead("accept", "demo", "01", "--evidence", str(self.evidence))  # the lead weighed both rebuttals
+        # Strict acceptance: the high F1 is still listed, and the writer's rebuttal in this hand-back is one the
+        # lead may accept, without a re-review first.
+        refused = self.lead("accept", "demo", "01", "--evidence", str(self.evidence), expected=1)
+        self.assertIn("review-01: finding F1 (high", refused)
+        self.assertIn("or accept the writer's rebuttal with --accept-finding F1", refused)
+        self.lead("accept", "demo", "01", "--evidence", str(self.evidence),
+                  "--accept-finding", "F1", "the lead checked line 2 is the owner's")  # the lead weighed it
         state = self.state()
+        self.assertIn("the lead checked line 2 is the owner's", "\n".join(state["decisions"]))
         self.assertEqual(state["tickets"]["01"]["status"], "verified")
         self.assertTrue(state["workers"]["review-01"]["verified"])
         self.assertEqual(fleet.parse_status(self.run_file("reports", "review-01.md").read_text()), "verified")

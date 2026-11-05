@@ -11,6 +11,9 @@ from test_runtime import RuntimeCase, fleet  # noqa: E402
 class Grant(RuntimeCase):
     def setUp(self):
         super().setUp()
+        # Written before the quality bar: these tests cover verify and accept's mechanics with header-less
+        # reports, so their runs start under acceptance = "warn". tests/test_quality_bar.py covers "strict".
+        self.cfg["defaults"]["acceptance"] = "warn"
         self.typed = []  # every item list fleet.send_keys was given
         typer = patch.object(fleet, "send_keys", side_effect=lambda ws, surface, items: self.typed.append(items))
         typer.start()

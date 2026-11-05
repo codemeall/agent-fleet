@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.1.0-preview.30
+
+Teamwork release 7 (#51): Codex workers signal their turns, Fleet reports how each provider, model and tier performs, a heavy change can run as best-of-two across vendors, and accept refuses work below a strict quality bar by default.
+
+- **Turn signals (#48).** Adapters get a `signals` field: `claude-settings`, `codex-notify` or `""`. `hooks`, its older name, still works, and an owner's `hooks = ""` still turns signals off.
+  - Codex workers launch with `-c notify=[…]` in a new `{signals}` slot, so each finished turn runs `fleet _notify`. That appends a `turn-ended` event to the worker's events file without reading any config, state or lock.
+  - `wait` wakes `IDLE` when a Codex turn ends without a hand-back, quoting its last words. An approval prompt still wakes `STALLED`.
+  - Cursor gets no signals, since its hooks were not checked against `cursor-agent`, and `signals = "cursor-hooks"` is refused.
+  - `doctor` names each adapter's mechanism, and warns when the CLI's `--help` lacks the flag a signal slot passes, since the launch itself may then fail.
+  - providers.md records what was checked in the Codex source, and when.
+- **Usage report (#49).** `fleet usage [<run>...] [--all] [--by ticket|provider|model|tier|role] [--json]` reports, per group:
+  - tickets and outcomes, and first-pass acceptance;
+  - repairs, gate rounds and review rounds, and findings per round;
+  - launches, wall time and tokens.
+
+  It takes no lock and saves nothing, and a count Fleet lacks stays `unknown`, never zero. A best-of-two ticket goes to the writer kept with `--pick` and counts both writers' rework, and its judges count as its review rounds; its first pass is the kept writer's own. A ticket kept below the bar by the owner's words is never a first pass: it shows as `accepted anyway`. `--all` lists a run it cannot read, or a folder that is not a run, as skipped. A report that is not valid UTF-8 never stops it.
+- **Best of two (#50).** In a worktree run, `"fanout"` on an implement ticket runs two writers from two model families, `<id>--<provider>`, each in its own tree.
+  - Each writer has its own prompt, gate rounds and ledger entry. `wait` and `supervise` gate both, then wake once with `FANOUT`, giving each writer's gate result, header and diff size.
+  - `fleet judge` freezes both diffs and launches a read-only judge from a third family, whose `pick` wakes the lead as `VERDICT`.
+  - `fleet accept <run> <id> --pick <writer-id>` merges that writer's tree, verifies it and the judge, and saves the other writer's change as a patch. The judge is the kept diff's cross-family review when its family differs and its frozen diff still matches. Plain `accept`, `verify` and `review` are refused, naming the writers, and so is `grant` once a writer has launched.
+  - The `FANOUT` wake comes even when a busy lock deferred a writer's gate.
+  - **With release 6's rules:**
+    - A writer relaunched after a judge gets its gate rounds back, as after a review round.
+    - Each new judge starts its own scope window.
+    - An earlier judge's report is set to `superseded` once a later one is verified, and the writer set aside no longer waits on the lead.
+    - `@<ticket>` on the board reaches both writers.
+    - `send` to the ticket's own ID is refused, naming the writers and judges, and so is `send --findings`, since the judge is the ticket's review.
+- **Strict acceptance (#53).** `[defaults] acceptance = "strict"` is the default for new runs. A run keeps its value, and a run from before this release reads as `"warn"` and behaves as before. `verify`, `accept`, fan-out accept, `accept --pick` and supervise's `READY` ask one policy.
+  - **What it refuses:** a missing or faulty `fleet` header, an unmet criterion, a failing check or an open question. Also a missing, stale or unreadable review, or one that lists an open high or medium finding. For best of two, so does a judge that has not handed back, recommends neither writer or picked the other one. Each refusal names every item and its way out, before anything is stopped, merged or verified.
+  - **`--accept-finding F<n> "<why>"`** accepts the writer's rebuttal of one finding the latest review lists. That includes a rebuttal in the writer's hand-back after `send --findings`, before any re-review.
+  - **`--accept-anyway "<owner's words>"`** overrides the bar and records each item it overrode. It never overrides a missing or stale required review, a report not at `needs-verification`, or a change outside every ticket.
+  - A refusal after the bar records no override and claims none.
+  - **`[defaults] accept_checks`** run the combined-tree checks in the checkout at accept, after a worktree ticket's merge and before anything is verified. A pass is reused while the tree is unchanged, and the evidence keeps a failure's tail.
+  - A check that changes a ticket's own files refuses as the checks' doing, never the worker's, and the owner's words cannot override it. A merged file the checkout changed afterwards is a `CONFLICT`, never recorded as the merge.
+- **CI.** `push` runs only on `main`, so a PR commit is tested once, and each job stops after 30 minutes.
+- **Skill.** The lead's guide covers best of two and `--pick`, strict acceptance and its two overrides, `accept_checks`, `fleet usage` and `IDLE` for any worker, still within its size budget.
+
 ## 0.1.0-preview.29
 
 Teamwork release 6 (#47): a wrong approach is caught before it becomes a wrong diff, workers share what they learn without spending the lead's context, and writer and reviewer settle findings so that only disputes reach the lead.

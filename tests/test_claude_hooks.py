@@ -114,8 +114,8 @@ class Shipped(unittest.TestCase):
 
     def test_other_adapters_and_old_lines_are_unchanged(self):
         p = SHIPPED["providers"]
-        self.assertEqual(p["claude"]["hooks"], "claude-settings")
-        self.assertEqual(p["claude-co"]["hooks"], "claude-settings")  # extends copies it
+        self.assertEqual(fleet.signal_method(p["claude"]), "claude-settings")  # `signals`, once `hooks` (#48)
+        self.assertEqual(fleet.signal_method(p["claude-co"]), "claude-settings")  # extends copies it
         for name in ("codex", "cursor", "agy", "opencode"):
             with self.subTest(name):
                 self.assertFalse(fleet.hooks_on(p[name]))

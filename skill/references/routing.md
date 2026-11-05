@@ -44,11 +44,27 @@ If the allowed pool cannot provide a known different-family reviewer, tell the o
 
 The review sequence is in the skill's step 5. Review-only is a prompt contract in a shared checkout, not a security sandbox: inspect for unauthorized changes. Dependents remain blocked until the writer is verified.
 
+Under `acceptance = "strict"`, the default for new runs, accept also refuses a ticket whose latest review lists an open high or medium finding, until a re-review no longer lists it; only the owner's words accept it regardless ([the quality bar](commands.md#the-quality-bar)).
+
 ## Fan-out
 
 `fanout` on an `investigate` ticket runs one investigator per model family on the same question ([plan](commands.md#fan-out)). Use it only for heavy or uncertain questions: a hard bug with competing hypotheses, a design question where one model's blind spot would be costly, or a finding you would otherwise doubt. It multiplies cost: each entry is a full investigator session, plus a judge when you launch one. For a routine question, one investigator is enough.
 
 Each entry must resolve to a different known family, inside the run's routing and within `permission_ceiling`; plan refuses otherwise, as it refuses a review no provider could give. Two models of one mixed adapter count as two families only when their families are known and differ. When the reports differ, read them first; `fleet judge` adds a judge from a family none of the investigators ran on, or the lead's own when none is left, and says so.
+
+## Best of two
+
+`fanout` on an implement ticket, in a worktree run, has two writers from different families do the same ticket, each in its own tree; you keep one diff ([best of two](commands.md#best-of-two)). It doubles the writing cost: two full writer sessions, two gates, plus a judge. Only one diff is kept, so half of that work is set aside.
+
+Use it only for heavy or uncertain changes:
+
+- a change where a wrong approach is costly to find late, such as a concurrency fix, a migration path or a security check;
+- a design the ticket leaves open, where seeing two working answers side by side beats arguing about one;
+- code where one family has failed before, or where you would otherwise doubt the first diff.
+
+Skip it for light and standard tickets, for changes with one obvious shape, and for shared runs. For a heavy ticket with one sound approach, [plan first](#plan-first) or a cross-family review costs less. Best-of-two takes no `plan_first`.
+
+Pick the two families you trust most for the code. When the review mode requires review, the judge is the review of the diff you keep, so it must be of another family than the kept writer. With only two families available, the judge may share one writer's family: then it can stand as the review only for the other writer.
 
 ## Plan first
 
@@ -74,6 +90,17 @@ When a provider is failing, rate-limited or a poor fit mid-run, steer future imp
 Keep passing the plan's provider and tier to `fleet launch`; it prints `steered (<tier>): …` and records what the worker actually ran. Open panes and reviews are never steered, so cross-family review checks the writer's actual family. `fleet resume` shows an active steer.
 
 A worker on a usage limit usually shows as `STALLED`; `fleet peek` confirms it. Stop it, then either relaunch after the reset with `--resume`, which continues the worker's own session (same provider, adapters with `resume` such as Claude), or steer within the run's routing and relaunch fresh with a Repair note (examples 6). A usage limit is not a permission denial: steering inside the run's routing needs no further approval. When neither is possible, tell the owner.
+
+## Reading fleet usage
+
+`fleet usage` shows how each provider, model, tier or role did across runs ([usage](commands.md#usage)). Use it to propose a routing change to the owner, never to make one on your own. It never changes routing by itself, and nothing in Fleet reads it.
+
+- **Low first pass at a tier:** a model whose `light` tickets often need a repair, a gate round or changes should move up a tier (its `light` tickets to `standard`). One that passes nearly every `standard` ticket first time may take more of them at `light`.
+- **Many gate rounds:** the worker hands back before running its checks. Name the check commands in the prompt, or move the work up a tier.
+- **Many findings per round:** the writer misses what reviewers catch. Move its heavy work to another model, or turn on [plan first](#plan-first). Few findings and many review rounds point to rebuttals: read the reviewer's reports before blaming the writer.
+- **Repairs without findings:** relaunches after crashes or a lead's Repair note. Read the run's decisions before drawing a conclusion.
+
+Read small numbers with care: a group with three tickets says little, and `--all` mixes runs with different tickets and settings. Drops are listed apart and count as neither a pass nor a fail. Unknown tokens are unknown, never cheap: compare tokens only between groups whose counts are known.
 
 ## Failures and plan changes
 

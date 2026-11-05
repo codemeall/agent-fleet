@@ -199,13 +199,13 @@ A [warm worker](commands.md#warm-workers) (`fleet launch --after <id>`) uses the
 
 ## Claude hooks
 
-The `claude` adapter (and `claude-co`, which `extends` it) sets `hooks = "claude-settings"`. Each launch, `--resume` included, then writes `.fleet/runs/<run>/settings/<id>.json` and passes `--settings <path>` through the launch line's `{settings}` slot. Claude layers that file above the account's and the project's own settings and merges lists, so its hooks and rules add to the owner's ([settings precedence](https://code.claude.com/docs/en/settings#settings-precedence)). It holds:
+The `claude` adapter (and `claude-co`, which `extends` it) sets `signals = "claude-settings"` (before release 7, `hooks = "claude-settings"`, which still works; see [turn signals](#turn-signals)). Each launch, `--resume` included, then writes `.fleet/runs/<run>/settings/<id>.json` and passes `--settings <path>` through the launch line's `{settings}` slot. Claude layers that file above the account's and the project's own settings and merges lists, so its hooks and rules add to the owner's ([settings precedence](https://code.claude.com/docs/en/settings#settings-precedence)). It holds:
 
 - **A `PreToolUse` guard** on `Edit|Write|MultiEdit|NotebookEdit`, Claude's file-editing tools. It resolves the path the tool names (`tool_input.file_path`, or `notebook_path`) with `..` and symlinks followed, a relative one against Claude's `cwd`, and allows only the ticket's own files and the worker's own report. Reviewers and investigators may write only their report. Anything else exits 2, which blocks the call, and Claude reads the reason: the file is outside the ticket's scope, so write `Status: blocked` naming it and wait for the lead. A write through a symlink, even one inside the repo, is refused. `fleet grant` updates a running worker's guard before the worker hears of the grant.
 - **`Notification` and `Stop` hooks** that append events to `.fleet/runs/<run>/events/<id>.jsonl`: `permission-prompt` (Claude's `permission_prompt` notification, with its message), `idle` (`idle_prompt`, about a minute after a turn with nothing typed since) and `turn-ended` (each `Stop`, with Claude's last message). Refused edits are logged as `denied`, and a hook that could not decide as `hook-error`.
 - **`"disableAllHooks": false`**, so an owner's own `disableAllHooks` does not switch the guard off. It turns the owner's other hooks back on for that worker too. Managed settings still win over it.
 
-`fleet wait` reads the events file without the lock, as it reads everything else, and wakes the lead once per event: `PERMISSION <id>: <message>; the owner answers it in the worker's pane (fleet agents); the lead never does`, and `IDLE <id>` when an idle worker has not handed back (quoting its last words). A turn that ends never wakes the lead on its own, since a hand-back already does. No keystrokes are ever sent for these events. A screen already reported this way does not also wake as `STALLED`. Other adapters and runs launched before hooks keep the screen-hash `STALLED`, whose line now names a likely approval prompt.
+`fleet wait` reads the events file without the lock, as it reads everything else, and wakes the lead once per event: `PERMISSION <id>: <message>; the owner answers it in the worker's pane (fleet agents); the lead never does`, and `IDLE <id>` when an idle worker has not handed back (quoting its last words). A turn that ends never wakes the lead on its own, since a hand-back already does. No keystrokes are ever sent for these events. A screen already reported this way does not also wake as `STALLED`. Codex workers wake `IDLE` through its `notify` program ([turn signals](#turn-signals)). Other adapters and runs launched before hooks keep the screen-hash `STALLED`, whose line now names a likely approval prompt.
 
 The hooks run `fleet _hook <kind> <scope file> <events file> <token>` (shell form, a 10-second `timeout`). It reads only the small scope file written at launch, `settings/<id>.scope.json`, never `run.json` or the run's lock, and it fails safe. Malformed input, a missing scope file or any other error exits 0, so the action goes ahead and the reason is logged. A hook that times out or crashes is a non-blocking error to Claude, since Fleet sets no `onFailure`. A broken hook never stops a worker. It also never widens one: the settings change no permission mode, so an edit the guard did not refuse meets Claude's own rules and mode as it would without hooks. The scope check (#10) still refuses acceptance of any stray change.
 
@@ -215,7 +215,7 @@ The hooks run `fleet _hook <kind> <scope file> <events file> <token>` (shell for
 
 Fleet never launches a Claude worker in `acceptEdits`: that mode also approves `mkdir`, `touch`, `rm`, `rmdir`, `mv`, `cp` and `sed` in the working directory, through Bash, where the guard does not look. The hooks narrow the built-in tools only. A Bash command the owner approves, a script it runs, or an organisation policy that blocks non-managed hooks (`allowManagedHooksOnly`) is outside them, which is why the scope check stays.
 
-Turn the hooks off with `hooks = ""` under `[providers.claude]`, or with a `launch` override without `{settings}`. Reviewers then ask before writing their report, and `wait` falls back to `STALLED`. Headless reviewers never get hooks; their own line denies every write.
+Turn the hooks off with `signals = ""` (or the older `hooks = ""`) under `[providers.claude]`, or with a `launch` override without `{settings}`. Reviewers then ask before writing their report, and `wait` falls back to `STALLED`. Headless reviewers never get hooks; their own line denies every write.
 
 ### What was checked
 
@@ -238,6 +238,52 @@ Checked on 2026-11-05 against the docs and the installed CLI; no real Claude wor
 | `--settings <file-or-json>`, `--permission-mode` choices | `claude --help`, 2.1.318 | As above |
 
 **Assumption, not checked live:** that an `Edit(//…)` allow rule from a `--settings` file approves a `Write` to that path in manual mode without a prompt. The docs say so, but no signed-in Claude has run it; if it does not, the reviewer asks for its report write, as with hooks off. Check it with `fleet smoke` on a signed-in Claude and record it here. `tests/test_claude_hooks.py` runs the hooks with the documented JSON, and the strict fake runs a settings file's `PreToolUse` and `Stop` hooks around its own writes. Those tests prove Fleet's half, not Claude's.
+
+## Turn signals
+
+An adapter's `signals` field names how its workers tell `fleet wait` about their turns:
+
+| `signals` | Adapter | Launch slot | What wakes the lead |
+| --- | --- | --- | --- |
+| `claude-settings` | `claude`, `claude-co` | `{settings}`: `--settings <file>` | `PERMISSION` and `IDLE` from its [hooks](#claude-hooks), plus the scope guard |
+| `codex-notify` | `codex` | `{signals}`: `-c notify=[…]` | `IDLE` when a turn ends without a hand-back |
+| none | every other adapter | none | the screen hash: `STALLED` |
+
+`hooks` is the older name. It still takes `claude-settings` or `""`, so old configs load and behave as before. An empty value in either field turns signals off, so an owner's `hooks = ""` still does. Otherwise `signals` wins. A launch line without the slot runs as written, with no signals. Headless reviewers never get them. Runs launched before this release have no `signals` record, so `wait` keeps watching their screens. Screen hashing also stays on for adapters with signals, for the prompts their signals do not report.
+
+**Codex.** Each launch passes one more config override in the `{signals}` slot:
+
+```
+-c 'notify=["/usr/bin/python3", "/path/to/fleet", "_notify", "/repo/.fleet/runs/<run>/events/<id>.jsonl", "<token>"]'
+```
+
+The value is a TOML array of strings: Fleet escapes quotes, backslashes and control characters in each path, and quotes the whole `notify=[…]` as one shell word, so paths with spaces or quotes stay intact. A path that is not valid UTF-8 has no TOML form; that worker then launches without signals, with a warning. After each turn Codex runs the program with the notification JSON as one more argument: `fleet _notify <events file> <token> <JSON>`. For `"type": "agent-turn-complete"` it appends `turn-ended` to the worker's events file, the same file Claude's hooks write, with `last-assistant-message` (first 500 characters) and the `turn-id` and `thread-id`. Other types are ignored. It reads no config, run state or lock. Bad arguments or JSON are logged as `notify-error`, and it always exits 0. Codex does not wait for it, and sends its output nowhere.
+
+`wait` reads the event as it reads Claude's. A turn that ended without a hand-back wakes `IDLE <id>: Codex ended its turn with "<last words>" and has not handed back`, once per pass. A turn that ends after the worker hands back is quiet, since the report already woke the lead. No keystrokes are ever sent. Codex's notify has no event for an approval prompt, which waits inside a turn, so that still wakes as `STALLED`.
+
+The override replaces the account's own `notify` for Fleet's workers, so a desktop notifier set there does not run for them. Set `signals = ""` under `[providers.codex]` to keep it; `wait` then watches the screen.
+
+**Cursor.** No signals. Cursor documents agent hooks (`hooks.json` with `stop` and `afterFileEdit`, among others), but they were not checked against the current `cursor-agent`: Cursor's docs and forum were blocked from this session, the CLI is not installed here, and search results disagree on whether `cursor-agent` runs them. `signals = "cursor-hooks"` is refused at load, so nobody turns on a mechanism nobody has checked. To add it: read Cursor's hooks docs, confirm with a logging `stop` hook that `cursor-agent` runs it in the TUI, record the payload here, then add the method and a test.
+
+`fleet doctor` names each adapter's mechanism (`signals codex-notify (-c notify): …`, `signals none: wait watches the screen (STALLED)`), and says when a slot is missing. It warns when the CLI's `--help` does not list the flag the slot passes (`--settings` for Claude, `-c` for Codex). Such a warning is about the launch itself, not only signals: a CLI that no longer takes the flag may refuse to start, and Codex's shipped launch line passes `-c` for its own settings too (`model_reasoning_effort`, `check_for_update_on_startup`), so the warning says so; check the launch line against that CLI version.
+
+### What was checked: Codex and Cursor signals
+
+Checked on 2026-11-05 in the source of `openai/codex` at `main` commit `0327a3e` (2026-11-05), and by web search for Cursor. Codex is not installed here, and developers.openai.com, cursor.com and forum.cursor.com were blocked from this session, so no `--help` or docs page was read and no real worker ran with signals.
+
+| What | Where it was checked | Result used |
+| --- | --- | --- |
+| `notify` is a top-level config key, an optional array of strings (program and arguments) | `codex-rs/config/src/config_toml.rs` (`notify: Option<Vec<String>>`) | `-c notify=[…]` |
+| `-c key=value` parses the value as TOML (`_x_ = <value>`), falling back to a plain string; the value is trimmed | `codex-rs/utils/cli/src/config_override.rs` (`parse_overrides`) | A valid TOML array, so it never falls back to a string |
+| `notify` is denied in a project's `.codex/config.toml`, but taken from user, system and runtime (`-c`) layers | `codex-rs/config/src/loader/mod.rs` (`PROJECT_LOCAL_CONFIG_DENYLIST`) | Passed with `-c`, never written to the repo |
+| The program gets the JSON as its last argument; stdin, stdout and stderr are null; it is spawned and not waited for; its environment is a captured snapshot with credentials scrubbed | `codex-rs/hooks/src/legacy_notify.rs`, `codex-rs/hooks/src/registry.rs` (`command_from_argv`) | Absolute paths to Python and Fleet; the JSON is the last argument |
+| Payload: `type` `agent-turn-complete`, `thread-id`, `turn-id`, `cwd`, `client` (`codex-tui` in the TUI), `input-messages`, `last-assistant-message` (may be null) | `legacy_notify.rs`, `legacy_notify_json_matches_historical_wire_shape` test | `last-assistant-message`, `turn-id`, `thread-id`; the tests feed this JSON |
+| It fires in the session's turn loop when a turn ends with no follow-up, after the `Stop` hooks, for any client; the TUI runs that loop in an embedded app server | `codex-rs/core/src/session/turn.rs` (`run_legacy_after_agent_hook`), `codex-rs/core/src/hook_runtime.rs`, `codex-rs/tui/src/lib.rs` (`start_app_server`) | It fires in the TUI. An approval prompt is not a turn end, so it gets no event |
+| A TUI started with any `-c` override other than a few `features`/`tui` booleans does not reuse a shared app-server daemon | `codex-rs/tui/src/daemon_startup.rs` (`config_exclusion`), `startup_orchestration.rs` | The worker's own overrides, `notify` included, apply to its session |
+| Codex also has lifecycle hooks (`Stop` and others), behind the `codex_hooks` feature and a hook-trust review at start | `codex-rs/core/src/session/mod.rs` (`Feature::CodexHooks`), `codex-rs/tui/src/startup_hooks_review.rs` | Not used: the review screen would stall a worker; `notify` is marked legacy in the source but still shipped |
+| Cursor agent hooks (`stop`, `afterFileEdit`) and whether `cursor-agent` runs them | Web search only: cursor.com/docs/hooks and a Cursor forum thread, both unreachable here, disagree about the CLI | Not used; Cursor keeps the screen hash |
+
+**Assumption, not checked live:** that a released `codex` binary runs `notify` in its TUI as `main` does. `notify` is marked legacy in the source; if a later Codex drops it, the override does nothing and `wait` falls back to `STALLED`. `tests/test_signals.py` feeds `fleet _notify` the documented JSON, and the strict fake parses the `-c notify` value as TOML and runs it after its turn, with paths that contain spaces and quotes. Those tests prove Fleet's half, not Codex's.
 
 ## Extra subscriptions
 
@@ -262,10 +308,10 @@ A Codex worker that needs an approval waits in its pane until the owner answers,
 
 ```toml
 [providers.codex]
-launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c check_for_update_on_startup=false -c approvals_reviewer=auto_review {profile} {prompt}"
+launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c check_for_update_on_startup=false -c approvals_reviewer=auto_review {signals} {profile} {prompt}"
 ```
 
-An older copy of this line that spells out `-s workspace-write -a on-request` instead of `{profile}` still works; both roles then run it as written.
+An older copy of this line that spells out `-s workspace-write -a on-request` instead of `{profile}` still works; both roles then run it as written. A copy without `{signals}` also works, without Codex's [turn signals](#turn-signals): `wait` then watches its screen, as before.
 
 This is approval routing inside Codex. It is unrelated to Fleet's cross-family review of a ticket's diff, which `review=` controls.
 
@@ -278,6 +324,8 @@ Use model IDs and effort levels supported by the authenticated account. The ship
 The default launches `cursor-agent` with the chosen model and repository trust, retaining interactive permission handling; it does not use `--force`. `--trust` is in the shipped launch line, so Cursor is trusted with or without `auto_trust`; that the interactive TUI honours it is [unverified](#profile-flags-checked). A trusted workspace is not permission for an arbitrary command. Inspect trust or command prompts as part of launch verification.
 
 Cursor can serve several families. The example tiers identify xAI (`grok-…`), Moonshot (`kimi-…`) and Meta (`muse-…`) separately. The lead may choose any model `cursor-agent --list-models` offers (`fleet models cursor gemini` filters them); `family_prefixes` names each one's family. Parameterized IDs must remain a single argument. A model whose name hides its base model needs an exact family entry, especially for cross-family review. A different CLI name alone is not evidence of a different family.
+
+Cursor has no [turn signals](#turn-signals): its hooks were not checked against the current `cursor-agent`, so `wait` watches a Cursor worker's screen and wakes `STALLED`.
 
 ## Antigravity
 
@@ -330,10 +378,10 @@ For every new adapter, test a harmless local ticket, multiple waves, a required 
 | Section | Keys |
 | --- | --- |
 | Top level | `defaults`, `providers`, `lead_context` |
-| `[defaults]` | `workspace`, `routing`, `prefer`, `max_parallel`, `review`, `review_rounds`, `gate`, `gate_rounds`, `supervise`, `auto_trust`, `backend`, `tmux_socket`, `max_workers`, `max_wall_minutes`, `scope_ignore`, `permission_ceiling`, `check_policy`, `scope_permissions`, `review_transport`, `headless_timeout_minutes`, `worktree_root`, `worktree_setup`, `warm_max`, `warm_context_tokens`, `plan_first` |
-| `[providers.<name>]` | `enabled`, `placeholder`, `extends`, `bin`, `bin_aliases`, `launch`, `profiles`, `session`, `resume`, `quit`, `login`, `login_ok`, `account_env`, `env`, `trust`, `models`, `model_config`, `default_home`, `model_note`, `models_allow`, `model_families`, `family_prefixes`, `efforts`, `family`, `plugins`, `max`, `tiers`, `hooks`, `headless`, `review_transport`, `add_dir` |
+| `[defaults]` | `workspace`, `routing`, `prefer`, `max_parallel`, `review`, `review_rounds`, `gate`, `gate_rounds`, `supervise`, `auto_trust`, `backend`, `tmux_socket`, `max_workers`, `max_wall_minutes`, `scope_ignore`, `permission_ceiling`, `check_policy`, `scope_permissions`, `review_transport`, `headless_timeout_minutes`, `worktree_root`, `worktree_setup`, `warm_max`, `warm_context_tokens`, `plan_first`, `acceptance`, `accept_checks` |
+| `[providers.<name>]` | `enabled`, `placeholder`, `extends`, `bin`, `bin_aliases`, `launch`, `profiles`, `session`, `resume`, `quit`, `login`, `login_ok`, `account_env`, `env`, `trust`, `models`, `model_config`, `default_home`, `model_note`, `models_allow`, `model_families`, `family_prefixes`, `efforts`, `family`, `plugins`, `max`, `tiers`, `hooks`, `signals`, `headless`, `review_transport`, `add_dir` |
 | `[providers.<name>.tiers.<tier>]` | `model`, `effort`, `family` (any tier name) |
 | `[providers.<name>.profiles.<role>]` | `args`, `level`; the roles are `worker` and `review` |
 | `[lead_context.<host>]` | `warn_at`, `dumb_at`; the hosts are `claude` and `codex`. Here another host or key is already an error |
 
-`env`, `family_prefixes`, `model_families` and a `models_allow` table are free-form: their keys are variable names, model IDs or prefixes, so Fleet does not check them. `hooks` is a name (`claude-settings`, or `""` for none). The [providers.toml header](../providers.toml) documents each adapter field; `config.example.toml` comments each `[defaults]` key.
+`env`, `family_prefixes`, `model_families` and a `models_allow` table are free-form: their keys are variable names, model IDs or prefixes, so Fleet does not check them. `signals` is a name (`claude-settings`, `codex-notify`, or `""` for none); `hooks` is its older spelling and takes only `claude-settings` or `""` ([turn signals](#turn-signals)). The [providers.toml header](../providers.toml) documents each adapter field; `config.example.toml` comments each `[defaults]` key.
