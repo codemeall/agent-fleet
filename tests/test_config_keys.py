@@ -72,7 +72,7 @@ class ConfigKeys(unittest.TestCase):
         _, err = self.load(
             '[defaults]\nscope_permissions = true\nreview_transport = "headless"\ncheck_policy = "warn"\n'
             '[providers.codex]\nenv = { ANYTHING = "1" }\nheadless = "x"\nreview_transport = "tui"\n'
-            'hooks = { any = { thing = 1 } }\nmodel_families = { "gpt-x" = "openai" }\n'
+            'hooks = "claude-settings"\nmodel_families = { "gpt-x" = "openai" }\n'
             'family_prefixes = { "gpt-" = "openai" }\nmodels_allow = { "gpt-x" = "openai" }\n'
             '[providers.codex.tiers.custom]\nmodel = "gpt-x"\neffort = "high"\nfamily = "openai"\n')
         self.assertEqual(err, "")

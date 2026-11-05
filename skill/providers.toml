@@ -46,14 +46,22 @@
 # review_transport: "tui" (default) or "headless", here or under [defaults]; headless needs a `headless` line, and
 #   an adapter without one keeps its TUI under a [defaults] headless. Implementation workers always run in a TUI.
 #   See references/providers.md#headless-reviewers.
+# hooks: how launch gives each worker Fleet's hooks, through the launch line's {settings} slot (dropped without them).
+#   claude-settings writes .fleet/runs/<run>/settings/<id>.json and passes --settings <path>: a guard that refuses
+#   edits outside the worker's own files and report, and events `fleet wait` reads (a permission prompt, idle).
+#   "" turns them off; so does a launch line without {settings}. See references/providers.md#claude-hooks.
 
 [providers.claude]
 enabled = true
 bin = "claude"
-launch = "{bin} {session} --model {model} --effort {effort} {profile} {prompt}"
-# Workers get no mode flag, so the account's permissions.defaultMode applies, as before profiles. Reviewers pin
-# manual mode (`claude --help` 2.1.318: Claude asks before each edit and command, its own report included), so a
-# looser defaultMode never reaches them. Allow rules in Claude's settings still apply in manual mode.
+launch = "{bin} {session} --model {model} --effort {effort} {profile} {settings} {prompt}"
+hooks = "claude-settings"
+# Workers get no mode flag, so the account's permissions.defaultMode applies, as before profiles, unless the owner
+# sets [defaults] scope_permissions = true (then acceptEdits, with the guard and their planned checks allowed).
+# Without hooks, reviewers pin manual mode (`claude --help` 2.1.318: Claude asks before each edit and command, its
+# own report included), so a looser defaultMode never reaches them. With hooks on, the guard lets a reviewer write
+# only its report, so launch swaps manual for acceptEdits and the report write needs no answer; the level stays
+# read-only, since that is still all it can change. Allow rules in Claude's settings apply in either mode.
 profiles.worker = { args = "", level = "workspace-write" }
 profiles.review = { args = "--permission-mode manual", level = "read-only" }
 # Headless (review_transport = "headless"): `-p` with nobody to answer (`--permission-prompts none`) in manual mode,

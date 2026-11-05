@@ -69,6 +69,9 @@ DEFAULTS = {
     "permission_ceiling": "workspace-write",  # the widest profile level launch will start; the owner's to raise
     "check_policy": "refuse",  # plan and add refuse a ticket without a runnable or manual check; "warn" saves it
     "review_transport": "tui",  # reviewers and investigators: TUI panes, or "headless" where an adapter has the line
+    # The owner's opt-in, for adapters with hooks: workers auto-accept edits (the guard keeps them in scope) and run
+    # their ticket's planned check commands without asking. Off: workers keep the account's own permission mode.
+    "scope_permissions": False,
 }
 CHECK_POLICIES = ("refuse", "warn")
 STATUS_RE = re.compile(r"^\s*[*_`]*\s*status\s*[*_`]*\s*:\s*[*_`]*\s*(.+?)\s*[*_`]*\s*$", re.I)
@@ -92,6 +95,15 @@ HEADLESS = "headless"
 TRANSPORTS = ("tui", HEADLESS)
 UNDECLARED_PROFILE = {"args": "", "level": "workspace-write"}  # an adapter written before profiles existed
 HELP_TIMEOUT_S = 10  # doctor's `<bin> --help`; a CLI that takes longer leaves its flags unverified
+HOOK_METHODS = ("claude-settings",)  # an adapter's `hooks`: how launch gives a worker Fleet's guard and event hooks
+# Claude Code's file-editing tools, by their hook matcher names (code.claude.com/docs/en/hooks, tools-reference;
+# MultiEdit is legacy but harmless to match). Each names its file in tool_input.file_path, NotebookEdit in notebook_path.
+CLAUDE_EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+CLAUDE_GUARDED_MODE = "acceptEdits"  # edits apply unasked; the guard keeps them to the worker's own files
+# acceptEdits also auto-approves these Bash commands in the working directory (permission-modes docs), where the
+# guard cannot see them, so a guarded launch asks for them as manual mode would.
+CLAUDE_ASK_COMMANDS = ("mkdir", "touch", "rm", "rmdir", "mv", "cp", "sed")
+HOOK_TIMEOUT_S = 10  # seconds Claude gives a hook; a hook that times out or fails lets the action go ahead
 PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
 TEMPLATE_KEYS = {"id", "ticket", "report", "repo", "files", "diff", "review_of", "handdown", "inbox", "transport",
                  *PROMPT_FIELDS}
@@ -137,7 +149,7 @@ def deep_merge(base: dict, over: dict) -> dict:
 def config_schema() -> dict:
     """The keys each config section takes. A dict names its keys ("*" stands for any name, such as an adapter or
     a tier); None is a value Fleet does not look inside: a scalar, a list or a free-form table (env, family_prefixes,
-    model_families, models_allow, hooks)."""
+    model_families, models_allow)."""
     adapter = dict.fromkeys(ADAPTER_FIELDS)
     adapter["tiers"] = {"*": dict.fromkeys(TIER_FIELDS)}
     adapter["profiles"] = {p: dict.fromkeys(PROFILE_FIELDS) for p in PROFILES}
@@ -205,6 +217,8 @@ def load_config(user_path: Path | None = None) -> dict:
         raise FleetError("defaults.auto_trust must be true or false")
     if cfg["defaults"]["check_policy"] not in CHECK_POLICIES:
         raise FleetError('defaults.check_policy must be "refuse" (the default) or "warn"')
+    if not isinstance(cfg["defaults"]["scope_permissions"], bool):
+        raise FleetError("defaults.scope_permissions must be true or false")
     if cfg["defaults"]["permission_ceiling"] not in PERMISSION_LEVELS:
         raise FleetError(f"defaults.permission_ceiling must be one of {', '.join(PERMISSION_LEVELS)} (narrowest first)")
     if cfg["defaults"]["review_transport"] not in TRANSPORTS:
@@ -237,6 +251,8 @@ def load_config(user_path: Path | None = None) -> dict:
                 raise FleetError(f"{name}.{flag} must be true or false")
         if adapter.get("trust") not in (None, *TRUST_METHODS):
             raise FleetError(f"{name}.trust must be one of {', '.join(TRUST_METHODS)}")
+        if adapter.get("hooks") not in (None, "", *HOOK_METHODS):
+            raise FleetError(f"{name}.hooks must be one of {', '.join(HOOK_METHODS)}, or \"\" for none")
         profiles = adapter.get("profiles", {})
         if not (isinstance(profiles, dict) and all(isinstance(v, dict) and isinstance(v.get("args", ""), str)
                                                    and v.get("level") in PERMISSION_LEVELS for v in profiles.values())):
@@ -394,7 +410,11 @@ def check_ceiling(cfg: dict, name: str, pcfg: dict, profile: str) -> None:
 
 
 def build_launch(pcfg: dict, model: str, effort: str | None, prompt: str,
-                 session: str | None = None, resume: bool = False, trust: str = "", profile: str = "worker") -> str:
+                 session: str | None = None, resume: bool = False, trust: str = "", profile: str = "worker",
+                 settings: str | None = None, mode: str | None = None) -> str:
+    """The worker's command line. `settings`, a hooks adapter's per-worker settings file, fills the {settings} slot;
+    `mode` is the permission mode its guard lets the role run in (hook_mode). Without them, and for a launch line
+    without the slot, the line is the one launch built before hooks."""
     template = pcfg[HEADLESS] if profile == HEADLESS else pcfg["launch"]
     if "{effort}" in template and not effort:
         raise FleetError("this provider's launch needs an effort: pass --effort or set it on the tier")
@@ -402,11 +422,183 @@ def build_launch(pcfg: dict, model: str, effort: str | None, prompt: str,
             if session and resumable(pcfg) and profile != HEADLESS else "")
     if not flag:
         template = template.replace(" {session}", "").replace("{session}", "")
+    slot = f"--settings {shlex.quote(settings)}" if settings and "{settings}" in template else ""
+    if not slot:
+        template = template.replace(" {settings}", "").replace("{settings}", "")
     args = adapter_profile(pcfg, profile)["args"]  # trusted adapter config, like bin, so not quoted
+    if slot and mode and "{profile}" in template:  # the mode leans on the guard, so only with the settings file
+        args = with_mode(args, mode)
     if not args:
         template = template.replace(" {profile}", "").replace("{profile}", "")
     return env_prefix(pcfg) + template.format(bin=pcfg["bin"] + (" " + trust if trust else ""), session=flag, model=shlex.quote(model),
-                                              effort=shlex.quote(effort or ""), prompt=shlex.quote(prompt), profile=args)
+                                              effort=shlex.quote(effort or ""), prompt=shlex.quote(prompt), profile=args,
+                                              settings=slot)
+
+
+# ---------- Claude hooks ----------
+# An adapter with hooks = "claude-settings" launches each worker with its own Claude settings file (--settings):
+# a PreToolUse guard on the file-editing tools that refuses any path outside the worker's own files and report,
+# and Notification and Stop hooks that append events for wait. The hooks run `fleet _hook`, which reads a small
+# scope file written at launch (never run.json or its lock) and fails safe: when it cannot decide, it allows the
+# action and logs why. Fleet never answers a prompt, and the guard only narrows what a worker may do.
+
+def hooks_on(pcfg: dict) -> bool:
+    """True when launch gives this adapter's workers Fleet's settings file: `hooks` set and a {settings} slot. An
+    owner's launch line without the slot runs as written, without hooks."""
+    return pcfg.get("hooks") in HOOK_METHODS and "{settings}" in pcfg.get("launch", "")
+
+
+def hook_mode(cfg: dict, pcfg: dict, profile: str) -> str | None:
+    """The permission mode a guarded role runs in, or None to keep its profile's. A reviewer or investigator may
+    write only its report, which the guard enforces, so it no longer needs manual mode to keep other edits from
+    happening. A worker keeps the account's own mode unless the owner turned on scope_permissions."""
+    if not hooks_on(pcfg):
+        return None
+    if profile == "review" or cfg.get("defaults", DEFAULTS).get("scope_permissions"):
+        return CLAUDE_GUARDED_MODE
+    return None
+
+
+def with_mode(args: str, mode: str) -> str:
+    """Profile args with Claude's permission mode set to `mode`: a manual mode is replaced, a missing one added, and
+    any other mode the owner chose is kept as written."""
+    found = re.search(r"--permission-mode(?:=|\s+)(\S+)", args)
+    if not found:
+        return f"{args} --permission-mode {mode}".strip()
+    if found.group(1) not in ("manual", "default"):
+        return args
+    return args[:found.start(1)] + mode + args[found.end(1):]
+
+
+def allow_rules(commands: list[dict]) -> list[str]:
+    """Claude permission rules for exactly a ticket's planned check commands: `Bash(<command>)` matches that command
+    and nothing longer (permissions docs). A `*` would make the rule a wildcard, so such a command gets no rule and
+    still asks; so does a multi-line one."""
+    return [f"Bash({c['run']})" for c in commands if "*" not in c["run"] and "\n" not in c["run"]]
+
+
+def hook_command(kind: str, scope: Path, events: Path, token: str) -> str:
+    """Shell form (`sh -c`), which every Claude Code version runs; each path is quoted."""
+    return shlex.join([sys.executable, str(Path(__file__).resolve()), "_hook", kind, str(scope), str(events), token])
+
+
+def hook_settings(scope: Path, events: Path, token: str, mode: str | None, allow: list[str]) -> dict:
+    """The worker's Claude settings. --settings layers them above the account's and the project's own files, and
+    list keys merge (settings docs): these hooks and rules add to the owner's, never replace them."""
+    def run(kind: str) -> list[dict]:
+        return [{"type": "command", "command": hook_command(kind, scope, events, token), "timeout": HOOK_TIMEOUT_S}]
+    settings = {
+        "disableAllHooks": False,  # an owner's own disableAllHooks would switch the guard off; managed settings win
+        "hooks": {
+            "PreToolUse": [{"matcher": "|".join(CLAUDE_EDIT_TOOLS), "hooks": run("pre-tool-use")}],
+            "Notification": [{"matcher": "permission_prompt|idle_prompt", "hooks": run("notification")}],
+            "Stop": [{"hooks": run("stop")}],
+        },
+    }
+    permissions = {}
+    if mode == CLAUDE_GUARDED_MODE:  # ask rules come before the mode's own approvals (deny, ask, then allow)
+        permissions["ask"] = [f"Bash({c} *)" for c in CLAUDE_ASK_COMMANDS]
+    if allow:
+        permissions["allow"] = allow
+    if permissions:
+        settings["permissions"] = permissions
+    return settings
+
+
+def hook_files(d: Path, wid: str) -> tuple[Path, Path, Path]:
+    """A worker's settings file, the scope file its guard reads and the events file its hooks append to."""
+    for sub in ("settings", "events"):  # runs from before hooks have neither
+        (d / sub).mkdir(exist_ok=True)
+    return d / "settings" / f"{wid}.json", d / "settings" / f"{wid}.scope.json", d / "events" / f"{wid}.jsonl"
+
+
+def write_hooks(repo: Path, d: Path, wid: str, files: list[str], token: str, mode: str | None,
+                allow: list[str]) -> dict:
+    """Write a launch's settings and scope files; returns the paths the worker record keeps."""
+    settings, scope, events = hook_files(d, wid)
+    atomic_json(scope, {"id": wid, "token": token, "repo": str(repo.resolve()), "files": sorted(files),
+                        "report": str((d / "reports" / f"{wid}.md").resolve())})
+    atomic_json(settings, hook_settings(scope, events, token, mode, allow))
+    return {"settings": str(settings), "scope": str(scope), "events": str(events)}
+
+
+def refresh_scope(w: dict, files: list[str]) -> None:
+    """After a grant, a running worker's guard allows its new files from its next edit."""
+    scope = Path(w["hooks"]["scope"])
+    atomic_json(scope, dict(json.loads(scope.read_text()), files=sorted(files)))
+
+
+def hook_log(events: str, token: str, event: str, **fields) -> None:
+    """Append one event line (one write, so lines from parallel hooks never interleave); a hook that cannot write
+    it says so on stderr, which Claude keeps in its debug log, and goes on."""
+    line = json.dumps({"event": event, "token": token, "at": time.time(), **fields}) + "\n"
+    try:
+        with open(events, "a") as fh:
+            fh.write(line)
+    except OSError as e:
+        print(f"fleet _hook: could not log {event} to {events}: {e}", file=sys.stderr)
+
+
+def guard_target(path: str, scope: dict, cwd) -> tuple[str, set[str]]:
+    """The real path an edit would write, with `..` and symlinks resolved (a relative path against Claude's cwd,
+    else the repo), and the paths the worker may write. Those are the scope files' plain paths, so a scope file
+    that is itself a symlink resolves elsewhere and the guard refuses writes through it too."""
+    repo = os.path.realpath(scope["repo"])
+    base = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else repo
+    target = os.path.realpath(os.path.join(base, path))
+    report = scope["report"]
+    allowed = {os.path.join(repo, f) for f in scope["files"]}
+    allowed.add(os.path.join(os.path.realpath(os.path.dirname(report)), os.path.basename(report)))
+    return target, allowed
+
+
+def guard_message(scope: dict, path: str) -> str:
+    own = (f"its files are {', '.join(scope['files'])}, plus its report {scope['report']}" if scope["files"]
+           else f"a reviewer or investigator writes only its report, {scope['report']}")
+    return (f"Fleet refused this edit: {path} is outside ticket {scope['id']}'s scope ({own}). Do not change it any "
+            "other way. If the work needs it, write `Status: blocked` in your report naming the file and why, then "
+            "wait for the lead.")
+
+
+def run_hook(args: list[str]) -> int:
+    """`fleet _hook <pre-tool-use|notification|stop> <scope file> <events file> <token>`, run by Claude Code with the
+    event's JSON on stdin. It exits 2, with the reason on stderr for Claude, only for an edit it can show is outside
+    the worker's files. Anything else exits 0, so a broken hook never stops a worker: it allows and logs instead."""
+    if len(args) != 4:
+        print("fleet _hook: expects kind, scope file, events file and token; allowed", file=sys.stderr)
+        return 0
+    kind, scope_path, events, token = args
+    try:
+        data = json.loads(sys.stdin.buffer.read() or b"{}")
+        if not isinstance(data, dict):
+            raise ValueError("stdin is not a JSON object")
+        if kind == "notification":
+            event = {"permission_prompt": "permission-prompt", "idle_prompt": "idle"}.get(data.get("notification_type"))
+            if event:
+                hook_log(events, token, event, message=str(data.get("message") or "")[:500])
+            return 0
+        if kind == "stop":
+            hook_log(events, token, "turn-ended", message=str(data.get("last_assistant_message") or "")[:500])
+            return 0  # never 2: on Stop that would keep the worker's turn going
+        if kind != "pre-tool-use":
+            raise ValueError(f"unknown hook {kind!r}")
+        tool, given = data.get("tool_name"), data.get("tool_input")
+        if tool not in CLAUDE_EDIT_TOOLS:
+            return 0
+        path = given.get("notebook_path" if tool == "NotebookEdit" else "file_path") if isinstance(given, dict) else None
+        if not isinstance(path, str) or not path:
+            raise ValueError(f"the {tool} call names no file")
+        scope = json.loads(Path(scope_path).read_text())
+        target, allowed = guard_target(path, scope, data.get("cwd"))
+        if target in allowed:
+            return 0
+        hook_log(events, token, "denied", tool=tool, path=path, target=target)
+        print(guard_message(scope, path), file=sys.stderr)
+        return 2
+    except Exception as e:  # noqa: BLE001 - whatever went wrong, the worker keeps working
+        hook_log(events, token, "hook-error", hook=kind, error=f"{type(e).__name__}: {str(e)[:300]}")
+        print(f"fleet _hook {kind}: could not decide ({e}); allowed", file=sys.stderr)
+        return 0
 
 
 # ---------- folder trust ----------
@@ -2557,6 +2749,11 @@ def cmd_grant(a, cfg):
     save_run(repo, a.run, state)
     print(f"{a.id}: granted {', '.join(new)}; its scope is now {', '.join(t['files'])}")
     live = bool(w) and w.get("state") in ACTIVE_STATES
+    if live and w.get("hooks"):  # before the pointer: the worker may edit the new file as soon as it reads it
+        try:
+            refresh_scope(w, t["files"])
+        except (OSError, ValueError) as e:  # with no scope file its guard already allows every edit, and logs it
+            print(f"{a.id}: could not update its guard's scope file ({e}); the grant is saved", file=sys.stderr)
     if a.id in state["prompts"]:
         print(f"{a.id}: its prompt's scope line is stale; regenerate it with fleet prompt {a.run} {a.id} --force "
               + ("once this worker exits" if live else "before its next launch"))
@@ -2901,8 +3098,13 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     token = uuid.uuid4().hex
     line = (resume_prompt_line(prompt_path, a.id, report, inbox_path(repo, a.run, a.id)) if a.resume
             else worker_prompt_line(prompt_path, a.id))
+    hooks, mode = None, hook_mode(cfg, pcfg, profile)
+    if hooks_on(pcfg):  # a worker writes its own files; a reviewer or investigator only its report
+        scoped = profile == "worker" and cfg["defaults"].get("scope_permissions")
+        hooks = write_hooks(repo, d, a.id, t["files"] if profile == "worker" else [], token, mode,
+                            allow_rules(t.get("commands", [])) if scoped else [])
     command = build_launch(pcfg, model, effort, line, session, a.resume, prepare_trust(cfg, a.provider, pcfg, repo),
-                           profile)
+                           profile, hooks and hooks["settings"], mode)
     exit_file = d / "exits" / f"{a.id}.{token}.json"
     headless = {}
     if profile == HEADLESS:  # its runner writes the report, usage and receipt; reconcile records the usage
@@ -2922,7 +3124,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         family=family, tier=a.tier, steered=steered, surface="unknown", state="launching", command=command,
         token=token, exit_file=str(exit_file), launched=time.strftime("%Y-%m-%dT%H:%M:%S"),
         launched_at=time.time(),
-        **({"session": session} if session else {}), **headless)
+        **({"session": session} if session else {}), **headless, **({"hooks": hooks} if hooks else {}))
     state.setdefault("ledger", []).append(ledger_entry(state, a.id, state["workers"][a.id], a.resume,
                                                        usage_home(pcfg) if session else None))
     save_run(repo, a.run, state)
@@ -3743,9 +3945,13 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
                     and mark_once(seen, f"{i}.exit", token)):
                 events.append(f"EXITED {i} returncode={data.get('returncode')}; inspect its report, then fleet status {state['run']}")
             continue
+        now = time.time()
+        handed_back = status in WAKE_STATUSES + ("verified",) and f.stat().st_mtime >= w.get("last_send", 0)
+        lines, told = hook_events(state, w, seen, handed_back, now)
+        events += lines
         if not stall or w["state"] == "stop-failed" or w.get("surface", "unknown") == "unknown":
             continue  # a failed stop is already the lead's to handle
-        if status in WAKE_STATUSES + ("verified",) and f.stat().st_mtime >= w.get("last_send", 0):
+        if handed_back:
             continue  # waiting on the lead is not a stall; an answered report no longer counts
         try:
             screen = terminal(state).read(w, 40)
@@ -3757,7 +3963,7 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
         if w.get("transport") == HEADLESS:
             continue  # no prompt can stop it and its screen stays still while the CLI works; its exit wakes the lead
         marker = seen / f"{i}.screen"
-        now, h = time.time(), digest(screen.encode())
+        h = digest(screen.encode())
         limit = min(stall, LAUNCH_STALL_S) if now - w.get("launched_at", 0) < LAUNCH_WATCH_S else stall
         try:
             old_hash, since, flagged = marker.read_text().split("|")
@@ -3768,9 +3974,65 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
             marker.write_text(f"{token}:{h}|{now}|0")
         elif flagged == "0" and now - since >= limit:
             marker.write_text(f"{token}:{h}|{since}|1")
-            events.append(f"STALLED {i} screen unchanged for {int(now - since)}s; fleet peek {state['run']} {i} "
-                          "(permission, login or trust prompt, or usage limit?)")
+            if told < since:  # a PERMISSION or IDLE line already told the lead about this screen
+                events.append(f"STALLED {i} screen unchanged for {int(now - since)}s, likely at an approval prompt "
+                              f"the owner answers in its pane (or a login, trust or usage limit screen); "
+                              f"fleet peek {state['run']} {i}")
     return events
+
+
+def one_line(text, limit: int = 200) -> str:
+    """Worker or CLI text for a wake line: control characters and line breaks flattened, then cut short."""
+    flat = " ".join(re.sub(r"[\x00-\x1f\x7f]", " ", str(text or "")).split())
+    return flat if len(flat) <= limit else flat[:limit - 1] + "…"
+
+
+def hook_events(state: dict, w: dict, seen: Path, handed_back: bool, now: float) -> tuple[list[str], float]:
+    """Wake lines from a hooked worker's events file, each event once, and when wait last showed the lead one of its
+    prompts (0 if never), which keeps the same unchanged screen from also waking as STALLED. Lockless and read-only
+    like the rest of wait: only its .seen marker is written. No keystrokes are ever sent for these events.
+
+    permission-prompt wakes PERMISSION; idle wakes IDLE unless the worker has handed back; turn-ended never wakes on
+    its own (a hand-back already does) but gives IDLE the worker's last words. Events from an earlier launch of the
+    same ticket carry another token and are skipped."""
+    path, token = (w.get("hooks") or {}).get("events"), w.get("token", "")
+    if not path:
+        return [], 0.0
+    marker = seen / f"{w['id']}.events"
+    try:
+        kept, done, told = marker.read_text().split("|")
+        done, told = (int(done), float(told)) if kept == token else (0, 0.0)
+    except (FileNotFoundError, ValueError):
+        done, told = 0, 0.0
+    try:
+        data = contained(run_dir(Path(state["repo"]), state["run"]), Path(path)).read_bytes()
+    except (OSError, FleetError):
+        return [], told
+    data = data[:data.rfind(b"\n") + 1]  # a line a hook is still writing waits for the next pass
+    done = done if done <= len(data) else 0  # a file replaced since: read it from the start
+    lines, run, i, at, last_words = [], state["run"], w["id"], 0, ""
+    for raw in data.splitlines(keepends=True):
+        fresh, at = at >= done, at + len(raw)
+        try:
+            e = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(e, dict) or e.get("token") != token:
+            continue
+        if e.get("event") == "turn-ended":  # read again on every pass: an idle event comes about a minute later
+            last_words = one_line(e.get("message"), 160)
+        elif not fresh:
+            continue
+        elif e.get("event") == "permission-prompt":
+            lines.append(f"PERMISSION {i}: {one_line(e.get('message')) or 'a permission prompt'}; the owner answers "
+                         "it in the worker's pane (fleet agents); the lead never does")
+        elif e.get("event") == "idle" and not handed_back:
+            said = f'; its turn ended with "{last_words}"' if last_words else ""
+            lines.append(f"IDLE {i}: Claude reports it idle with no hand-back{said}; fleet peek {run} {i}, then "
+                         f"answer a question for the lead with fleet send {run} {i} (a prompt is the owner's)")
+    told = now if lines else told
+    marker.write_text(f"{token}|{len(data)}|{told}")
+    return lines, told
 
 
 def scope_lines(repo: Path, state: dict, seen: Path) -> list[str]:
@@ -5109,7 +5371,8 @@ def flag_drift(pcfg: dict) -> tuple[list[str] | None, str]:
             return None, f"`{command}` " + (f"exited {res.returncode}" if res.returncode else "printed nothing")
         texts.append(res.stdout + res.stderr)
     text = "\n".join(texts)
-    missing = [f for f in launch_flags(pcfg) if not re.search(r"(?<![\w-])" + re.escape(f) + r"(?![\w-])", text)]
+    flags = launch_flags(pcfg) + (["--settings"] if hooks_on(pcfg) else [])  # what the {settings} slot passes
+    missing = [f for f in flags if not re.search(r"(?<![\w-])" + re.escape(f) + r"(?![\w-])", text)]
     return missing, " and ".join(f"`{c}`" for c in commands)
 
 
@@ -5126,6 +5389,11 @@ def profile_report(cfg: dict, name: str, p: dict, found: str) -> tuple[list[str]
     lines = [f"{pad}bin {found}; profiles {levels}{note}; ceiling {ceiling}"]
     above = [why for why in (ceiling_problem(cfg, name, p, role) for role in PROFILES) if why]
     lines += [f"{pad}ABOVE CEILING: {why}" for why in above]
+    if hooks_on(p):
+        scoped = cfg.get("defaults", DEFAULTS).get("scope_permissions")
+        lines.append(f"{pad}hooks {p['hooks']}: edits outside a worker's files refused; reviewers {CLAUDE_GUARDED_MODE}; "
+                     f"workers {CLAUDE_GUARDED_MODE + ' with their planned checks allowed' if scoped else 'in the account mode'}"
+                     f" (scope_permissions {'on' if scoped else 'off'})")
     missing, where = flag_drift(p)
     if missing is None:
         lines.append(f"{pad}flags unverified: {where}")
@@ -5995,6 +6263,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_child(argv[1:])
     if argv and argv[0] == "_headless":
         return headless_child(argv[1:])
+    if argv and argv[0] == "_hook":  # Claude Code runs it on each edit: no config, no run state, no lock
+        return run_hook(argv[1:])
     ap = argparse.ArgumentParser(prog="fleet", description=__doc__.splitlines()[0])
     ap.add_argument("--version", action="version", version=f"fleet {VERSION}")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -6192,7 +6462,8 @@ def main(argv: list[str] | None = None) -> int:
     s.set_defaults(fn=cmd_status)
 
     s = sub.add_parser("wait", help="block until a report reaches needs-verification or blocked, or a worker "
-                                    "exits, stalls or becomes unreachable (exit 0), or timeout (exit 2)")
+                                    "exits, stalls, becomes unreachable, or (with hooks) shows a permission prompt "
+                                    "or goes idle (exit 0), or timeout (exit 2)")
     s.add_argument("run")
     s.add_argument("--timeout", type=int, default=45,
                    help=f"seconds, at most {WAIT_MAX}; use the longest your host's command tool allows")

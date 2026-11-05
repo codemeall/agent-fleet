@@ -19,6 +19,11 @@ review = "cross-heavy"
 # The widest launch profile Fleet will start: "read-only", "workspace-write" (the default) or "full-access".
 # Launch refuses, and doctor fails, a provider profile above it; OpenCode's build agent is full-access.
 # permission_ceiling = "workspace-write"
+# Claude workers launch with Fleet's hooks: a guard that refuses edits outside the ticket's files and the worker's
+# report, and events that wake the lead on a permission prompt (PERMISSION) or an idle worker (IDLE). With
+# scope_permissions on, Claude workers also auto-accept edits (acceptEdits: the guard keeps them in scope) and run
+# their ticket's planned check commands without asking; nothing else is allowed. Off by default; only you turn it on.
+# scope_permissions = true
 # Where workers run: "cmux" (visible panes beside the lead, macOS), "tmux" (headless windows in a detached
 # session; watch them with `fleet agents`) or "auto" (the default: cmux inside cmux, else tmux).
 # backend = "tmux"
@@ -66,6 +71,10 @@ review = "cross-heavy"
 # enabled = true
 # [providers.cursor]
 # enabled = false
+
+# Turn Claude's hooks off (reviewers then ask before every edit again, and wait falls back to STALLED):
+# [providers.claude]
+# hooks = ""
 
 # Optional second account. Sign it in first (CLAUDE_CONFIG_DIR=~/.claude-co claude).
 # Other accounts: fleet account add <name> --from claude|codex --dir <path>
