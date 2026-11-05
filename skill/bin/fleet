@@ -7260,6 +7260,21 @@ def writer_items(repo: Path, state: dict, i: str, wid: str, text: str) -> list[t
     return items
 
 
+def rebutted_findings(repo: Path, state: dict, i: str, review: dict | None) -> set[str]:
+    """The ids of ticket `i`'s latest `review` findings that the writer rebutted: the earlier round's, in the
+    responses a re-review was given, and this review's own, in the writer's hand-back after send --findings sent
+    them. Either way the latest review may still list the finding, and the lead may accept the rebuttal."""
+    if not review:
+        return set()
+    answers = dict((review.get("finding_history") or {}).get("responses") or {})
+    sent = state["tickets"][i].get("findings_sent")
+    if sent and sent.get("reviewer_at") == review.get("launched_at") and \
+            findings_sent_to(state, i, state["workers"].get(i)):
+        text = report_text(repo, state, i)
+        answers.update(responses_by_id(parse_header(text)[0] if text is not None else None, sent["ids"]))
+    return {fid for fid, r in answers.items() if r.get("action") == "rebutted"}
+
+
 def review_items(repo: Path, state: dict, i: str, accepted) -> list[tuple]:
     """Ticket `i`'s latest review under the bar. When the review mode requires one: missing, of an earlier diff, or
     not handed back. Whenever it reviewed the current diff, required or not: a header whose findings cannot be
@@ -7289,8 +7304,7 @@ def review_items(repo: Path, state: dict, i: str, accepted) -> list[tuple]:
         why = "it has none" if shape == ["header missing"] else "; ".join(shape)
         return [(f"{rid}'s fleet header cannot be read ({why}), so its findings cannot be counted",
                  f"fleet review {run} {i} again", False)]
-    rebutted = {fid for fid, r in ((review.get("finding_history") or {}).get("responses") or {}).items()
-                if r.get("action") == "rebutted"}
+    rebutted = rebutted_findings(repo, state, i, review)
     items = []
     for fid, f in numbered_findings(review, data):
         if str(f.get("severity", "")).lower() not in BLOCKING_SEVERITIES or fid in accepted:
@@ -7370,8 +7384,7 @@ def finding_flag_problems(repo: Path, state: dict, i: str, pairs: list) -> list[
     text = report_text(repo, state, review["id"]) if review else None
     data = parse_header(text)[0] if text is not None else None
     open_ids = [fid for fid, _ in numbered_findings(review, data)] if review and isinstance(data, dict) else []
-    rebutted = {fid for fid, r in (((review or {}).get("finding_history") or {}).get("responses") or {}).items()
-                if r.get("action") == "rebutted"}
+    rebutted = rebutted_findings(repo, state, i, review)
     out, seen = [], set()
     for fid, why in pairs:
         fid = fid.strip()
