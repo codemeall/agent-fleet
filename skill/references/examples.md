@@ -199,7 +199,7 @@ Grant refuses a file that a live worker of another ticket holds, or that another
    {"tickets": [{"id": "api-client", "ticket": ".scratch/settings/issues/api-client.md", "files": ["src/api.ts", "src/api.test.ts", "src/retry.ts", "src/retry.test.ts"],
                  "blockers": [], "provider": "codex", "tier": "heavy",
                  "context": "Follow-up of run settings. src/api.ts already has the 404 handling (lead-reviewed); add retry on 503 in src/retry.ts.",
-                 "checks": "npm test -- src/api.test.ts src/retry.test.ts; exit 0"}],
+                 "checks": [{"run": "npm test -- src/api.test.ts src/retry.test.ts"}]}],
     "decisions": ["Follow-up of settings: owner added retry on 503 to api-client (2026-10-06).", "banner-copy: banner text is \"Saved\"."]}
    ```
    ```sh

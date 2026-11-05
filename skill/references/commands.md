@@ -148,13 +148,16 @@ fleet plan <run> --file <plan.json>
 
 Saves every ticket, blocker, exact file list, tier, provider and decision, and validates dependencies, cycles, scopes and assignments. When the review mode requires review of a ticket, plan also checks that some provider in the routing pool could review it: turned on, its review-tier model allowed, a known family different from the writer's. That is `fleet review`'s own test without the capacity part. If none could, it refuses, naming the writer's family, the routing and each provider's reason, and saves nothing; see [routing](routing.md#model-family-and-review-policy) for the owner's ways out. The plan is frozen once a worker launches. The plan format is in [SKILL.md step 2](../SKILL.md#2-save-a-complete-plan). Each ticket may give `task` (inline text) instead of `ticket`, and `kind: "investigate"` for read-only work that owns no files.
 
-`checks` is text, or a list that may mix text with commands Fleet can run for you:
+`checks` is a list that may mix text with two kinds of check object: commands Fleet can run for you, and manual checks for what no command can check:
 
 ```json
-"checks": ["Read the copy against the ticket", {"run": "npm test -- src/api.test.ts", "cwd": "web", "timeout": 120}]
+"checks": ["Read the copy against the ticket", {"run": "npm test -- src/api.test.ts", "cwd": "web", "timeout": 120},
+           {"manual": "Visual check of the banner at phone width"}]
 ```
 
-A command needs `run` (a shell command). `cwd` is a directory inside the repository, relative to its root (default `.`; no `..`, absolute paths or symlinks). `timeout` is whole seconds from 1 to 3600 (default 300). Any other key is refused. The worker's prompt lists each command with its directory, and [`gate`](#gate) runs them. A command Fleet cannot accept refuses the whole plan, naming the ticket, and nothing is saved.
+A command needs `run` (a shell command). `cwd` is a directory inside the repository, relative to its root (default `.`; no `..`, absolute paths or symlinks). `timeout` is whole seconds from 1 to 3600 (default 300). Any other key is refused. The worker's prompt lists each command with its directory, and [`gate`](#gate) runs them. A manual check takes only `manual`: a nonempty, one-line reason, which the prompt shows as `- Manual: <reason>`; `gate` skips it and says so in its evidence, and you check it yourself. A check Fleet cannot accept refuses the whole plan, naming the ticket, and nothing is saved.
+
+Every ticket that gives `checks` needs at least one command or manual check, `investigate` tickets included: their checks are what the investigator may run, and research that runs nothing says so with a manual check (`{"manual": "read-only research; the lead reads the report"}`). Plan refuses a ticket whose checks are empty, or are prose only (a string, or a list of strings), naming the ticket and showing both forms. Omitting `checks` is still allowed: the prompt then keeps a `<!-- LEAD: … -->` comment for you to fill before launch. With `check_policy = "warn"` under `[defaults]` in the owner's config (the default is `"refuse"`), plan prints the same message as a warning and saves the ticket; empty checks are then saved as omitted.
 
 **Use:** after the owner approves the plan, before the first launch. Record later decisions in `notes.md`; new work goes in with `add`; a ticket that needs another file gets it with `grant`, and a follow-up run only when grant refuses ([example 8](examples.md#8-change-scope-after-launch)).
 
@@ -164,7 +167,7 @@ A command needs `run` (a shell command). `cwd` is a directory inside the reposit
 fleet add <run> --file <tasks.json|->
 ```
 
-Appends tickets to a run, before or after its first launch; `-` reads stdin. Same JSON as `plan`. Saved tickets never change. Each entry gives `ticket` (a local file) or `task` (inline text, written to `.fleet/runs/<run>/tasks/<id>.md`), and may set `kind: "investigate"` for read-only work that owns no files. Its `checks` may include commands, as in [`plan`](#plan). A new ticket whose files overlap an unverified ticket must list it in `blockers`. Like `plan`, it refuses a ticket whose required review no provider in the pool could give. Added tickets show as `+<id>` in `resume`; added decisions end with `(added <time>)`.
+Appends tickets to a run, before or after its first launch; `-` reads stdin. Same JSON as `plan`. Saved tickets never change. Each entry gives `ticket` (a local file) or `task` (inline text, written to `.fleet/runs/<run>/tasks/<id>.md`), and may set `kind: "investigate"` for read-only work that owns no files. Its `checks` follow [`plan`](#plan)'s rule: at least one command or manual check, else add refuses (or warns, under `check_policy = "warn"`). A new ticket whose files overlap an unverified ticket must list it in `blockers`. Like `plan`, it refuses a ticket whose required review no provider in the pool could give. Added tickets show as `+<id>` in `resume`; added decisions end with `(added <time>)`.
 
 **Use:** for delegation from the conversation and new work in a live run ([delegation](delegation.md)). To give an existing ticket another file, use [`grant`](#grant).
 
@@ -488,7 +491,7 @@ GATE api 2/3 passed, scope ok; evidence .fleet/runs/demo/evidence/api.gate.md
 FAIL npm test -- src/api.test.ts: exit 1
 ```
 
-It exits 1 when a command fails or times out, or a file outside every ticket's scope changed; otherwise 0. The scope reads `scope not checked (not launched yet)` before launch, and `(no whole-tree snapshot)` for a worker launched by an earlier Fleet. It works for `implement` and `investigate` tickets, whether or not the worker is still running; a ticket with only prose checks is refused (run those by hand), and so is a reviewer's ID. It changes no run state and takes no lock, so other commands keep working during long checks. Prose checks are not run: record them in your own evidence file.
+It exits 1 when a command fails or times out, or a file outside every ticket's scope changed; otherwise 0. The scope reads `scope not checked (not launched yet)` before launch, and `(no whole-tree snapshot)` for a worker launched by an earlier Fleet. It works for `implement` and `investigate` tickets, whether or not the worker is still running; a ticket with only prose or manual checks is refused (run those by hand), and so is a reviewer's ID. It changes no run state and takes no lock, so other commands keep working during long checks. Prose and manual checks are not run: the evidence lists each manual check under `## Manual checks` as skipped, the summary adds `N manual check(s) skipped`, and you record their results in your own evidence file.
 
 **Use:** after a worker hands back, instead of retyping its checks. Read the evidence, then pass it to `verify` with your own notes: `fleet verify <run> <id> --evidence <gate-file> --evidence <your-notes>`. The combined-tree checks (full suite, typecheck, build) stay your batch step. With [`wait --gate`](#the-gate-loop), wait runs it on each hand-back of a running writer and writes the same file, so you need not run it again.
 

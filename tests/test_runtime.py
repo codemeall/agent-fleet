@@ -448,14 +448,14 @@ class Runtime(RuntimeCase):
         plan = self.repo / "plan.json"
         plan.write_text(json.dumps({"tickets": [
             {"id": "01", "ticket": str(ticket), "files": ["owned.txt"], "provider": "writer", "tier": "standard",
-             "context": "Spec in docs/spec.md; keep the owner's edit.", "checks": ["python3 -m unittest", "read the prose"]},
+             "context": "Spec in docs/spec.md; keep the owner's edit.", "checks": ["python3 -m unittest", {"manual": "read the prose"}]},
             {"id": "02", "ticket": str(ticket), "files": ["next.txt"], "provider": "writer", "tier": "standard"}]}))
         self.call("plan", "demo", "--file", str(plan))
         out = self.call("prompt", "demo", "01")
         self.assertNotIn("fill before launch", out)
         text = (self.repo / ".fleet/runs/demo/prompts/01.md").read_text()
         self.assertIn("**Context and decisions:** Spec in docs/spec.md; keep the owner's edit.", text)
-        self.assertIn("**Checks to run:**\n\n- python3 -m unittest\n- read the prose\n", text)
+        self.assertIn("**Checks to run:**\n\n- python3 -m unittest\n- Manual: read the prose\n", text)
         self.assertNotIn("<!--", text)
         self.launch("01")
         # Without plan fields the prompt keeps LEAD comments, and launch refuses it until they are filled.
@@ -468,11 +468,12 @@ class Runtime(RuntimeCase):
         ticket = self.repo / "01.md"
         ticket.write_text("# Ticket 01\n")
         plan = self.repo / "plan.json"
-        for checks in ("  ", [], [""], 3):
+        for checks, message in (("  ", "01: its checks are empty"), ([], "01: its checks are empty"),
+                                ([""], "checks must be nonempty"), (3, "checks must be nonempty")):
             plan.write_text(json.dumps({"tickets": [{"id": "01", "ticket": str(ticket), "files": ["owned.txt"],
                                                      "provider": "writer", "checks": checks}]}))
             with self.subTest(checks=checks):
-                self.assertIn("checks must be nonempty", self.call("plan", "demo", "--file", str(plan), expected=1))
+                self.assertIn(message, self.call("plan", "demo", "--file", str(plan), expected=1))
 
     def plan_file(self, tickets, decisions=()):
         plan = self.repo / "plan.json"
@@ -557,7 +558,7 @@ class Runtime(RuntimeCase):
     def test_add_on_a_fresh_run_needs_no_plan(self):
         self.call("init", "demo", "--workspace", "workspace:1", "--review", "off", *self.off_reason("off"))
         self.add([{"id": "solo", "task": "Fix the typo.", "files": ["owned.txt"],
-                   "context": "Typo on line 1.", "checks": "Read the file."}])
+                   "context": "Typo on line 1.", "checks": {"manual": "Read the file."}}])
         self.assertNotIn("fill before launch", self.call("prompt", "demo", "solo"))
         self.launch("solo")
 
@@ -628,7 +629,7 @@ class Runtime(RuntimeCase):
         self.call("plan", "demo", "--file", self.plan_file([
             {"id": "01", "ticket": str(ticket), "files": ["owned.txt"], "provider": "writer"},
             {"id": "why", "kind": "investigate", "task": "Why does owned.txt change on save?", "provider": "writer",
-             "context": "Read owned.txt.", "checks": "git log -- owned.txt"},
+             "context": "Read owned.txt.", "checks": {"run": "git log -- owned.txt"}},
             {"id": "fix", "task": "Apply the finding.", "files": ["next.txt"], "provider": "writer",
              "blockers": ["why"]}]))
         self.prompt("01")
@@ -657,7 +658,7 @@ class Runtime(RuntimeCase):
         for t in tickets:
             t.setdefault("provider", "writer")
             t.setdefault("context", "Agreed scope only.")
-            t.setdefault("checks", "Read the diff.")
+            t.setdefault("checks", {"manual": "Read the diff."})
             for key in [k for k, v in t.items() if v is None]:  # None means "leave this field out of the plan"
                 del t[key]
         self.call("plan", "demo", "--file", self.plan_file(list(tickets)))
@@ -810,7 +811,7 @@ class Runtime(RuntimeCase):
         self.ready_plan({"id": "a", "task": "A.", "files": ["a.txt"]})
         self.call("launch", "demo", "--ready")
         self.panes += [{"ref": f"pane:{n}", "surface_refs": ["surface:1"]} for n in range(2, 8)]
-        self.add([{"id": "b", "task": "B.", "files": ["b.txt"], "context": "Scope only.", "checks": "Read it."}])
+        self.add([{"id": "b", "task": "B.", "files": ["b.txt"], "context": "Scope only.", "checks": {"manual": "Read it."}}])
         with patch.dict(fleet.os.environ, {"CMUX_SURFACE_ID": "lead"}):
             out = self.call("launch", "demo", "--ready")
         self.assertIn("SKIPPED b: pane limit (every pane has a live worker; stop a worker or close a pane)", out)
@@ -1065,13 +1066,13 @@ class Runtime(RuntimeCase):
         plan = self.repo / "plan.json"
         plan.write_text(json.dumps({"tickets": [{"id": "01", "ticket": str(ticket), "files": ["owned.txt"],
             "provider": "writer", "context": "Keep the Handlebars `{{title}}` helper and {{checks}} text.",
-            "checks": "npm test"}]}))
+            "checks": {"run": "npm test"}}]}))
         self.call("plan", "demo", "--file", str(plan))
         self.call("prompt", "demo", "01")
         text = (self.repo / ".fleet/runs/demo/prompts/01.md").read_text()
         self.assertIn("Keep the Handlebars `{{title}}` helper and {{checks}} text.", text)
         self.assertIn("${{ secrets.TOKEN }}", text)
-        self.assertIn("**Checks to run:** npm test", text)
+        self.assertIn("**Checks to run:** - `npm test` (from the repository root; Fleet runs it with fleet gate)", text)
         # A field name Fleet wrote as content does not block launch; one added to the prompt by hand still does.
         path = self.repo / ".fleet/runs/demo/prompts/01.md"
         path.write_text(text + "\nReport to {{report}}.\n")
