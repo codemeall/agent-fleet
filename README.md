@@ -201,6 +201,17 @@ models_allow = ["opus", "sonnet", "fable"]
 
 Codex's list comes from its `codex debug models` catalog and includes each model's effort levels. Claude's `opus`, `sonnet` and `fable` aliases already follow the current model. Launch one small ticket first (the [documentation-only example](examples/README.md) is a safe choice).
 
+### Live smoke
+
+`doctor` checks logins; `fleet smoke` checks that your real CLIs and accounts get through a whole run. It gives each provider one tiny ticket in a throwaway repository, with its own Fleet config and a private tmux server, and runs it through launch, `wait --gate`, a cross-family review and `accept --gate`:
+
+```sh
+fleet smoke                              # prints the plan and the command to run; spends and writes nothing
+fleet smoke --providers claude,codex --yes-paid
+```
+
+It costs a little real usage, so it runs only with `--yes-paid`. It never writes your repository, your Fleet config or your tmux server, and it cleans up after itself on success, failure or Ctrl-C (`--keep` keeps the throwaway repository). The Markdown report it prints the path of has each CLI's version, every step with its seconds, and the screen of any worker that stopped at a login, trust or permission prompt or a usage limit. See [`smoke`](skill/references/commands.md#smoke).
+
 ### Configure
 
 Personal overrides live in `~/.config/agent-fleet/config.toml`; start from [config.example.toml](config.example.toml). `backend` under `[defaults]` picks where workers run (see [below](#where-workers-run-cmux-or-headless)). No cmux workspace is pinned by default. Start the lead in the intended workspace, or pass `workspace=<ref>` explicitly.
@@ -615,7 +626,8 @@ Every method that addresses a worker must raise rather than reach a terminal tha
 
 - `tests/test_adapters_smoke.py` runs every shipped adapter (claude, claude-co, codex, cursor, agy, opencode) through launch, wait and stop in headless tmux. A strict fake named after each adapter's `bin` (`tests/fixtures/fake_cli.py`) accepts only the exact launch line the adapter builds, fails loudly on anything else, and quits only on the adapter's own quit sequence, so a failure names the adapter. These tests prove the launch line's shape, not that a real CLI or account works; see the tested-version table in [provider notes](skill/references/providers.md).
 - `tests/test_teamwork_e2e.py` runs the teamwork commands end to end with a scripted worker and two fake providers of different families: plan, launch, the scope check, the inbox, grant, gate, cross-family review, accept and hand-down.
-- Like the backend tests, both use a private tmux server per test and skip when tmux isn't installed.
+- `tests/test_smoke.py` runs `fleet smoke` against the same strict fakes: two families pass every step including review, a fake that never reports fails with its screen in the report, Ctrl-C still cleans up, and the test's own repository, config and tmux server stay untouched.
+- Like the backend tests, these use a private tmux server per test and skip when tmux isn't installed.
 
 Run only the backend tests with `python3 -m unittest tests.test_backends -v`, or the live smoke and end-to-end tests with `python3 -m unittest tests.test_adapters_smoke tests.test_teamwork_e2e -v`.
 

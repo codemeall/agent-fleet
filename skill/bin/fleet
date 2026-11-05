@@ -21,6 +21,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from pathlib import Path
@@ -4737,6 +4738,406 @@ def cmd_providers(a, cfg):
     print(json.dumps({"defaults": cfg["defaults"], "providers": cfg["providers"]}, indent=2))
 
 
+# ---------- live smoke ----------
+# The owner's check that their real CLIs and accounts still work end to end: one tiny ticket per provider through
+# init, plan, launch --ready, wait --gate, review, accept --gate and check. It runs fleet as a subprocess in a
+# throwaway Git repository, with a Fleet config of its own (FLEET_CONFIG) and a private tmux server, so the owner's
+# repository, config and tmux server are never written. It spends real usage, so it runs only with --yes-paid.
+
+SMOKE_RUN = "smoke"
+SMOKE_TAIL = 25  # screen lines a failed step keeps in the report
+SMOKE_POLL = 30  # seconds per fleet wait call, inside a step's --timeout
+POINTER_RE = re.compile(r"Lead message \d+: read .*")
+
+
+def smoke_line(name: str) -> str:
+    return f"fleet smoke {name} ok"
+
+
+def login_ready(p: dict) -> bool:
+    """doctor's login test for one provider: its login command's output holds login_ok (no check counts as ready)."""
+    if "login" not in p:
+        return True
+    try:
+        res = subprocess.run(p["login"], shell=True, capture_output=True, text=True, timeout=60, env=child_env(p))
+    except subprocess.TimeoutExpired:
+        return False
+    return res.returncode == 0 and bool(p.get("login_ok")) and p["login_ok"] in res.stdout + res.stderr
+
+
+def named_providers(cfg: dict, named: str) -> list[str]:
+    """The owner's own choice, even of a provider that is off: the smoke turns it on in its own config only."""
+    names = list(dict.fromkeys(n.strip() for n in named.split(",") if n.strip()))
+    if not names:
+        raise FleetError("--providers needs at least one provider name")
+    for name in names:
+        p = provider(cfg, name)
+        if p.get("placeholder"):
+            raise FleetError(f"provider '{name}' is a placeholder adapter; see references/providers.md#placeholder-adapters")
+        if not shutil.which(first_binary(p["bin"])):
+            raise FleetError(f"{name}: binary '{first_binary(p['bin'])}' is not on PATH")
+    return names
+
+
+def smoke_providers(cfg: dict, named: str | None) -> list[str]:
+    """The named providers, else every enabled one doctor would pass, one per CLI binary, so a second
+    subscription of the same CLI costs nothing unless the owner names it."""
+    if named is not None:
+        return named_providers(cfg, named)
+    order = [n for n in cfg["defaults"]["prefer"] if n in cfg["providers"]]
+    names, bins = [], set()
+    for name in order + [n for n in cfg["providers"] if n not in order]:
+        p = cfg["providers"][name]
+        binary = first_binary(p.get("bin", ""))
+        if not p.get("enabled", True) or p.get("placeholder") or binary in bins:
+            continue
+        if shutil.which(binary) and login_ready(p):
+            names.append(name)
+            bins.add(binary)
+    if not names:
+        raise FleetError("no enabled provider passes doctor's binary and login checks; run fleet doctor, or name "
+                         "providers with --providers")
+    return names
+
+
+def smoke_config(cfg: dict, names: list[str], socket: str) -> dict:
+    """The owner's merged config, narrowed to the smoke's providers (each turned on, with room for a writer and
+    a reviewer at once) on a private tmux server, with review cross-heavy."""
+    providers = {}
+    for name, p in cfg["providers"].items():
+        if name in names:  # already resolved, so it no longer needs its parent
+            providers[name] = {k: v for k, v in p.items() if k != "extends"} | {"enabled": True,
+                                                                               "max": max(p.get("max", 2), 2)}
+        else:
+            providers[name] = {"enabled": False}
+    defaults = dict(cfg["defaults"], backend="tmux", tmux_socket=socket, workspace=None, routing="auto",
+                    review="cross-heavy", gate=False, prefer=list(names), max_parallel=2 * len(names))
+    return {"defaults": defaults, "providers": providers}
+
+
+def toml_value(v) -> str:
+    """One config value in TOML. JSON's string escapes are valid in TOML basic strings."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, str):
+        return json.dumps(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(toml_value(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{ " + ", ".join(f"{json.dumps(str(k))} = {toml_value(x)}" for k, x in v.items() if x is not None) + " }"
+    raise FleetError(f"cannot write {v!r} into the smoke's config")
+
+
+def toml_text(cfg: dict) -> str:
+    """The smoke's FLEET_CONFIG: [defaults] and every [providers.<name>] table; TOML has no null, so None is left out."""
+    out = ["[defaults]"] + [f"{json.dumps(k)} = {toml_value(v)}" for k, v in cfg["defaults"].items() if v is not None]
+    for name, p in cfg["providers"].items():
+        out += ["", f"[providers.{json.dumps(name)}]"]
+        out += [f"{json.dumps(k)} = {toml_value(v)}" for k, v in p.items() if v is not None]
+    return "\n".join(out) + "\n"
+
+
+def smoke_routes(cfg: dict, names: list[str]) -> dict[str, dict]:
+    """Each provider's ticket: heavy (so cross-heavy requires its review) when another provider of the run can
+    review its family, with the reviewer fleet review would pick; else standard, with no review."""
+    routing, pool = "agents=" + ",".join(names), {n: None for n in names}
+    routes = {}
+    for name in names:
+        p = cfg["providers"][name]
+        model, effort = resolve_model(p, "heavy", None, None)
+        family = model_family(p, "heavy", model)
+        reviewer = next((r for r in names if family and not review_fit(cfg, routing, pool, r, family)[0]), None)
+        tier = "heavy" if reviewer else "standard"
+        if not reviewer:
+            model, effort = resolve_model(p, tier, None, None)
+            family = model_family(p, tier, model)
+        routes[name] = {"tier": tier, "model": model, "effort": effort, "family": family, "reviewer": reviewer}
+    return routes
+
+
+def smoke_command(a, names: list[str]) -> str:
+    prog = sys.argv[0] if Path(sys.argv[0]).name == "fleet" else "fleet"
+    args = [prog, "smoke", "--providers", ",".join(names), "--yes-paid", "--timeout", str(a.step_timeout)]
+    args += (["--keep"] if a.keep else []) + (["--report", a.report] if a.report else [])
+    return shlex.join(args)
+
+
+def print_smoke_plan(a, cfg: dict, names: list[str], routes: dict) -> None:
+    """What --yes-paid would run and spend, without running or writing anything."""
+    sessions = {n: 1 + sum(r["reviewer"] == n for r in routes.values()) for n in names}
+    print(f"fleet smoke would run {len(names)} provider{'s' if len(names) != 1 else ''} on your real CLIs and "
+          "accounts. It costs a little real usage.")
+    for name in names:
+        r = routes[name]
+        effort = f"@{r['effort']}" if r["effort"] else ""
+        review = f"reviewed by {r['reviewer']}" if r["reviewer"] else "no review: no provider of another family"
+        print(f"  {name:<13} {sessions[name]} session{'s' if sessions[name] != 1 else ''}: writer "
+              f"{r['model']}{effort} ({r['tier']}, family {r['family'] or 'unknown'}), {review}")
+    print(f"Sessions: {sum(sessions.values())} in all, one writer per provider plus one reviewer per reviewed ticket.")
+    print("Each provider gets one tiny ticket (write one line to smoke/<provider>.txt, checked with grep) in a "
+          "throwaway Git repository with its own Fleet config and a private tmux server: init, plan, launch --ready, "
+          "wait --gate, review, accept --gate and check. Your repository, Fleet config and tmux server are not "
+          "touched.")
+    if not cfg["defaults"].get("auto_trust"):
+        print("auto_trust is off, so a CLI that asks whether to trust the new folder stops there; the smoke reports "
+              "that as a failed step, with its screen.")
+    print(f"Nothing was run or written. To run it:\n  {smoke_command(a, names)}")
+
+
+def cli_version(p: dict) -> str:
+    """`<bin> --version`, best effort: the first line it prints, or why there is none."""
+    binary = first_binary(p["bin"])
+    try:
+        res = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=20, env=child_env(p),
+                             stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"unknown ({type(e).__name__})"
+    first = next((x.strip() for x in (res.stdout + res.stderr).splitlines() if x.strip()), "")
+    return first[:120] if res.returncode == 0 and first else f"unknown (`{binary} --version` exited {res.returncode})"
+
+
+def last_lines(text: str, n: int = SMOKE_TAIL) -> str:
+    return screen_tail(text or "", n)
+
+
+class Smoke:
+    """One --yes-paid smoke: the steps it ran, each pass, fail or skip with its seconds, and the cleanup that
+    follows whatever happened."""
+
+    def __init__(self, a, cfg: dict, names: list[str], routes: dict, socket: str):
+        self.a, self.cfg, self.names, self.routes, self.socket = a, cfg, names, routes, socket
+        self.report = Path(a.report).resolve() if a.report else \
+            Path(tempfile.gettempdir()) / f"fleet-smoke-{time.strftime('%Y%m%d-%H%M%S')}-{socket[-8:]}.md"
+        self.root = Path(tempfile.mkdtemp(prefix="fleet-smoke-")).resolve()
+        self.repo = self.root / "repo"
+        self.config = self.root / "config.toml"
+        self.env = dict(os.environ, FLEET_CONFIG=str(self.config))
+        self.steps: list[dict] = []
+        self.reported: dict[str, str] = {}  # worker -> the status its last REPORT line gave
+        self.ended: dict[str, str] = {}     # worker -> the wait line that ended it without a hand-back
+        self.pointers: dict[str, str] = {}
+        self.versions: dict[str, str] = {}
+        self.started = time.strftime("%Y-%m-%dT%H:%M:%S")
+
+    def say(self, text: str) -> None:
+        print(text, flush=True)
+
+    def record(self, name: str, result: str, start: float | None, detail: str = "", tail: str = "") -> bool:
+        seconds = time.monotonic() - start if start is not None else 0.0
+        self.steps.append({"name": name, "result": result, "seconds": seconds, "detail": detail, "tail": tail})
+        self.say(f"{result.upper()} {name} ({seconds:.1f}s){': ' + detail if detail else ''}")
+        return result == "pass"
+
+    def fleet(self, *args: str, timeout: float = 120) -> tuple[int | None, str]:
+        """This same fleet, as a subprocess in the throwaway repository with the smoke's own config."""
+        try:
+            res = subprocess.run([sys.executable, str(Path(__file__).resolve()), *args], cwd=self.repo, env=self.env,
+                                 capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return None, f"fleet {' '.join(args)} did not finish in {timeout:.0f}s"
+        return res.returncode, res.stdout + res.stderr
+
+    def command(self, name: str, *args: str, timeout: float = 120) -> bool:
+        start = time.monotonic()
+        code, out = self.fleet(*args, timeout=timeout)
+        if code == 0:
+            return self.record(name, "pass", start)
+        return self.record(name, "fail", start, f"fleet {args[0]} exited {code}", last_lines(out))
+
+    def run(self) -> int:
+        self.say(f"smoke repository {self.repo}, tmux -L {self.socket}")
+        interrupted = False
+        try:
+            self.versions = {n: cli_version(self.cfg["providers"][n]) for n in self.names}
+            self.flow()
+        except KeyboardInterrupt:
+            interrupted = True
+            self.record("interrupted", "fail", None, "stopped by Ctrl-C")
+        finally:
+            self.cleanup()
+            self.write_report()
+        return 130 if interrupted else 0 if all(s["result"] != "fail" for s in self.steps) else 1
+
+    def flow(self) -> None:
+        start = time.monotonic()
+        try:
+            self.setup()
+        except (FleetError, OSError, subprocess.SubprocessError) as e:
+            self.record("setup", "fail", start, str(e)[:300])
+            return
+        self.record("setup", "pass", start)
+        if not (self.command("init", "init", SMOKE_RUN, "--backend", "tmux", "--review", "cross-heavy",
+                             "--routing", "agents=" + ",".join(self.names))
+                and self.command("plan", "plan", SMOKE_RUN, "--file", str(self.root / "plan.json"))
+                and self.command("launch --ready", "launch", SMOKE_RUN, "--ready")):
+            return
+        handed = self.await_reports({n: f"writer {n} hands back" for n in self.names})
+        for name in self.names:  # one ticket at a time, so no provider runs more than a writer and a reviewer
+            self.review_and_accept(name, name in handed)
+        self.command("check", "check", SMOKE_RUN)
+
+    def review_and_accept(self, name: str, ok: bool) -> None:
+        rid, reviewer = f"review-{name}", self.routes[name]["reviewer"]
+        if not reviewer:
+            self.record(f"review {name}", "skip", None, "no provider of another family in this run")
+        elif not ok:
+            self.record(f"review {name}", "skip", None, "the writer did not hand back")
+        else:
+            ok = (self.command(f"review {name}", "review", SMOKE_RUN, name, "--settle", "0")
+                  and bool(self.await_reports({rid: f"reviewer {rid} hands back"})))
+        if not ok:
+            self.record(f"accept {name}", "skip", None, "an earlier step of this ticket failed")
+            return
+        self.command(f"accept {name}", "accept", SMOKE_RUN, name, "--gate", "--evidence", str(self.root / "evidence.md"))
+
+    def setup(self) -> None:
+        """The throwaway repository, its plan (one ticket pinned to each provider) and the smoke's own config."""
+        self.repo.mkdir()
+        (self.repo / "README.md").write_text("# Fleet smoke\n\nA throwaway repository for `fleet smoke`.\n")
+        git = ["git", "-c", "commit.gpgsign=false", "-c", "user.name=fleet smoke",
+               "-c", "user.email=fleet-smoke@example.invalid"]
+        for args in (["init", "-q"], ["add", "README.md"], ["commit", "-qm", "smoke base"]):
+            sh(git + args, cwd=self.repo, timeout=30)
+        self.config.write_text(toml_text(self.cfg))
+        tickets = []
+        for name in self.names:
+            path, line, r = f"smoke/{name}.txt", smoke_line(name), self.routes[name]
+            tickets.append({
+                "id": name, "provider": name, "tier": r["tier"], "files": [path],
+                "task": f"Create the file {path} containing exactly one line: {line}\nChange nothing else.",
+                "context": "A live smoke test of Fleet. Keep it tiny: write that one file, run the check, report.",
+                "checks": [f"The file holds exactly the line: {line}",
+                           {"run": f"grep -qx {shlex.quote(line)} {path}", "timeout": 30}]})
+        (self.root / "plan.json").write_text(json.dumps({"tickets": tickets}, indent=2))
+        (self.root / "evidence.md").write_text("fleet smoke: accepted automatically; the gate ran each ticket's "
+                                               "grep check and the review (when one ran) handed back.\n")
+
+    def await_reports(self, steps: dict[str, str]) -> set[str]:
+        """Wait (wait --gate, so a failing check goes back to its worker) until each worker hands back, ends or
+        runs out of --timeout; one step per worker, with its screen when it fails."""
+        start, pending, passed = time.monotonic(), dict(steps), set()
+        deadline = start + self.a.step_timeout
+        while pending:
+            for i in list(pending):
+                status = self.reported.get(i)
+                if status == "needs-verification":
+                    passed.add(i)
+                    self.record(pending.pop(i), "pass", start)
+                elif status or i in self.ended:
+                    why = self.ended.get(i) or f"its report says {status}"
+                    self.record(pending.pop(i), "fail", start, why, self.screen(i))
+            left = deadline - time.monotonic()
+            if not pending or left <= 0:
+                break
+            code, out = self.fleet("wait", SMOKE_RUN, "--gate", "--timeout", str(max(1, min(SMOKE_POLL, int(left)))),
+                                   "--interval", "1", "--settle", "0", "--stall", "0", timeout=SMOKE_POLL + 330)
+            if code not in (0, 2):
+                for i in pending:
+                    self.ended.setdefault(i, f"fleet wait exited {code}: {last_lines(out, 3)}")
+            self.read_wait(out)
+        for i, name in pending.items():
+            self.record(name, "fail", start, f"no hand-back in {self.a.step_timeout}s (a login, trust or permission "
+                        "prompt, or a usage limit?)", self.screen(i))
+        return passed
+
+    def read_wait(self, out: str) -> None:
+        """Every worker's news from one wait, kept across waits: a wait consumes the events it prints."""
+        for line in out.splitlines():
+            if m := re.match(r"REPORT (\S+) \[([^\]]+)\]", line):
+                self.reported[m.group(1)] = m.group(2).lower()
+            elif m := re.match(r"(EXITED|GATE-FAILED|UNREACHABLE) (\S+?):? ", line):
+                self.ended[m.group(2)] = line.strip()[:300]
+
+    def screen(self, i: str) -> str:
+        code, out = self.fleet("peek", SMOKE_RUN, i, "--lines", str(SMOKE_TAIL), timeout=60)
+        return out if code == 0 else f"(no screen: {last_lines(out, 3)})"
+
+    def workers(self) -> list[str]:
+        try:
+            return list(json.loads((run_dir(self.repo, SMOKE_RUN) / "run.json").read_text())["workers"])
+        except (OSError, ValueError, KeyError, FleetError):
+            return []
+
+    def cleanup(self) -> None:
+        """Stop every worker, kill the private tmux server and delete the repository unless --keep: on success,
+        failure and Ctrl-C alike."""
+        start, notes = time.monotonic(), []
+        try:
+            workers = self.workers()
+            for i in workers:  # before the server goes: each screen shows the pointer lines its worker was sent
+                code, out = self.fleet("peek", SMOKE_RUN, i, "--lines", "200", timeout=60)
+                if code == 0 and (found := POINTER_RE.findall(out)):
+                    self.pointers[i] = found[-1].strip()
+            if workers:
+                code, out = self.fleet("stop", SMOKE_RUN, "--all", "--timeout", "10", timeout=15 * len(workers) + 30)
+                if code != 0:
+                    notes.append(f"stop: {last_lines(out, 3)}")
+        finally:
+            subprocess.run(["tmux", "-L", self.socket, "kill-server"], capture_output=True, timeout=30)
+            gone = subprocess.run(["tmux", "-L", self.socket, "list-sessions"], capture_output=True,
+                                  timeout=30).returncode != 0
+            if self.a.keep:
+                notes.append(f"kept {self.repo}")
+                self.say(f"kept the smoke repository: {self.repo}")
+            else:
+                shutil.rmtree(self.root, ignore_errors=True)
+            if not gone:
+                notes.append(f"tmux -L {self.socket} is still running")
+            self.record("cleanup", "pass" if gone and (self.a.keep or not self.root.exists()) else "fail", start,
+                        "; ".join(notes))
+
+    def write_report(self) -> None:
+        self.report.parent.mkdir(parents=True, exist_ok=True)
+        self.report.write_text(smoke_report(self))
+        self.say(f"report: {self.report}")
+
+
+def smoke_report(s: Smoke) -> str:
+    """The Markdown report: versions, every step, the failures' screens, pointer lines and a per-provider table."""
+    failed = [x for x in s.steps if x["result"] == "fail"]
+    count = {r: sum(x["result"] == r for x in s.steps) for r in ("pass", "fail", "skip")}
+    out = ["# Fleet live smoke", "", f"- Started: {s.started}", f"- Fleet: {VERSION}",
+           f"- Providers: {', '.join(s.names)}",
+           f"- Result: {'FAIL' if failed else 'PASS'} ({count['pass']} passed, {count['fail']} failed, "
+           f"{count['skip']} skipped)", "", "## CLI versions", "", "| Provider | Version |", "| --- | --- |"]
+    out += [f"| {n} | {s.versions.get(n, 'not read')} |" for n in s.names]
+    out += ["", "## Steps", "", "| Step | Result | Seconds | Detail |", "| --- | --- | --- | --- |"]
+    out += [f"| {x['name']} | {x['result']} | {x['seconds']:.1f} | {x['detail'].replace('|', '/')} |" for x in s.steps]
+    if failed:
+        out += ["", "## Failures"]
+        for x in failed:
+            out += ["", f"### {x['name']}", "", x["detail"] or "failed"]
+            if x["tail"]:
+                out += ["", "Last screen lines:", "", "```text", x["tail"].strip("\n").replace("```", "'''"), "```"]
+    out += ["", "## Inbox pointer lines", ""]
+    out += [f"- {i}: `{line}`" for i, line in s.pointers.items()] or ["None: no worker's screen showed one."]
+    out += ["", "## Summary", "", "| Provider | Writer | Review | Accept |", "| --- | --- | --- | --- |"]
+    result = {x["name"]: x["result"] for x in s.steps}
+    for n in s.names:
+        review = result.get(f"reviewer review-{n} hands back") or result.get(f"review {n}", "not run")
+        out.append(f"| {n} | {result.get(f'writer {n} hands back', 'not run')} | {review} | "
+                   f"{result.get(f'accept {n}', 'not run')} |")
+    return "\n".join(out) + "\n"
+
+
+def cmd_smoke(a, cfg):
+    """The owner's live smoke: print the plan, or with --yes-paid run it in isolation and write the report."""
+    if not 1 <= a.step_timeout <= 3600:
+        raise FleetError("--timeout must be between 1 and 3600 seconds")
+    names = smoke_providers(cfg, a.providers)
+    socket = f"fleet-smoke-{uuid.uuid4().hex[:8]}"
+    scfg = smoke_config(cfg, names, socket)
+    routes = smoke_routes(scfg, names)
+    if not a.yes_paid:
+        print_smoke_plan(a, scfg, names, routes)
+        return 0
+    if not shutil.which("tmux"):
+        raise FleetError("fleet smoke runs its workers on a private tmux server; install tmux")
+    return Smoke(a, scfg, names, routes, socket).run()
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "_run":
@@ -4997,6 +5398,19 @@ def main(argv: list[str] | None = None) -> int:
     s_reset = steer.add_parser("reset", help="drop steering overrides")
     s_reset.add_argument("run")
     s_reset.set_defaults(fn=cmd_steer)
+
+    s = sub.add_parser("smoke", help="owner's live check of the real CLIs and accounts: one tiny ticket per provider "
+                                     "through launch, wait --gate, review and accept in a throwaway repository; "
+                                     "prints the plan unless --yes-paid")
+    s.add_argument("--providers", metavar="A,B", help="comma-separated providers (default: every enabled one doctor passes, one "
+                                       "per CLI)")
+    s.add_argument("--yes-paid", action="store_true", help="run it: real sessions on the owner's accounts cost usage")
+    s.add_argument("--keep", action="store_true", help="keep the throwaway repository and print its path")
+    s.add_argument("--report", metavar="FILE", help="Markdown report path (default: fleet-smoke-<time>.md in the system temp "
+                                    "directory, printed)")
+    s.add_argument("--timeout", dest="step_timeout", type=int, default=300, metavar="SECONDS",
+                   help="seconds each worker may take to hand back (default 300, at most 3600)")
+    s.set_defaults(fn=cmd_smoke)
 
     s = sub.add_parser("hold", help="block new launches in this checkout; running workers continue")
     s.add_argument("--reason", help="shown to any lead that tries to launch")

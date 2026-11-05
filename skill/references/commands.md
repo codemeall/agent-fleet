@@ -2,7 +2,7 @@
 
 Every `fleet` command: what it does and when to use it. Commands that take `<run>` act on `.fleet/runs/<run>/` in the current checkout; run them from the repository root. `fleet <command> --help` prints the exact flags. For full sequences, see the [worked examples](examples.md).
 
-The lead runs these commands. The owner may run any of them too, most often `hold`, `release`, `context` and `stop`, once `fleet` is on their PATH. `agents` and `attach` are the owner's alone: the lead never runs them.
+The lead runs these commands. The owner may run any of them too, most often `hold`, `release`, `context` and `stop`, once `fleet` is on their PATH. `agents` and `attach` are the owner's alone: the lead never runs them. `smoke` is the owner's too, because it spends their real usage: the lead runs it only when the owner asks.
 
 ## At a glance
 
@@ -10,6 +10,7 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | --- | --- | --- |
 | [`version`](#version) | Prints the runtime version and location | Checking which install is running |
 | [`doctor`](#doctor) | Checks the terminal backends (cmux, tmux), provider logins, models and installed skills | Before a run, or after changing config or accounts |
+| [`smoke`](#smoke) | The owner's live check: one tiny ticket per provider through launch, review and accept, on the real CLIs and accounts, in a throwaway repository | After installing or updating a CLI, adding an account or updating Fleet; only when the owner asks |
 | [`providers`](#providers) | Prints the merged provider config | You need an adapter's launch, quit or tier details |
 | [`models`](#models) | Lists the models a provider's account offers | Choosing or replacing a model |
 | [`provider`](#provider) | Turns a provider on or off in the owner's config | The owner asks to turn one on or off |
@@ -65,6 +66,26 @@ fleet doctor [<provider> ...]
 Checks the configured backend (`defaults.backend`; under `auto`, at least one of cmux and tmux must work), each provider's executable and login, each tier's model and effort, and which companion skills are installed. Name providers to check only those. A provider that is off shows as `off`. It fails when an enabled provider is a placeholder adapter, when a tier's model is one the account doesn't offer, or when two Claude providers are signed in to the same account. Passing `doctor` doesn't prove a launch will work: `peek` the first worker.
 
 **Use:** at the start of every run, and after editing config or adding an account.
+
+### smoke
+
+```text
+fleet smoke [--providers <a,b>] [--yes-paid] [--keep] [--report <file>] [--timeout <seconds>]
+```
+
+The owner's live check that their real CLIs and accounts still work through a whole run. Each provider gets one tiny ticket, pinned to it: write one line to `smoke/<provider>.txt`, checked with `grep -qx`. The smoke then runs `init`, `plan`, `launch --ready`, `wait --gate`, `review`, `accept --gate` and `check`, as a lead would. Review runs `cross-heavy`: a ticket is heavy, so its review is required, whenever another provider in the run is from a different family.
+
+Without `--yes-paid` it runs nothing and writes nothing. It prints which providers would run, how many sessions each (one writer, plus one per ticket it reviews) and the exact command to run. With `--yes-paid` it uses the owner's real CLIs and accounts (the real `HOME`, and each adapter's own account directory), so it costs a little usage.
+
+- **Providers:** the named ones, else every enabled provider that passes `doctor`'s binary and login checks, one per CLI binary (so `claude-co` runs only when named). A named provider that is off runs too: the smoke turns it on in its own config only.
+- **Isolation:** everything happens in a throwaway repository in the system temp directory, with a Fleet config of its own (`FLEET_CONFIG`, built from the owner's merged provider config and narrowed to the smoke's providers) and a private tmux server. The owner's repository, Fleet config and tmux server are never written. With `auto_trust` on, each CLI's trust list gains the throwaway folder, as in any run.
+- **Timeout:** `--timeout` (default 300, at most 3600) bounds each wait for a hand-back. A worker that doesn't hand back in time fails its step, and the report keeps its last screen lines: a login, trust or permission prompt, or a usage limit, shows there.
+- **Report:** Markdown, at `--report`, or else a `fleet-smoke-<time>.md` in the system temp directory (the path is printed). It lists each provider's `<bin> --version`, every step's pass, fail or skip with its seconds, each failure's screen tail, any inbox pointer line a worker's screen showed, and a summary table per provider. A step is skipped only when it can't apply: a review with no other family in the run, or the steps after a ticket's failure.
+- **Cleanup:** on success, failure or Ctrl-C alike, it stops every worker, kills the private tmux server and deletes the throwaway repository. `--keep` keeps the repository and prints its path.
+
+It exits 0 only when no step failed, and 130 after Ctrl-C.
+
+**Use:** only when the owner asks, typically after installing or updating a CLI, adding an account or updating Fleet. Show them the plan first, and pass `--yes-paid` only once they agree to spend the usage.
 
 ### providers
 
