@@ -40,6 +40,12 @@
 #   [defaults] permission_ceiling (default workspace-write). A launch line without {profile} runs as written for
 #   every role, at the worker's level. See references/providers.md#permission-profiles.
 # bin_aliases: other names the same CLI installs under; doctor names one it finds when `bin` is missing.
+# headless: a one-shot, non-interactive launch line for reviewers and investigate tickets ({bin}, {model}, {effort},
+#   {prompt}; no {session} or {profile}). Its own flags must deny every write and every prompt, so it counts as
+#   read-only. Its runner saves the CLI's final message as the report and the usage it prints for `fleet cost`.
+# review_transport: "tui" (default) or "headless", here or under [defaults]; headless needs a `headless` line, and
+#   an adapter without one keeps its TUI under a [defaults] headless. Implementation workers always run in a TUI.
+#   See references/providers.md#headless-reviewers.
 
 [providers.claude]
 enabled = true
@@ -50,6 +56,9 @@ launch = "{bin} {session} --model {model} --effort {effort} {profile} {prompt}"
 # looser defaultMode never reaches them. Allow rules in Claude's settings still apply in manual mode.
 profiles.worker = { args = "", level = "workspace-write" }
 profiles.review = { args = "--permission-mode manual", level = "read-only" }
+# Headless (review_transport = "headless"): `-p` with nobody to answer (`--permission-prompts none`) in manual mode,
+# so every edit and every command that would ask is denied, not left waiting. JSON output carries the result and usage.
+headless = "{bin} -p --output-format json --model {model} --effort {effort} --permission-mode manual --permission-prompts none {prompt}"
 session = "--session-id {id}"
 resume = "--resume {id}"
 quit = ["/exit", "enter"]
@@ -87,6 +96,10 @@ launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c check_for_updat
 # for the owner's approval. So review runs the worker's sandbox, and only Fleet's review contract keeps it to its report.
 profiles.worker = { args = "-s workspace-write -a on-request", level = "workspace-write" }
 profiles.review = { args = "-s workspace-write -a on-request", level = "workspace-write" }
+# Headless (review_transport = "headless"): `codex exec` under -s read-only, with approval_policy pinned to never
+# (exec's default, which an owner's auto_review would otherwise lift), so a write fails instead of escalating and
+# nothing waits for an answer. Its final message is the report; --json streams events and usage.
+headless = "{bin} exec --json -m {model} -c model_reasoning_effort={effort} -s read-only -c approval_policy=never {prompt}"
 quit = ["/quit", "enter"]
 login = "codex login status"
 login_ok = "Logged in"

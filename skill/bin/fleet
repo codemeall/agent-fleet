@@ -23,6 +23,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 from pathlib import Path
@@ -67,6 +68,7 @@ DEFAULTS = {
     "scope_ignore": [".scratch/", "node_modules/", "__pycache__/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/"],
     "permission_ceiling": "workspace-write",  # the widest profile level launch will start; the owner's to raise
     "check_policy": "refuse",  # plan and add refuse a ticket without a runnable or manual check; "warn" saves it
+    "review_transport": "tui",  # reviewers and investigators: TUI panes, or "headless" where an adapter has the line
 }
 CHECK_POLICIES = ("refuse", "warn")
 STATUS_RE = re.compile(r"^\s*[*_`]*\s*status\s*[*_`]*\s*:\s*[*_`]*\s*(.+?)\s*[*_`]*\s*$", re.I)
@@ -84,10 +86,15 @@ TIER_ORDER = ("heavy", "standard", "light")  # launch --ready takes consequentia
 # read-only changes nothing unasked, workspace-write edits the checkout, full-access runs anything.
 PERMISSION_LEVELS = ("read-only", "workspace-write", "full-access")
 PROFILES = ("worker", "review")  # worker: implementation tickets; review: reviewers and investigate tickets
+# A reviewer or investigator on an adapter whose review_transport is headless runs the adapter's `headless` line
+# instead: a one-shot, non-interactive run whose own flags deny every write, so it counts as read-only.
+HEADLESS = "headless"
+TRANSPORTS = ("tui", HEADLESS)
 UNDECLARED_PROFILE = {"args": "", "level": "workspace-write"}  # an adapter written before profiles existed
 HELP_TIMEOUT_S = 10  # doctor's `<bin> --help`; a CLI that takes longer leaves its flags unverified
 PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
-TEMPLATE_KEYS = {"id", "ticket", "report", "repo", "files", "diff", "review_of", "handdown", "inbox", *PROMPT_FIELDS}
+TEMPLATE_KEYS = {"id", "ticket", "report", "repo", "files", "diff", "review_of", "handdown", "inbox", "transport",
+                 *PROMPT_FIELDS}
 HANDDOWN_LINES = 40  # of a blocker's report summary; past it, the dependent is pointed at the full report
 LATER_DECISION_RE = re.compile(r"\((?:added )?\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\)\s*$")  # Fleet stamps its own
 WAIT_SETTLE_S = 5  # after the first event, gather the others that land with it: one wake, one lead turn
@@ -200,6 +207,8 @@ def load_config(user_path: Path | None = None) -> dict:
         raise FleetError('defaults.check_policy must be "refuse" (the default) or "warn"')
     if cfg["defaults"]["permission_ceiling"] not in PERMISSION_LEVELS:
         raise FleetError(f"defaults.permission_ceiling must be one of {', '.join(PERMISSION_LEVELS)} (narrowest first)")
+    if cfg["defaults"]["review_transport"] not in TRANSPORTS:
+        raise FleetError(f"defaults.review_transport must be {' or '.join(TRANSPORTS)}")
     if cfg["defaults"]["backend"] not in ("auto", *BACKENDS):
         raise FleetError(f"defaults.backend must be auto, {' or '.join(BACKENDS)}")
     if not isinstance(cfg["defaults"]["tmux_socket"], str) or not re.fullmatch(r"[A-Za-z0-9_-]*", cfg["defaults"]["tmux_socket"]):
@@ -233,6 +242,13 @@ def load_config(user_path: Path | None = None) -> dict:
                                                    and v.get("level") in PERMISSION_LEVELS for v in profiles.values())):
             raise FleetError(f'{name}.profiles must be tables like worker = {{ args = "…", level = "workspace-write" }}, '
                              f"each level one of {', '.join(PERMISSION_LEVELS)}")
+        if not isinstance(adapter.get(HEADLESS, ""), str):
+            raise FleetError(f"{name}.headless must be a launch line for reviewers and investigators, like launch")
+        if adapter.get("review_transport", "tui") not in TRANSPORTS:
+            raise FleetError(f"{name}.review_transport must be {' or '.join(TRANSPORTS)}")
+        if adapter.get("review_transport") == HEADLESS and not adapter.get(HEADLESS):
+            raise FleetError(f'{name}.review_transport is "headless" but {name} has no headless line; set '
+                             f'{name}.headless, or review_transport = "tui"')
         aliases = adapter.get("bin_aliases", [])
         if not (isinstance(aliases, list) and all(isinstance(b, str) for b in aliases)):
             raise FleetError(f"{name}.bin_aliases must be a list of executable names")
@@ -338,10 +354,20 @@ def launch_profile(meta: dict, ticket: dict | None) -> str:
     return "review"
 
 
+def review_transport(cfg: dict, pcfg: dict) -> str:
+    """How an adapter runs reviewers and investigators: headless when its review_transport (else [defaults]') says
+    so and it has a headless line, otherwise in a TUI as before. Implementation workers always run in a TUI."""
+    want = pcfg.get("review_transport", cfg.get("defaults", DEFAULTS).get("review_transport", "tui"))
+    return HEADLESS if want == HEADLESS and pcfg.get(HEADLESS) else "tui"
+
+
 def adapter_profile(pcfg: dict, profile: str) -> dict:
     """A profile's launch fragment and level. A launch line without a {profile} slot (an owner's override from before
     profiles) runs as written for every role, so it counts at the worker level; an adapter that declares no profiles
-    counts as workspace-write. A role the adapter leaves out runs as its worker."""
+    counts as workspace-write. A role the adapter leaves out runs as its worker. A headless run is read-only by its
+    own line's flags, and no profile fragment reaches it."""
+    if profile == HEADLESS:
+        return {"args": "", "level": "read-only"}
     profiles = pcfg.get("profiles", {})
     if "{profile}" not in pcfg.get("launch", "{profile}"):
         return dict(profiles.get("worker", UNDECLARED_PROFILE), args="")
@@ -369,10 +395,11 @@ def check_ceiling(cfg: dict, name: str, pcfg: dict, profile: str) -> None:
 
 def build_launch(pcfg: dict, model: str, effort: str | None, prompt: str,
                  session: str | None = None, resume: bool = False, trust: str = "", profile: str = "worker") -> str:
-    template = pcfg["launch"]
+    template = pcfg[HEADLESS] if profile == HEADLESS else pcfg["launch"]
     if "{effort}" in template and not effort:
         raise FleetError("this provider's launch needs an effort: pass --effort or set it on the tier")
-    flag = pcfg["resume" if resume else "session"].format(id=shlex.quote(session)) if session and resumable(pcfg) else ""
+    flag = (pcfg["resume" if resume else "session"].format(id=shlex.quote(session))
+            if session and resumable(pcfg) and profile != HEADLESS else "")
     if not flag:
         template = template.replace(" {session}", "").replace("{session}", "")
     args = adapter_profile(pcfg, profile)["args"]  # trusted adapter config, like bin, so not quoted
@@ -1039,6 +1066,7 @@ def scoped_diff(repo: Path, state: dict, ticket_id: str) -> str:
 
 
 def reconcile(repo: Path, state: dict) -> None:
+    exited = []
     for w in state["workers"].values():
         if w["state"] not in ACTIVE_STATES or not w.get("exit_file"):
             continue
@@ -1053,7 +1081,28 @@ def reconcile(repo: Path, state: dict) -> None:
             if data.get("token") == w.get("token"):
                 w["state"] = "exited"
                 w["returncode"] = data["returncode"]
+                exited.append(w)
     ledger_sync(state)
+    for w in exited:
+        reported_usage(repo, state, w)
+
+
+def reported_usage(repo: Path, state: dict, w: dict) -> None:
+    """Token usage a headless run's CLI reported, from the runner's sidecar, onto that launch's ledger entry. It
+    runs inside reconcile, so a command that saves the run records it under the lock; the runner never writes run
+    state. A CLI that reported no counts leaves the entry unknown."""
+    if not w.get("usage_file"):
+        return
+    try:
+        data = json.loads(contained(run_dir(repo, state["run"]), Path(w["usage_file"])).read_text())
+    except (OSError, ValueError, FleetError):
+        return
+    if not isinstance(data, dict) or data.get("token") != w.get("token") or not isinstance(data.get("usage"), dict):
+        return
+    try:
+        record_usage(state, w["id"], data["usage"])
+    except (FleetError, TypeError, ValueError):
+        pass  # counts in a shape Fleet cannot read stay unknown, never zero
 
 
 def assert_scope_idle(state: dict, files: list[str]) -> None:
@@ -1331,6 +1380,214 @@ def run_child(args: list[str]) -> int:
             # Ctrl-C also reaches the child; keep watching until it actually exits.
             continue
     atomic_json(Path(path), {"token": token, "returncode": code})
+    return code
+
+
+# ---------- headless runs ----------
+# A reviewer or investigator on a headless transport is one non-interactive CLI call in its window, read-only by its
+# own flags, so it can neither edit nor stall at a prompt. Its runner, `fleet _headless`, runs inside the worker's
+# terminal like `_run` and never writes run state: it writes the CLI's final message as the report (or a blocked
+# report saying why there is none), the usage the CLI reported to a sidecar that reconcile records under the lock,
+# and the exit receipt last.
+
+HEADLESS_TAIL = 20  # stderr lines a blocked report quotes
+HEADLESS_KILL_S = 5  # after an interrupt, how long the CLI gets to exit before it is killed
+REPORT_FENCE_RE = re.compile(r"\A\s*(`{3,}|~{3,})[ \t]*(?:markdown|md)?[ \t]*\n(.*)\n[ \t]*\1[ \t]*\Z", re.S)
+
+
+def headless_prompt_note(report: Path) -> str:
+    """The reviewer and investigator templates' {{transport}} sentence for a headless run; a TUI run gets none."""
+    return (f"\n\n**Fleet runs you headless:** you cannot write files, and nobody can answer you. Do not write "
+            f"`{report}` or wait for the lead: reply with the complete report below, its `Status:` line and `fleet` "
+            "block included, as your final message, and Fleet saves it as your report.")
+
+
+def codex_usage(u: dict) -> dict:
+    """Codex exec's turn usage in Fleet's names. Codex counts cached input inside input_tokens; Fleet's input, like
+    Claude's, is the uncached part, so the cached share moves to cache_read."""
+    out = {}
+    cached = u.get("cached_input_tokens") or 0
+    if u.get("input_tokens") is not None:
+        out["input_tokens"] = max(0, int(u["input_tokens"]) - int(cached))
+    if u.get("output_tokens") is not None:
+        out["output_tokens"] = int(u["output_tokens"])
+    if cached:
+        out["cache_read_input_tokens"] = int(cached)
+    if u.get("cache_write_input_tokens"):
+        out["cache_creation_input_tokens"] = int(u["cache_write_input_tokens"])
+    return out
+
+
+def headless_output(text: str) -> dict:
+    """The final message, usage, denied tool calls and errors in a headless CLI's stdout: Claude's
+    `--output-format json` result object (or stream-json's closing `result` line), Codex's `exec --json` events, or
+    plain text, which is all message."""
+    events = []
+    try:
+        whole = json.loads(text)
+        events = whole if isinstance(whole, list) else [whole]
+    except ValueError:
+        for line in text.splitlines():
+            if line.lstrip().startswith("{"):
+                try:
+                    events.append(json.loads(line))
+                except ValueError:
+                    pass
+    out = {"message": None, "usage": None, "denials": [], "errors": []}
+    for e in events:
+        if not isinstance(e, dict):
+            continue
+        kind = e.get("type")
+        item = e.get("item") if isinstance(e.get("item"), dict) else {}
+        if kind == "result":  # Claude: the run's last message, its usage and every call its permissions denied
+            if isinstance(e.get("result"), str):
+                out["message"] = e["result"]
+            if isinstance(e.get("usage"), dict):
+                out["usage"] = e["usage"]
+            out["denials"] += [f"{d.get('tool_name', '?')} {json.dumps(d.get('tool_input', {}))[:200]}"
+                               for d in e.get("permission_denials") or [] if isinstance(d, dict)]
+            if e.get("is_error"):
+                out["errors"] += [str(x) for x in e.get("errors") or [e.get("subtype") or "error"]]
+        elif kind == "item.completed" and item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+            out["message"] = item["text"]
+        elif kind == "item.completed" and item.get("type") == "command_execution" and item.get("status") == "declined":
+            out["denials"].append(f"command {str(item.get('command', '?'))[:200]}")
+        elif kind == "item.completed" and item.get("type") == "file_change" and item.get("status") == "failed":
+            out["denials"].append("file change " + ", ".join(str(c.get("path")) for c in item.get("changes") or []
+                                                             if isinstance(c, dict)))
+        elif kind == "turn.completed" and isinstance(e.get("usage"), dict):
+            out["usage"] = codex_usage(e["usage"]) or None  # the thread's running total, so the last one counts
+        elif kind == "turn.failed":
+            out["errors"].append(str((e.get("error") or {}).get("message", "turn failed")))
+        elif kind == "error":
+            out["errors"].append(str(e.get("message", "error")))
+    if not events and text.strip():
+        out["message"] = text
+    return out
+
+
+def headless_progress(line: str) -> str | None:
+    """One short pane line per JSON event, so `fleet agents` shows a headless run working."""
+    try:
+        e = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(e, dict):
+        return None
+    item = e.get("item") if isinstance(e.get("item"), dict) else {}
+    what = " ".join(str(x)[:120] for x in (e.get("type"), item.get("type"), item.get("command")) if x)
+    return f"  {what}" if what else None
+
+
+def blocked_report(wid: str, why: str, message: str | None, errors: list[str], tail: list[str]) -> str:
+    lines = [f"# Report {wid}", "", "Status: blocked", "", "## Decisions and blockers",
+             f"- Fleet ran {wid} headless and {why}, so Fleet wrote this report in its place. Nothing it found is on "
+             "record here: read the appendix, then relaunch it or take it to the owner.", "", "## Appendix"]
+    if errors:
+        lines.append("- The CLI reported: " + "; ".join(errors)[:1000])
+    if message and message.strip():
+        lines += ["- Its final message, quoted as data:", "", fenced(message.strip())]
+    if tail:
+        lines += ["- The last lines it printed to stderr:", "", fenced("\n".join(tail))]
+    return "\n".join(lines) + "\n"
+
+
+def headless_report(wid: str, code: int, parsed: dict, tail: list[str]) -> str:
+    """The report a headless run leaves: its final message when that carries a wake status, else a blocked report
+    that wakes the lead. Calls its read-only mode denied are noted at the end."""
+    message = parsed["message"]
+    m = REPORT_FENCE_RE.match(message or "")
+    body = (m.group(2) if m else message or "").strip()
+    if (parse_status(body) or "").lower() in WAKE_STATUSES:
+        text = body + "\n"
+    elif body:
+        text = blocked_report(wid, f"its final message has no `Status: needs-verification` or `Status: blocked` line "
+                                   f"(CLI exit {code})", message, parsed["errors"], tail)
+    else:
+        text = blocked_report(wid, f"the CLI exited {code} without a final message", None, parsed["errors"], tail)
+    if parsed["denials"]:
+        text += ("\n## Denied by the read-only run\n\nFleet's note: the CLI's read-only mode denied these calls.\n\n"
+                 + "".join(f"- {d}\n" for d in parsed["denials"]))
+    return text
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        temp.write_text(text)
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def headless_child(args: list[str]) -> int:
+    """`fleet _headless`: runs inside the worker terminal. Writes the report, the usage sidecar and the exit receipt,
+    never the shared run state. An interrupt (`fleet stop` sends Ctrl-C) stops the CLI and leaves no report."""
+    if len(args) != 5:
+        raise FleetError("internal headless runner expects receipt, token, report, usage file, command")
+    receipt, token, report, usage_file, command = Path(args[0]), args[1], Path(args[2]), Path(args[3]), args[4]
+    wid = report.stem
+    print(f"fleet: {wid} runs headless and read-only; its final message becomes {report}", flush=True)
+    # Its own process group, so an interrupt ends the CLI and everything it started, whatever the shell does; a
+    # closed window or a TERM ends it the same way. stdin is empty: the CLI takes its prompt from the command line.
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, interrupt)
+    child = subprocess.Popen(command, shell=True, executable="/bin/sh", stdin=subprocess.DEVNULL, text=True,
+                             errors="replace", stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+
+    def end(sig: int) -> None:
+        try:
+            os.killpg(child.pid, sig)
+        except OSError:
+            pass  # already gone
+    atomic_json(receipt.with_suffix(".started.json"),
+                {"token": token, "wrapper_pid": os.getpid(), "child_pid": child.pid})
+    tail: list[str] = []
+
+    def drain() -> None:  # stderr shows in the pane as it comes; a blocked report quotes its end
+        for line in child.stderr:
+            sys.stderr.write(line)
+            sys.stderr.flush()
+            tail.append(line.rstrip("\n"))
+            del tail[:-HEADLESS_TAIL]
+
+    errs = threading.Thread(target=drain, daemon=True)
+    errs.start()
+    out, interrupted = [], False
+    while True:
+        try:
+            for line in iter(child.stdout.readline, ""):
+                out.append(line)
+                if note := headless_progress(line):
+                    print(note, flush=True)
+            code = child.wait()
+            break
+        except KeyboardInterrupt:
+            if not interrupted:
+                interrupted = True
+                print(f"fleet: {wid} interrupted; stopping the CLI", flush=True)
+                end(signal.SIGTERM)
+                kill = threading.Timer(HEADLESS_KILL_S, end, (signal.SIGKILL,))
+                kill.daemon = True
+                kill.start()
+    errs.join(timeout=5)
+    parsed = {"message": None, "usage": None, "denials": [], "errors": []}
+    try:
+        text = "".join(out)
+        usage_file.parent.mkdir(parents=True, exist_ok=True)
+        usage_file.with_suffix(".out").write_text(text)  # the CLI's own output, for the lead to inspect
+        parsed = headless_output(text)
+        if not interrupted:
+            write_text_atomic(report, headless_report(wid, code, parsed, tail))
+        atomic_json(usage_file, {"token": token, "returncode": code, "interrupted": interrupted,
+                                 "usage": parsed["usage"], "denials": parsed["denials"], "errors": parsed["errors"]})
+    finally:
+        atomic_json(receipt, {"token": token, "returncode": code})  # last: reconcile reads the rest once it exists
+    status = "stopped" if interrupted else parse_status(report.read_text()) if report.exists() else None
+    print(f"fleet: {wid} exited {code}; report {status or 'missing'}"
+          + (f"; {len(parsed['denials'])} call(s) denied" if parsed["denials"] else ""), flush=True)
     return code
 
 
@@ -2404,6 +2661,17 @@ def handdown_section(repo: Path, state: dict, t: dict) -> str:
     return "\n\n## Since this ticket was planned\n\n" + intro + "\n\n" + "\n\n".join(parts)
 
 
+def prompt_transport(repo: Path, cfg: dict, a, t: dict) -> str:
+    """The transport a reviewer's or investigator's prompt is written for: that of --provider (fleet review passes
+    the reviewer it picked), else an investigate ticket's steered or planned provider. A reviewer prompt with no
+    provider named is written for a TUI; launch says to rewrite it if its provider runs headless."""
+    name = getattr(a, "provider", None)
+    if not name and not a.review_of:
+        name = load_live_state(repo, a.run).get("provider") or t.get("provider")
+    pcfg = cfg.get("providers", {}).get(name) if name else None
+    return review_transport(cfg, pcfg) if pcfg else "tui"
+
+
 def cmd_prompt(a, cfg):
     repo = repo_root()
     state = load_run(repo, a.run)
@@ -2459,11 +2727,15 @@ def cmd_prompt(a, cfg):
     ticket = a.ticket or t["ticket"]
     if str(Path(ticket).resolve()) != t["ticket"]:
         raise FleetError("ticket differs from saved plan")
-    fields = {"id": a.id, "ticket": t["ticket"], "report": str(d / "reports" / f"{a.id}.md"),
+    report = d / "reports" / f"{a.id}.md"
+    transport = prompt_transport(repo, cfg, a, t) if review_of or investigate else "tui"
+    if transport == HEADLESS:
+        meta["transport"] = HEADLESS  # launch refuses it on a TUI transport, and a TUI prompt on a headless one
+    fields = {"id": a.id, "ticket": t["ticket"], "report": str(report),
               "repo": str(repo), "files": ", ".join(t["files"]),
               "diff": str(d / "snapshots" / f"{a.id}.diff") if review_of else "",
               "review_of": review_of or "", "handdown": "", "inbox": str(inbox_path(repo, a.run, a.id)),
-              **lead_fields}
+              "transport": headless_prompt_note(report) if transport == HEADLESS else "", **lead_fields}
     parts = [] if review_of or investigate else [(SKILL_DIR / "templates" / "preamble.md").read_text()]
     rules = repo / ".fleet" / "rules.md"
     if rules.exists():
@@ -2520,10 +2792,21 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     if unfilled:
         raise FleetError(f"fill {', '.join(unfilled)} in the prompt before launch")
     profile = launch_profile(meta_now, state["tickets"].get(a.id))
+    if profile == "review" and review_transport(cfg, pcfg) == HEADLESS:
+        profile = HEADLESS  # a one-shot run, read-only by its own flags
+    written = meta_now.get("transport", "tui")
+    if written != ("tui" if profile != HEADLESS else HEADLESS):
+        how = (f" --review-of {meta_now['review_of']} --diff <its diff>" if meta_now.get("review_of") else "")
+        raise FleetError(f"{a.id}'s prompt was written for a {written} run, but {a.provider} runs it "
+                         f"{'headless' if profile == HEADLESS else 'in a TUI'}, so its report instructions would be "
+                         f"wrong; rewrite it with fleet prompt {a.run} {a.id} --force{how} --provider {a.provider}")
     check_ceiling(cfg, a.provider, pcfg, profile)
     w = state["workers"].get(a.id)
     if w and w.get("state") in ACTIVE_STATES:
         raise FleetError(f"worker {a.id} may still be running on {w['surface']}; stop or recover it first")
+    if a.resume and profile == HEADLESS:
+        raise FleetError(f"{a.id} runs headless on {a.provider}: a one-shot run has no session to resume; "
+                         "relaunch without --resume")
     if a.resume:  # the session lives in one account's CLI history, so it cannot follow a steer
         if not (w or {}).get("session"):
             raise FleetError(f"{a.id} has no saved session to resume; relaunch without --resume")
@@ -2533,7 +2816,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         if not resumable(pcfg):
             raise FleetError(f"{a.provider}'s adapter cannot resume: its launch needs a {{session}} slot and "
                              "session/resume fields; relaunch without --resume")
-    session = w["session"] if a.resume else str(uuid.uuid4()) if resumable(pcfg) else None
+    session = w["session"] if a.resume else str(uuid.uuid4()) if resumable(pcfg) and profile != HEADLESS else None
     running = active(state)
     if len(running) >= state["options"]["max_parallel"]:
         raise FleetError("max_parallel reached; stop and confirm an existing worker's exit first")
@@ -2621,7 +2904,15 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     command = build_launch(pcfg, model, effort, line, session, a.resume, prepare_trust(cfg, a.provider, pcfg, repo),
                            profile)
     exit_file = d / "exits" / f"{a.id}.{token}.json"
-    wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_run", str(exit_file), token, command])
+    headless = {}
+    if profile == HEADLESS:  # its runner writes the report, usage and receipt; reconcile records the usage
+        usage_file = d / "usage" / f"{a.id}.{token}.json"
+        usage_file.parent.mkdir(exist_ok=True)
+        headless = {"transport": HEADLESS, "usage_file": str(usage_file)}
+        wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_headless", str(exit_file), token,
+                              str(report), str(usage_file), command])
+    else:
+        wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_run", str(exit_file), token, command])
     if meta["role"] != "implementation" and not a.resume:  # a launch that reaches the terminal is a round;
         t["review_rounds"] = review_rounds(state, meta["review_of"]) + 1  # resuming its session is the same one
     if meta["role"] == "implementation" and not a.resume:
@@ -2631,7 +2922,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         family=family, tier=a.tier, steered=steered, surface="unknown", state="launching", command=command,
         token=token, exit_file=str(exit_file), launched=time.strftime("%Y-%m-%dT%H:%M:%S"),
         launched_at=time.time(),
-        **({"session": session} if session else {}))
+        **({"session": session} if session else {}), **headless)
     state.setdefault("ledger", []).append(ledger_entry(state, a.id, state["workers"][a.id], a.resume,
                                                        usage_home(pcfg) if session else None))
     save_run(repo, a.run, state)
@@ -2955,6 +3246,10 @@ def cmd_send(a, cfg):
     w = state["workers"].get(a.id)
     if not w or w.get("state") not in ACTIVE_STATES:
         print(f"{a.id}: saved message {n} in {path}; no worker is running, so it reads it when launched")
+        return
+    if w.get("transport") == HEADLESS:  # a one-shot run reads its inbox when it starts and takes no input after
+        print(f"{a.id}: saved message {n} in {path}; {a.id} runs headless and reads no input once started, so only "
+              f"its next launch reads it (fleet stop {a.run} {a.id}, then launch it again)")
         return
     try:
         terminal(state).send(w, [inbox_pointer(n, path), "enter"])
@@ -3459,6 +3754,8 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
                 events.append(f"UNREACHABLE {i} {w['surface']}: {str(e).strip()[:200]}; the tab may be closed")
             continue
         (seen / f"{i}.gone").unlink(missing_ok=True)  # readable again: a later failure is a new episode
+        if w.get("transport") == HEADLESS:
+            continue  # no prompt can stop it and its screen stays still while the CLI works; its exit wakes the lead
         marker = seen / f"{i}.screen"
         now, h = time.time(), digest(screen.encode())
         limit = min(stall, LAUNCH_STALL_S) if now - w.get("launched_at", 0) < LAUNCH_WATCH_S else stall
@@ -3564,6 +3861,14 @@ def wait_loop(a, repo: Path, d: Path, seen: Path, statuses, deadline: float, loo
         time.sleep(min(a.interval, max(0, deadline - time.time())))
 
 
+def quit_keys(cfg: dict, w: dict) -> list[str]:
+    """What stop types: the adapter's quit sequence, or Ctrl-C for a headless run, whose runner then ends the CLI
+    and writes the exit receipt without a report."""
+    if w.get("transport") == HEADLESS:
+        return ["ctrl+c"]
+    return provider(cfg, w["provider"]).get("quit", ["/exit", "enter"])
+
+
 def cmd_stop(a, cfg):
     repo = repo_root()
     state = load_run(repo, a.run)
@@ -3577,7 +3882,7 @@ def cmd_stop(a, cfg):
         was_live = w["state"] in ACTIVE_STATES
         try:
             if w["state"] in ACTIVE_STATES:
-                terminal(state).send(w, provider(cfg, w["provider"]).get("quit", ["/exit", "enter"]))
+                terminal(state).send(w, quit_keys(cfg, w))
                 deadline = time.monotonic() + a.timeout
                 while w["state"] in ACTIVE_STATES and time.monotonic() < deadline:
                     reconcile(repo, state)
@@ -4581,7 +4886,8 @@ def cmd_review(a, cfg):
         cmd_diff(sub_args(a, id=a.id, output=str(diff), unowned_ok=a.unowned_ok), cfg)
         count = sum(line.startswith("diff --fleet ") for line in diff.read_text().splitlines())
         print(f"DIFF {diff.relative_to(repo.resolve())} ({count} file{'' if count == 1 else 's'})")
-        cmd_prompt(sub_args(a, id=rid, ticket=None, review_of=a.id, diff=str(diff), force=True, quiet=True), cfg)
+        cmd_prompt(sub_args(a, id=rid, ticket=None, review_of=a.id, diff=str(diff), force=True, quiet=True,
+                            provider=route["provider"]), cfg)
         one = sub_args(a, id=rid, provider=route["provider"], tier="review", model=route["model"],
                        effort=route["effort"], family=a.family, pane=a.pane, resume=False, extra_round=a.extra_round,
                        settle=LAUNCH_SETTLE_S if a.settle is None else a.settle)
@@ -4828,6 +5134,13 @@ def profile_report(cfg: dict, name: str, p: dict, found: str) -> tuple[list[str]
                   for flag in missing]
     else:
         lines.append(f"{pad}flags listed by {where}")
+    if review_transport(cfg, p) == HEADLESS:  # its line is checked against help the same way
+        lines.append(f"{pad}reviewers and investigators run headless, read-only")
+        missing, where = flag_drift(dict(p, launch=p[HEADLESS], profiles={}))
+        if missing is None:
+            lines.append(f"{pad}headless flags unverified: {where}")
+        lines += [f"{pad}WARNING: {flag} (headless line) is not in {where}; check {name}'s headless line against "
+                  "this CLI version" for flag in missing or []]
     return lines, not above
 
 
@@ -5680,6 +5993,8 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "_run":
         return run_child(argv[1:])
+    if argv and argv[0] == "_headless":
+        return headless_child(argv[1:])
     ap = argparse.ArgumentParser(prog="fleet", description=__doc__.splitlines()[0])
     ap.add_argument("--version", action="version", version=f"fleet {VERSION}")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -5824,6 +6139,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--ticket")
     s.add_argument("--review-of")
     s.add_argument("--diff")
+    s.add_argument("--provider", help="for a reviewer or investigator: the provider that will run it, so a headless "
+                                      "run's prompt says to reply with its report (default: the plan's)")
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_prompt)
 

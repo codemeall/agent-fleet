@@ -32,6 +32,20 @@ What was checked on 2026-11-05 for the [launch profiles](#permission-profiles). 
 
 `fleet doctor` repeats the help check on the owner's machine for every enabled adapter (see [below](#permission-profiles)), which is how drift in a newer CLI shows up.
 
+### Headless lines checked
+
+What was checked on 2026-11-05 for [headless reviewers](#headless-reviewers). Nothing was launched against a real account: the lines' shape and Fleet's handling of each CLI's output are proven by fakes in `tests/test_headless.py`, not by a real run.
+
+| Adapter | Headless line | How it was checked |
+| --- | --- | --- |
+| `claude`, `claude-co` | `-p --output-format json --model … --effort … --permission-mode manual --permission-prompts none` | `claude --help` on 2.1.318 lists every flag: `-p/--print`, `--output-format` (`json`: "single result"), `manual` among `--permission-mode`'s choices, and `--permission-prompts host\|none`, where `none` means "anything that would prompt is denied automatically; the permission mode still decides everything else". The headless docs (code.claude.com/docs/en/headless, read 2026-11-05) say a manual-mode `-p` run denies any call that needs approval and that `--permission-prompts none` tells Claude not to retry it (2.1.259 or later); the Agent SDK reference gives the `json` result's fields: `result` (the final text), `is_error`, `usage` (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`) and `permission_denials` (`tool_name`, `tool_input`). `fleet doctor claude` with `review_transport = "headless"` printed no headless-flag warning. |
+| `codex` | `exec --json -m … -c model_reasoning_effort=… -s read-only -c approval_policy=never` | Read, not run, in the Codex source at commit `9ff072d` (2026-11-04): `exec/src/cli.rs` (`--json` prints JSONL events; a prompt argument with stdin that is not a terminal only appends a non-empty stdin, so Fleet passes an empty one), `exec/src/lib.rs` (exec sets `approval_policy = never` unless the owner's config turns on `auto_review`, hence the explicit `-c approval_policy=never`), `exec/src/exec_events.rs` (`item.completed` with an `agent_message` carries the final text; `turn.completed` carries `usage`: `input_tokens`, which includes `cached_input_tokens`, `output_tokens`, `cache_write_input_tokens`), `protocol/src/protocol.rs` (`never`: failures go back to the model and are never escalated). No `codex exec --help` was run. |
+| `cursor` | none | No Cursor CLI here and nothing checked; its print mode is not shipped. |
+| `agy` | none | Its non-interactive mode was never checked; none is shipped. |
+| `opencode` | none | `opencode run` exists (it takes `--variant`), but its output format and a read-only agent were not checked (its docs were unreachable), so none is shipped. |
+
+An owner may add a `headless` line for another adapter in the user config once they have checked it: its own flags must deny every write and every prompt, since Fleet counts it as read-only.
+
 ## Turning providers on and off
 
 Which providers are on is the owner's decision. `fleet doctor` shows each one as `off`, as a sign-in result, or as `PLACEHOLDER`.
@@ -104,7 +118,7 @@ Each adapter launches a role through a profile. `profiles.worker` runs implement
 | `agy` | `--mode accept-edits`, `workspace-write` | the same | Edits are approved automatically, shell commands ask. No other mode was checked. |
 | `opencode` | no flag, `full-access` | the same | Its default build agent runs every tool without asking, so the default ceiling refuses it ([below](#opencode)). |
 
-Levels are what the launch Fleet builds asks for over the CLI's own default settings. A CLI's own configuration can still widen or narrow that (Claude's settings, Cursor's CLI config, `opencode.json`), and doctor does not read it. If you widen a CLI there, raise its profile's `level` to match; if you narrow it, you may lower it. No level loosens the worker rules: whatever the level, a worker never makes network calls, installs packages, reads secrets or touches Git, and a reviewer writes only its report. Those are instructions, not OS isolation; read-only reviewers by mechanism (headless runs, Claude hooks) will come through the review profile.
+Levels are what the launch Fleet builds asks for over the CLI's own default settings. A CLI's own configuration can still widen or narrow that (Claude's settings, Cursor's CLI config, `opencode.json`), and doctor does not read it. If you widen a CLI there, raise its profile's `level` to match; if you narrow it, you may lower it. No level loosens the worker rules: whatever the level, a worker never makes network calls, installs packages, reads secrets or touches Git, and a reviewer writes only its report. Those are instructions, not OS isolation; a [headless run](#headless-reviewers) makes reviewers and investigators read-only by mechanism, and Claude hooks will come through the review profile.
 
 An owner override of `launch` written before profiles, with no `{profile}` slot, keeps working: every role runs that line as written, and it counts at the worker profile's level. An adapter that declares no profiles counts as `workspace-write`. To change one field, override just that key:
 
@@ -114,6 +128,24 @@ level = "workspace-write"   # only after setting `permission` in opencode.json s
 ```
 
 Doctor prints, for each enabled adapter, the binary it found, each profile's level and the ceiling. It also runs `<bin> --help` (and the launch's subcommand help, when the launch line runs one) with a 10-second timeout and warns, naming the adapter and flag, when a flag the launch line, its session fragments or its profiles use is missing from that text. A warning never fails doctor: help text is not a contract, so check the flag against the CLI's docs and a real launch. Help that exits non-zero, prints nothing or times out shows `flags unverified`. A missing binary still fails; for Cursor, doctor also names `agent` if that is what is installed (`bin_aliases`), and the owner then sets `bin`, `login` and `models` to it.
+
+## Headless reviewers
+
+A TUI reviewer or investigator is read-only only by its prompt, writes its own report and can stall at a permission prompt. With `review_transport = "headless"` (under `[defaults]` for every adapter that has a `headless` line, or under one adapter; default `"tui"`), reviewers and investigate tickets on that adapter run its `headless` line instead: one non-interactive CLI call whose own flags deny every write and every prompt. Implementation workers always run in a TUI.
+
+| Adapter | Headless line (beyond model and effort) | What makes it read-only |
+| --- | --- | --- |
+| `claude`, `claude-co` | `-p --output-format json --permission-mode manual --permission-prompts none` | Manual mode asks before every edit and every command outside the read-only set; with nobody to answer, each such call is denied and Claude is told not to retry. |
+| `codex` | `exec --json -s read-only -c approval_policy=never` | The read-only sandbox fails every write, and with approvals never asked nothing escalates out of it. |
+
+Others ship none ([checked](#headless-lines-checked)), so a `[defaults]` headless leaves them in a TUI; `review_transport = "headless"` on an adapter without a `headless` line is a config error. `fleet doctor` names an adapter that runs reviewers headless and checks its headless line's flags against the CLI's help, as for its launch line.
+
+- **Launch.** `fleet review` and `fleet launch --tier review`, and an investigate ticket's launch, start `fleet _headless` in the run's tmux window or cmux pane, so `fleet agents` shows it. It counts as `read-only` against `permission_ceiling`, whatever the adapter's `review` profile says, and has no session, so `--resume` refuses it.
+- **Prompt.** A headless reviewer cannot write its report, so its prompt (`fleet prompt … --provider <p>`; `fleet review` passes it) says to reply with the complete report, `Status:` line and `fleet` header included, as its final message. Launch refuses a prompt written for the other transport and says how to rewrite it.
+- **Report.** The runner writes the final message as `reports/<id>.md`. One without `Status: needs-verification` or `Status: blocked`, or no final message at all, becomes a `Status: blocked` report saying why, with the message and the CLI's last stderr lines quoted, so `wait` wakes the lead either way. Calls the CLI reports it denied (Claude's `permission_denials`, Codex's declined commands and failed file changes) are listed at the end under `## Denied by the read-only run`.
+- **Usage.** The runner writes what the CLI reported to `usage/<id>.<token>.json` (its raw output beside it as `.out`), and reconcile records it in the ledger under the run's lock. Codex counts cached input inside its input tokens; Fleet records the uncached part as input, as Claude reports it. A CLI that reports no usage stays `unknown`.
+- **Wait, stop and send.** `wait` wakes on the report exactly as for a TUI reviewer, header summary included. A headless run cannot stall at a prompt and its screen stays still while it works, so it never shows as `STALLED`; it still shows `UNREACHABLE` when its window goes. `fleet stop` sends Ctrl-C: the runner ends the CLI's process group and writes the exit receipt, without a report. A run that finished has already exited. `fleet send` only saves the message: a headless run reads its inbox when it starts.
+- **Limits.** Allow rules in Claude's own settings (or a mod or `PermissionRequest` hook) still approve what they match, in manual mode as in the TUI profile; an owner who allows edits or writing commands there has widened headless reviewers too. Codex's user `config.toml` still applies apart from the sandbox and approval policy the line sets. Neither CLI's network access is changed. A CLI that hangs without exiting keeps its window until `fleet stop`.
 
 ## Keeping models current
 
@@ -139,7 +171,7 @@ Codex's list comes from `codex debug models`, a debug command that refreshes its
 
 ## Claude Code
 
-The default `claude` adapter uses the normal account and interactive permission controls. Its reviewers and investigators launch with `--permission-mode manual`, so they ask before writing even their report when the account's settings would accept edits; expect a `STALLED` reviewer at a permission prompt that the owner answers ([profiles](#permission-profiles)). `opus`, `sonnet` and `fable` are aliases for the newest model of each line; pin a full ID such as `claude-opus-5-5` when the plan must record an exact version. Effort support depends on the installed CLI and model. Do not respond to a permission denial by switching account or bypassing the host's controls.
+The default `claude` adapter uses the normal account and interactive permission controls. Its reviewers and investigators launch with `--permission-mode manual`, so they ask before writing even their report when the account's settings would accept edits; expect a `STALLED` reviewer at a permission prompt that the owner answers ([profiles](#permission-profiles)), unless the owner sets `review_transport = "headless"`, which runs them as `claude -p` with those prompts denied ([headless reviewers](#headless-reviewers)). `opus`, `sonnet` and `fable` are aliases for the newest model of each line; pin a full ID such as `claude-opus-5-5` when the plan must record an exact version. Effort support depends on the installed CLI and model. Do not respond to a permission denial by switching account or bypassing the host's controls.
 
 `claude-co` is a disabled example of a second account using `CLAUDE_CONFIG_DIR=~/.claude-co`. Turn it on with `fleet provider enable claude-co` only after the owner has signed that account in. It must receive a self-contained prompt; do not assume the same plugins exist under both configurations. Both accounts use Anthropic-family models, so switching between them does not satisfy cross-family review.
 

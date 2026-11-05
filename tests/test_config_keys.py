@@ -70,8 +70,8 @@ class ConfigKeys(unittest.TestCase):
 
     def test_free_form_tables_and_names_from_this_release_never_warn(self):
         _, err = self.load(
-            '[defaults]\nscope_permissions = true\nreview_transport = "x"\ncheck_policy = "warn"\n'
-            '[providers.codex]\nenv = { ANYTHING = "1" }\nheadless = "x"\nreview_transport = "x"\n'
+            '[defaults]\nscope_permissions = true\nreview_transport = "headless"\ncheck_policy = "warn"\n'
+            '[providers.codex]\nenv = { ANYTHING = "1" }\nheadless = "x"\nreview_transport = "tui"\n'
             'hooks = { any = { thing = 1 } }\nmodel_families = { "gpt-x" = "openai" }\n'
             'family_prefixes = { "gpt-" = "openai" }\nmodels_allow = { "gpt-x" = "openai" }\n'
             '[providers.codex.tiers.custom]\nmodel = "gpt-x"\neffort = "high"\nfamily = "openai"\n')
