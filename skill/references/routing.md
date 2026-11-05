@@ -50,6 +50,20 @@ The review sequence is in the skill's step 5. Review-only is a prompt contract i
 
 Each entry must resolve to a different known family, inside the run's routing and within `permission_ceiling`; plan refuses otherwise, as it refuses a review no provider could give. Two models of one mixed adapter count as two families only when their families are known and differ. When the reports differ, read them first; `fleet judge` adds a judge from a family none of the investigators ran on, or the lead's own when none is left, and says so.
 
+## Best of two
+
+`fanout` on an implement ticket, in a worktree run, has two writers from different families do the same ticket, each in its own tree; you keep one diff ([best of two](commands.md#best-of-two)). It doubles the writing cost: two full writer sessions, two gates, plus a judge. Only one diff is kept, so half of that work is set aside.
+
+Use it only for heavy or uncertain changes:
+
+- a change where a wrong approach is costly to find late, such as a concurrency fix, a migration path or a security check;
+- a design the ticket leaves open, where seeing two working answers side by side beats arguing about one;
+- code where one family has failed before, or where you would otherwise doubt the first diff.
+
+Skip it for light and standard tickets, for changes with one obvious shape, and for shared runs. For a heavy ticket with one sound approach, [plan first](#plan-first) or a cross-family review costs less. Best-of-two takes no `plan_first`.
+
+Pick the two families you trust most for the code. When the review mode requires review, the judge is the review of the diff you keep, so it must be of another family than the kept writer. With only two families available, the judge may share one writer's family: then it can stand as the review only for the other writer.
+
 ## Plan first
 
 `"plan_first": true` has an implement ticket's worker write its approach (files, interfaces, test plan, risks) and wait for your approval before it edits anything ([plan first](commands.md#plan-first)). Reading a 40-line plan costs far less than reviewing a wrong diff and a repair round.
