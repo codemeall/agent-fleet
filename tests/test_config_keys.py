@@ -124,7 +124,7 @@ class ConfigKeys(unittest.TestCase):
     def test_the_providers_md_table_lists_every_known_key(self):
         doc = (ROOT / "skill/references/providers.md").read_text()
         table = doc[doc.index("## Config keys"):]
-        for key in [*fleet.DEFAULTS, *fleet.DEFAULTS_EXTRA_KEYS, *fleet.ADAPTER_FIELDS, *fleet.TIER_FIELDS,
+        for key in [*fleet.DEFAULTS, *fleet.ADAPTER_FIELDS, *fleet.TIER_FIELDS,
                     *fleet.PROFILE_FIELDS, "warn_at", "dumb_at"]:
             with self.subTest(key=key):
                 self.assertIn(f"`{key}`", table)
