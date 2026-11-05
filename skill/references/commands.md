@@ -212,11 +212,13 @@ A review captured before the grant goes stale once a granted file differs from i
 ### prompt
 
 ```text
-fleet prompt <run> <id> [--force]
-fleet prompt <run> <review-id> --review-of <id> --diff <diff-file> [--force]
+fleet prompt <run> <id> [--provider <p>] [--force]
+fleet prompt <run> <review-id> --review-of <id> --diff <diff-file> [--provider <p>] [--force]
 ```
 
 Writes `.fleet/runs/<run>/prompts/<id>.md` from the saved ticket, the worker rules, `.fleet/rules.md`, and the ticket's `context` and `checks`. If either is missing from the plan, the prompt keeps a `<!-- LEAD: … -->` comment for you to fill; `launch` refuses until you do. With `--review-of`, it writes a reviewer prompt instead; the writer must be stopped and the diff must match its current changes. `--force` overwrites an existing prompt, but never a live worker's. For an `investigate` ticket it writes a read-only investigator prompt instead of the worker rules; `--review-of` refuses one, since it has no diff.
+
+A reviewer or investigator prompt is written for its provider's transport: `--provider`, else an investigate ticket's planned (or steered) provider; a reviewer prompt without `--provider` is written for a TUI. On a [headless](providers.md#headless-reviewers) provider it adds one sentence: reply with the complete report as the final message instead of writing it. `review` passes the reviewer it picked.
 
 A ticket's prompt (not a reviewer's) also gets a "Since this ticket was planned" section, because the plan is frozen at the first launch and its `context` is what you knew then. For each blocker: once verified, the blocker's files that changed since its launch and its report above `## Appendix` (without its title, `Status:` line and `fleet` header; at most 40 lines, then the full report's path); before that, a line saying it is not verified yet. Then the decisions recorded after `plan` (by `add`, `drop` and accepted out-of-scope changes; in a run planned by an earlier Fleet, those stamped with a time), and the path of `notes.md` when it exists. A ticket with none of these gets no section. The prompt records which blockers were verified when it was written.
 
@@ -231,7 +233,7 @@ fleet launch <run> <id> <provider> --tier heavy|standard|light|review
 fleet launch <run> --ready [--pane <ref|uuid|index>]
 ```
 
-Starts the worker in its own cmux pane, or its own window of the run's tmux session, with the prompt. The provider, tier and pins must match the saved plan; a steer (see `steer`) may change the provider and model, and launch prints `steered (<tier>): …`. Launch enforces blockers, file ownership, capacity, any hold, the run's [caps](#caps) and the ticket's [review rounds](#review-rounds). An implementation ticket runs the adapter's `worker` profile; a reviewer or an investigate ticket runs its `review` profile. Launch refuses a profile above `permission_ceiling`, naming the adapter, the profile and the ceiling: raising the ceiling is the owner's call ([permission profiles](providers.md#permission-profiles)). Each launch, `--resume` included, adds an entry to the run's [ledger](#cost). If a blocker was verified after the ticket's prompt was written, launch still starts the worker but warns on stderr that the prompt does not hand down that blocker's work; regenerate it with `fleet prompt <run> <id> --force` before the next launch. `--ready` writes a missing prompt itself, so that one is current; it does not rewrite one you wrote earlier.
+Starts the worker in its own cmux pane, or its own window of the run's tmux session, with the prompt. The provider, tier and pins must match the saved plan; a steer (see `steer`) may change the provider and model, and launch prints `steered (<tier>): …`. Launch enforces blockers, file ownership, capacity, any hold, the run's [caps](#caps) and the ticket's [review rounds](#review-rounds). An implementation ticket runs the adapter's `worker` profile; a reviewer or an investigate ticket runs its `review` profile, or, when the adapter's `review_transport` is `headless`, its `headless` line through `fleet _headless`, which counts as read-only ([headless reviewers](providers.md#headless-reviewers)); launch refuses a prompt written for the other transport, and `--resume` of a headless run. Launch refuses a profile above `permission_ceiling`, naming the adapter, the profile and the ceiling: raising the ceiling is the owner's call ([permission profiles](providers.md#permission-profiles)). Each launch, `--resume` included, adds an entry to the run's [ledger](#cost). If a blocker was verified after the ticket's prompt was written, launch still starts the worker but warns on stderr that the prompt does not hand down that blocker's work; regenerate it with `fleet prompt <run> <id> --force` before the next launch. `--ready` writes a missing prompt itself, so that one is current; it does not rewrite one you wrote earlier.
 
 Under tmux each worker gets a new window, with no limit; the window stays after the worker exits, so its screen and scrollback stay readable until `stop --close`. Fleet strips the lead's session variables (such as `CLAUDECODE`) from the worker's environment.
 
@@ -284,7 +286,7 @@ So a message can span lines and still arrive as one input, and every message sta
 - `--file` reads the message from a file, or from stdin with `-`. Give text or `--file`, not both.
 - `--changes` requests changes: the report must say `needs-verification`, and send sets it to `Status: changes-requested` before the message goes out, so `wait` ignores it until the worker hands back again.
 - `--key` names the message, so a retry is safe: a key already used for this ticket sends nothing and prints which message it was.
-- With no running worker for the ticket, the message is only saved; the worker reads it when launched.
+- With no running worker for the ticket, the message is only saved; the worker reads it when launched. A headless reviewer or investigator takes no input once started, so its message is only saved too, for its next launch.
 - If typing the pointer fails, the message is still saved and send exits 1 saying so. Don't resend it: the worker reads it when it next checks its inbox. `fleet peek` shows the pane.
 
 **Use:** answering a `blocked` report, or sending a bounded fix list with `--changes`. Save decisions to `notes.md`. Never use it to accept a trust, permission or login prompt for the owner. Trust prompts go away only when the owner sets `auto_trust` ([Folder trust](providers.md#folder-trust)).
@@ -324,6 +326,8 @@ REPORT api [needs-verification] criteria 5/5, checks 2/2 exit 0, findings 0, que
 `criteria` counts those met, `checks` those that exited 0, `findings` adds a count by severity when there are any (`findings 3 (1 high, 2 low)`), and `questions` counts open questions. Fleet then checks the header against the run and appends what contradicts it after `header:`: a path outside an implement ticket's files (`header: src/x.py outside scope`), any file listed by a reviewer or investigator, a planned check missing or without an integer exit (`header: npm test not reported`), or a criteria count unlike the source ticket's `- [ ]` / `- [x]` lines. A header Fleet cannot read shows only the reason, such as `header: invalid JSON`. A report without the block wakes exactly as before. The header only summarizes and never sets status. Read the prose whenever the summary shows unmet criteria, a failed check, a finding, a question or a `header:` problem, and whenever the summary is missing.
 
 `--timeout` is at most 600; use the longest your host allows (540 in Claude Code), or run it in the background. `--interval` (default 10) sets how often it polls. `--any-change` wakes on any report change. `--settle` (default 5, at most 30) keeps gathering events for that long after the first, never past `--timeout`, so workers finishing together cost one wake; 0 returns at once.
+
+A [headless](providers.md#headless-reviewers) reviewer or investigator wakes `wait` the same way: its runner writes the CLI's final message as the report, or a `blocked` report saying why there is none. It is never `STALLED`, since nothing in it can wait at a prompt; an exit with a `blocked` report also prints `EXITED`.
 
 **Use:** whenever workers are running and you have nothing else to do. Run one wait at a time: a wait consumes the events it prints. End a background wait before `handoff`.
 
@@ -366,7 +370,7 @@ total: 3 workers, 1 running, wall 41m, tokens in 41.2K out 9.8K cache-read 2100K
 caps: max_workers 3/10, max_wall_minutes 41m (no cap)
 ```
 
-The ledger lives in `run.json`, one entry per launch: ticket, role (`writer`, `reviewer` or `investigator`), provider, model, effort, tier, start, end and wall seconds. A relaunch or `--resume` adds an entry and never changes an earlier one. The end is the exit receipt's time, or the time of a `recover`; a running worker's wall time counts up to now. Tokens are read once the exit is confirmed, for a Claude worker only: from its own session log (found by its session ID under the adapter's `CLAUDE_CONFIG_DIR`, else `~/.claude`), its subagents included, summing input, output, cache-read and cache-write counts; a resumed session counts only the calls made during that launch. Every other worker's tokens are `unknown`, never zero, unless its CLI reported usage itself. A run started before the ledger gets an entry for each worker's latest launch. `--json` prints the per-ticket groups, totals, caps and every ledger entry.
+The ledger lives in `run.json`, one entry per launch: ticket, role (`writer`, `reviewer` or `investigator`), provider, model, effort, tier, start, end and wall seconds. A relaunch or `--resume` adds an entry and never changes an earlier one. The end is the exit receipt's time, or the time of a `recover`; a running worker's wall time counts up to now. Tokens are read once the exit is confirmed, for a Claude worker only: from its own session log (found by its session ID under the adapter's `CLAUDE_CONFIG_DIR`, else `~/.claude`), its subagents included, summing input, output, cache-read and cache-write counts; a resumed session counts only the calls made during that launch. Every other worker's tokens are `unknown`, never zero, unless its CLI reported usage itself: a [headless](providers.md#headless-reviewers) run's runner saves the usage its CLI printed in `.fleet/runs/<run>/usage/`, and the next command that reconciles the run records it (`tokens_source: reported`); one whose CLI printed none stays `unknown`. A run started before the ledger gets an entry for each worker's latest launch. `--json` prints the per-ticket groups, totals, caps and every ledger entry.
 
 **Use:** when reporting a wave's outcome to the owner, and when a launch is refused at a cap.
 
@@ -418,7 +422,7 @@ screen after 5s:
   …
 ```
 
-A ticket whose review is not required may still be reviewed.
+A ticket whose review is not required may still be reviewed. A reviewer on an adapter with `review_transport = "headless"` runs headless and read-only, and its prompt says so ([headless reviewers](providers.md#headless-reviewers)).
 
 **Use:** when a writer hands back on a ticket the saved review mode requires a review for, once you have read its report and run its checks. Then `wait` for the reviewer's report.
 
@@ -471,7 +475,7 @@ It holds the run's lock throughout, gate included. To send a failing check back 
 fleet stop <run> <id ...> | --all [--close] [--timeout <seconds>]
 ```
 
-Sends each worker its quit keys and waits up to `--timeout` seconds (default 10, at most 60) for a confirmed exit. A failed stop marks the worker `stop-failed` and keeps its slot. `--close` closes the tab or tmux window, only after a confirmed exit; one already closed counts as closed.
+Sends each worker its quit keys (Ctrl-C for a [headless](providers.md#headless-reviewers) run, whose runner then ends the CLI and leaves no report) and waits up to `--timeout` seconds (default 10, at most 60) for a confirmed exit. A failed stop marks the worker `stop-failed` and keeps its slot. `--close` closes the tab or tmux window, only after a confirmed exit; one already closed counts as closed.
 
 **Use:** before capturing a review diff, before verifying, after a reviewer finishes, and with `--all` before the machine, cmux or the tmux server shuts down.
 
