@@ -28,6 +28,12 @@ If the allowed pool cannot provide a known different-family reviewer, tell the o
 
 The review sequence is in the skill's step 5. Review-only is a prompt contract in a shared checkout, not a security sandbox: inspect for unauthorized changes. Dependents remain blocked until the writer is verified.
 
+## Fan-out
+
+`fanout` on an `investigate` ticket runs one investigator per model family on the same question ([plan](commands.md#fan-out)). Use it only for heavy or uncertain questions: a hard bug with competing hypotheses, a design question where one model's blind spot would be costly, or a finding you would otherwise doubt. It multiplies cost: each entry is a full investigator session, plus a judge when you launch one. For a routine question, one investigator is enough.
+
+Each entry must resolve to a different known family, inside the run's routing and within `permission_ceiling`; plan refuses otherwise, as it refuses a review no provider could give. Two models of one mixed adapter count as two families only when their families are known and differ. When the reports differ, read them first; `fleet judge` adds a judge from a family none of the investigators ran on, or the lead's own when none is left, and says so.
+
 ## Steering
 
 When a provider is failing, rate-limited or a poor fit mid-run, steer future implementation launches instead of rewriting the plan:

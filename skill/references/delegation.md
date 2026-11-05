@@ -36,6 +36,7 @@ why-slow  → investigate · claude · standard · checks: pytest -q tests/test_
 
 - `implement` (the default) owns exact files, like any ticket.
 - `investigate` owns no files: research, investigation, debugging. It writes only its report, runs only read-only commands and the checks you list, and never fixes what it finds. It is never cross-family reviewed; you verify its report.
+- `fanout` on an `investigate` task asks one investigator per model family the same question, for a heavy or uncertain one only, since it multiplies cost ([fan-out](commands.md#fan-out)).
 
 ## 3. Add and launch
 
