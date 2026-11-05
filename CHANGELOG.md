@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.1.0-preview.31
+
+The final whole-product review, after release 7. Five independent reviewers, one per area, reproduced each defect before reporting it. Every fix has a regression test that fails on the code before it, and an end-to-end run covers every feature.
+
+- **Verification path:** what decides whether work is kept.
+  - **Ownership windows:** another ticket owns only what changed in its own window. An edit to its file before it launched, or after it was verified or dropped, now counts, even while the two windows overlapped. Tickets record their files' fingerprints when they close, and `grant` follows the same rule.
+  - **What checks write:**
+    - What `accept_checks` write while other workers run is excused only for the workers stopped then.
+    - With no worker running, `gate` and `accept_checks` excuse a file only if it was clean before they ran. A check that rewrites a stopped worker's stray file no longer hides the edit.
+    - A waiting plan's, closed or unlaunched ticket's file is named as the checks' output, never blamed on the ticket being gated.
+  - **The owner's override:** `--accept-anyway` covers a failing `accept_checks` run only once that failure was reported, on the same tree.
+  - **Worktree merges:**
+    - A re-merge refuses with `CONFLICT` when a merged file the repair left alone no longer holds the merge.
+    - A file that differs from the tree after `git apply` is refused.
+    - `merge --resolved` needs a reported `CONFLICT`, refuses while a file still lacks the ticket's change, and saves the tree's patch. The `CONFLICT` lists every file the diff touches.
+  - **Families:** `--family`, and a plan's or fan-out entry's `family`, can no longer contradict a family the config knows. A same-family reviewer could otherwise pass the cross-family rule.
+  - **Fan-out accept** refuses a change outside every ticket before it stops anything, and doesn't offer `grant`.
+  - **Encodings:** verify and accept read a report with bytes from another encoding, and keep those bytes.
+- **Safety boundaries.**
+  - **Fleet's own files:**
+    - Each file Fleet writes in `.fleet/runs/<run>/` and decides with gets a copy outside the checkout, under `agent-fleet/control/` in the cache folder. That covers `run.json`, steers, launch baselines and review diffs, a Claude worker's settings and guard scope, and the records that excuse a check's output or reuse a pass.
+    - A command holding the lock refuses when a file differs from its copy, naming it and the `cp` that puts Fleet's copy back.
+    - Without this, a worker could add its stray file to `lead_files`, delete its launch snapshot, forge a check output or widen another worker's guard.
+  - **The scope check** counts `.fleet/rules.md`, which Fleet no longer reads through a symlink. It also counts a gitignored `.gitignore` that is created or changed, since one that lists itself hid new files. A file name with a line break is fingerprinted too.
+  - **Worker text in wake lines:**
+    - A header's file names are quoted and its problems stay on one line, so they can't forge a wake line or send a terminal escape.
+    - `IDLE` quotes the worker's last words, marked as data.
+    - `peek` marks the screen as the worker's output.
+    - Bidi, zero-width and C1 control characters are flattened.
+    - An imported issue's title is quoted as untrusted.
+  - **Docs:** allowing a check under `scope_permissions` lets the worker run code it wrote, and a worker keeps the account's permission mode.
+- **Waking the lead.**
+  - **No false or repeated wakes:**
+    - No false `IDLE` after a gate round, `send --changes` or an answer: events older than the last message are skipped.
+    - `READY` no longer says a ticket is ready when accept would refuse it for a stale optional review; supervise re-reviews it first.
+    - A report that isn't valid UTF-8 no longer breaks every wait.
+    - A ticket named `board` no longer wakes forever.
+    - A `blocked` report the lead answered is no longer `PENDING`.
+  - **Clearer lines:** `PENDING` says a ticket is reviewed once its reviewer has handed back. Under strict, the `FINDINGS` line for an open rebuttal names `--accept-finding`.
+  - **Under strict:**
+    - `repair` sends no all-`low` findings back, and `READY` names them.
+    - `ESCALATE` names `--accept-anyway` only when it has something to override.
+  - **Dispatch:** a launch that fails wakes `DISPATCH-REFUSED <id>` once per error. `DISPATCH-FAILED` wakes once per error, and `SKIPPED` lines no longer pile up.
+- **Worker lifecycle.**
+  - **Shared files:** a direct `launch` refuses a ticket that shares files with a launched, unverified one, and `plan` sequences tickets that share files, as `add` does.
+  - **Failed launches** put back the report they set aside and remove the snapshots they took.
+  - **Re-planning:** a re-plan removes the prompts written for the earlier plan. Launch refuses a prompt written for other files.
+  - **Plan input:** `plan` and `add` drop Fleet's own fields copied into a plan, and need `decisions` to be a list of text.
+  - **Other fixes:**
+    - Review, `send --findings`, `approve --review` and `judge` say a worker may be running after an uncertain launch.
+    - `send` reads exit receipts first.
+    - `status` shows the run's `max_parallel`.
+    - A lock or hold made before `init` is gitignored.
+    - A review prompt can't take another ticket's reviewer ID.
+- **The lead's guidance.**
+  - **Worktree runs:** run the combined-tree checks after `fleet merge`. Before it, the checkout lacks the ticket's change.
+  - **Checks:** investigators must report their planned checks.
+  - **Best of two:** under strict, `VERDICT` names the pick's own `accept --pick`, and says that keeping another writer, or dropping the ticket, needs the owner's words.
+  - **The owner's say:** `CONFLICT` handling and a `grant` that widens scope are decided with the owner. A dozen smaller mismatches between the docs and the code are fixed.
+- **Decisions.** TEAM-REVIEW.md records why neither optional item (P21, an MCP front door, and P15's writer half, structured transports) is built now, and what would reopen each.
+
 ## 0.1.0-preview.30
 
 Teamwork release 7 (#51): Codex workers signal their turns, Fleet reports how each provider, model and tier performs, a heavy change can run as best-of-two across vendors, and accept refuses work below a strict quality bar by default.
@@ -34,20 +95,6 @@ Teamwork release 7 (#51): Codex workers signal their turns, Fleet reports how ea
   - A refusal after the bar records no override and claims none.
   - **`[defaults] accept_checks`** run the combined-tree checks in the checkout at accept, after a worktree ticket's merge and before anything is verified. A pass is reused while the tree is unchanged, and the evidence keeps a failure's tail.
   - A check that changes a ticket's own files refuses as the checks' doing, never the worker's, and the owner's words cannot override it. A merged file the checkout changed afterwards is a `CONFLICT`, never recorded as the merge.
-  - **Final review of the verification path:**
-    - Another ticket owns only what changed in its own window: an edit to its file before it launched, or after it was verified or dropped, now counts, even while the two windows overlapped. Tickets record their files' fingerprints when they close. `grant` follows the same rule.
-    - What `accept_checks` write while other workers run in the checkout is excused only for the workers stopped then. It still counts for those that ran, and `fleet check` lists it.
-    - A file of a ticket whose plan waits, or that is closed or not launched yet, is no longer taken as owned when recording what checks wrote, so a check's output there is named as the checks', never blamed on the ticket being gated or accepted.
-    - `--accept-anyway` covers a failing `accept_checks` run only once that failure was reported, on the same tree.
-    - A re-merge refuses with `CONFLICT` when a merged file the repair left alone no longer holds the merge, and a file that differs from the tree after `git apply` is a refusal, not a warning.
-    - Merge by hand: the `CONFLICT` lists every file the diff touches. `merge --resolved` needs a reported `CONFLICT`, refuses while a file still lacks the ticket's change, and saves the tree's patch.
-    - `--family` (and a plan's or fan-out entry's `family`) can no longer contradict a family the config knows.
-    - Fan-out `accept` refuses a change outside every ticket before it stops anything, without offering `grant`.
-- **Safety boundaries.** An independent review found ways a worker could get past Fleet's own checks; each was reproduced first.
-  - **Fleet's own files.** Each file Fleet writes in `.fleet/runs/<run>/` that it decides with (`run.json`, steers, launch baselines and review diffs, a Claude worker's settings and guard scope, the records that excuse a check's output or reuse a pass) now also gets a copy outside the checkout, under `agent-fleet/control/` in the cache folder. A command holding the lock refuses when a file differs from its copy, naming it and the `cp` that puts Fleet's back. A worker could otherwise add its stray file to `lead_files`, delete its launch snapshot, forge a check output or widen another worker's guard. Older runs start a record without refusing.
-  - **The scope check** now counts `.fleet/rules.md`, which every prompt carries and which Fleet no longer reads through a symlink, and a gitignored `.gitignore` that is created or changed, since one that lists itself hid new files. A file name with a line break is fingerprinted too.
-  - **Worker text in wake lines.** A header's file names are quoted and its problems stay on one line, so they can no longer forge a wake line or send a terminal escape. `IDLE` quotes the last words so they cannot close the quotes, marked as data. `peek` marks the screen as the worker's output. Bidi, zero-width and C1 control characters are flattened. An imported issue's title is quoted as untrusted.
-  - **Docs.** `scope_permissions` says plainly that allowing a check lets the worker run code it wrote, and providers.md no longer claims a worker never runs in `acceptEdits`: it keeps the account's mode.
 - **CI.** `push` runs only on `main`, so a PR commit is tested once, and each job stops after 30 minutes.
 - **Skill.** The lead's guide covers best of two and `--pick`, strict acceptance and its two overrides, `accept_checks`, `fleet usage` and `IDLE` for any worker, still within its size budget.
 
