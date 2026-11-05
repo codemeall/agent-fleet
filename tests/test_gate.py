@@ -228,6 +228,25 @@ class Gate(RuntimeCase):
         self.hand_back("02")
         self.assertIn("check-cache.log (changed)", self.verify("02", expected=1))
 
+    def test_a_check_that_rewrites_a_file_a_stopped_worker_strayed_into_never_excuses_the_edit(self):
+        self.commit_other()
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"], "checks": [{"run": "echo appended >> other.txt"}]}])
+        self.launch()
+        (self.repo / "owned.txt").write_text("in scope\n")
+        (self.repo / "other.txt").write_text("stray edit\n")  # 01 strays outside its files, then stops
+        self.hand_back()
+        self.assertIn("SCOPE other.txt (changed)", self.call("gate", "demo", "01", expected=1))
+        self.assertIn("other.txt (changed)", self.verify(expected=1))
+
+    def test_a_check_that_rewrites_a_file_the_owner_changed_before_the_run_is_still_its_output(self):
+        self.commit_other()
+        (self.repo / "other.txt").write_text("the owner's edit, before the run\n")
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"], "checks": [{"run": "echo appended >> other.txt"}]}])
+        self.launch()
+        (self.repo / "owned.txt").write_text("in scope\n")
+        self.hand_back()
+        self.assertIn("1/1 passed, scope ok", self.call("gate", "demo", "01"))
+
     def test_files_the_gates_checks_write_while_a_worker_runs_still_count(self):
         self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"],
                                  "checks": [{"run": "echo cached > check-cache.log"}]}])

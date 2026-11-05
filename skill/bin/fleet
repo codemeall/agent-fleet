@@ -6200,10 +6200,21 @@ def owned_now(state: dict) -> set[str]:
             for f in owned_files(state, i)}
 
 
+def run_start_paths(repo: Path, state: dict) -> dict:
+    """The fingerprints of the files changed against HEAD when the run started (its tree.json), or none."""
+    f = run_dir(repo, state["run"]) / "tree.json"
+    try:
+        return json.loads(f.read_text()).get("paths") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
 def record_check_outputs(repo: Path, state: dict, i: str, before: dict, after: dict, live_ok: bool = False,
                          unrecorded: list | None = None, skip=()) -> list[str]:
     """Files the gate's commands changed outside every file a ticket owns now (owned_now), which the scope check
-    would otherwise count. Recorded (in their own file, since gate saves no run state) only while no worker runs:
+    would otherwise count, provided each was unchanged before the commands ran (clean, as when the run started, or
+    holding only a recorded output then), so an edit made before them is never excused. Recorded (in their own
+    file, since gate saves no run state) only while no worker runs:
     otherwise a worker's stray edit could pass as a cache. With `live_ok` (accept_checks, whose own ticket's workers
     are stopped) they are recorded while other workers run too, each provided it was unchanged before the commands
     ran (clean, or holding only a recorded output then), so an edit made before them is never excused; and with the
@@ -6215,13 +6226,17 @@ def record_check_outputs(repo: Path, state: dict, i: str, before: dict, after: d
     changed = {p: new for p, (_, new) in tree_changes(repo, before, after).items() if p not in owned}
     prior, held = check_outputs(repo, state["run"])
     here = [w["id"] for w in active(state) if not worktree_rec(state, w["id"])]  # those that could write here
+    start = run_start_paths(repo, state)
     keep = {}
     for p, fp in changed.items():
         was = before["paths"].get(p)
-        clean = was is None or was in prior.get(p, ())  # clean against HEAD, or only an output then
+        # Clean: as at HEAD, as when the run started (the owner's own edit then), or only an output then. A file a
+        # worker changed before the commands ran is never clean, so a check that rewrites it never excuses the edit.
+        clean = was is None or was in prior.get(p, ()) or was == start.get(p)
         earlier = held.get(p, {}).get(was, []) if was is not None else []  # may hold those workers' edit
         if not active(state):
-            keep[p] = (fp, earlier)
+            if clean or was in held.get(p, {}):
+                keep[p] = (fp, earlier)
         elif live_ok and (clean or was in held.get(p, {})):
             keep[p] = (fp, sorted(set(here) | set(earlier)))
     if unrecorded is not None:
