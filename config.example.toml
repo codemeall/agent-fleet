@@ -65,6 +65,10 @@ review = "cross-heavy"
 # warm_context_tokens, and launches anyway. A run keeps the values it was started with.
 # warm_max = 4
 # warm_context_tokens = 150000
+# Plan first: "heavy" makes every heavy implement ticket write its plan (files, interfaces, test plan, risks) and
+# wait until the lead approves it (fleet approve) before it edits anything. "off" (the default) leaves it to each
+# ticket's "plan_first" field. A run keeps the value it was started with.
+# plan_first = "heavy"
 # Set only when you intentionally target a validated cmux workspace:
 # workspace = "workspace:3"
 
