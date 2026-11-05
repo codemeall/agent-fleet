@@ -80,6 +80,21 @@ class Inbox(RuntimeCase):
         self.assertIn("nothing sent", self.call("send", "demo", "01", "--changes", "Add the 404 test.",
                                                 "--key", "fix-1"))
 
+    def test_a_blocked_report_the_lead_answered_is_no_longer_pending(self):
+        """Final review, 10: wait's PENDING lines take a send's answer as handoff does (awaiting_lead)."""
+        self.setup_run()
+        self.launch()
+        self.report_path().write_text("# Worker report\nStatus: blocked\n\nWhich copy?\n")
+        self.assertIn("REPORT 01 [blocked]", self.call("wait", "demo", "--timeout", "0", "--settle", "0"))
+        self.assertIn("PENDING 01 [blocked]", self.call("wait", "demo", "--timeout", "0", expected=2))
+        self.call("send", "demo", "01", "Use the short copy.")
+        out = self.call("wait", "demo", "--timeout", "0", expected=2)
+        self.assertNotIn("PENDING 01", out)
+        self.assertEqual(fleet.awaiting_lead(self.repo, self.state()), [])
+        self.report_path().write_text("# Worker report\nStatus: blocked\n\nAnd the long copy?\n")  # asks again
+        self.assertIn("REPORT 01 [blocked]", self.call("wait", "demo", "--timeout", "0", "--settle", "0"))
+        self.assertIn("PENDING 01 [blocked]", self.call("wait", "demo", "--timeout", "0", expected=2))
+
     def test_changes_refuses_a_report_that_is_not_handed_back(self):
         self.setup_run()
         self.launch()

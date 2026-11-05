@@ -5010,9 +5010,14 @@ def warn_header(repo: Path, state: dict, wid: str, text: str) -> None:
         print(f"WARNING {wid} {header_text(problems)} (not a refusal; check the report's prose)", file=sys.stderr)
 
 
-def pending_reports(reports: Path) -> list[tuple[str, str]]:
+def pending_reports(reports: Path, state: dict | None = None) -> list[tuple[str, str]]:
+    """Reports at a status that waits on the lead. With run state, one older than the lead's last message to its
+    worker is left out: that message answered it (a blocked report, say), as the worker's turn signals and
+    handoff take it."""
+    workers = (state or {}).get("workers", {})
     return [(f.stem, st) for f in sorted(reports.glob("*.md"))
-            if (st := (parse_status(f.read_text()) or "").lower()) in WAKE_STATUSES + (PLAN_READY,)]
+            if (st := (parse_status(f.read_text()) or "").lower()) in WAKE_STATUSES + (PLAN_READY,)
+            and f.stat().st_mtime >= workers.get(f.stem, {}).get("last_send", 0)]
 
 
 def mark_once(seen: Path, name: str, key: str) -> bool:
@@ -5096,8 +5101,13 @@ def hook_events(state: dict, w: dict, seen: Path, handed_back: bool, now: float)
     marker keeps the last turn-ended words, since an idle event comes about a minute after them.
 
     A Codex worker's notify program (its record's `signals`) sends no idle event: its turn-ended is the idle, so one
-    without a hand-back wakes IDLE at once, once per pass however many turns ended in it."""
+    without a hand-back wakes IDLE at once, once per pass however many turns ended in it.
+
+    A turn-ended or idle event from before the worker's last message (`last_send`: a gate round, send --changes, an
+    answer) belongs to the turn that message answered, which the report's status no longer shows once the message
+    parked it: it is skipped, so only a turn the worker ended after the message can wake IDLE."""
     path, token = (w.get("hooks") or w.get("signals") or {}).get("events"), w.get("token", "")
+    answered = w.get("last_send", 0)
     turn_wakes = (w.get("signals") or {}).get("method") == "codex-notify"
     if not path:
         return [], 0.0
@@ -5125,6 +5135,9 @@ def hook_events(state: dict, w: dict, seen: Path, handed_back: bool, now: float)
             continue
         if not isinstance(e, dict) or e.get("token") != token:
             continue
+        at = e.get("at")
+        if e.get("event") in ("turn-ended", "idle") and isinstance(at, (int, float)) and at < answered:
+            continue  # the turn the lead's (or the gate's) last message answered
         if e.get("event") == "turn-ended":
             last_words = one_line(e.get("message"), 160)
             ended = ended or turn_wakes and not handed_back
@@ -5199,6 +5212,7 @@ def wait_loop(a, repo: Path, d: Path, seen: Path, statuses, deadline: float, loo
         fresh, plans = plan_pass(repo, state, fresh)  # a plan wakes the lead as PLAN: nothing gates or approves it
         if loop:  # a gate may take minutes; other tickets' events are scanned right after it
             fresh = loop.handle(state, fresh)
+            state = load_run(repo, a.run)  # its sends: a gate round's last_send answers the turn before it
         events = scan_workers(repo, state, seen, a.stall) + board_lines(d, seen)
         # A fan-out wakes once, when all its investigators are back; best-of-two, once both writers' gates are done.
         fresh, fan = fanout_pass(repo, state, seen, fresh, gating(loop))
@@ -5253,7 +5267,8 @@ def wait_loop(a, repo: Path, d: Path, seen: Path, statuses, deadline: float, loo
 def pending_lines(reports: Path, state: dict, loop) -> list[str]:
     """PENDING lines for reports still waiting on the lead; supervise notes a writer its reviewer is reading."""
     note = getattr(loop, "pending_note", None)
-    return [f"PENDING {i} [{status}]{note(state, i) if note else ''}" for i, status in pending_reports(reports)
+    return [f"PENDING {i} [{status}]{note(state, i) if note else ''}"
+            for i, status in pending_reports(reports, state)
             if not fanout_held(state, reports, i, status)]  # an investigator whose fan-out is not all back yet
 
 
@@ -5807,8 +5822,7 @@ def awaiting_lead(repo: Path, state: dict) -> list[str]:
     """Reports handed back to the lead and not yet answered (a blocked report older than the last send was answered),
     and workers that exited without handing back: reconciled, they no longer wake fleet wait as EXITED."""
     reports = run_dir(repo, state["run"]) / "reports"
-    out = {i: f"{i} [{status}]" for i, status in pending_reports(reports)
-           if (reports / f"{i}.md").stat().st_mtime >= state["workers"].get(i, {}).get("last_send", 0)}
+    out = {i: f"{i} [{status}]" for i, status in pending_reports(reports, state)}
     for i, w in state["workers"].items():
         f = reports / f"{i}.md"
         status = (parse_status(f.read_text()) or "no status line").lower() if f.exists() else "no report"

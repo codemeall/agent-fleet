@@ -493,7 +493,7 @@ Blocks until something needs the lead, then prints it and exits 0. On timeout it
 | `UNREACHABLE <id>` | cmux can't read the pane | Investigate; a missing pane isn't proof of exit |
 | `HOLD` | Launches are held and no worker is running | Handle `PENDING` lines, tell the owner, end your turn |
 | `TIMEOUT` | Nothing new | Handle `PENDING` lines, otherwise wait again |
-| `PENDING <id> [status]` | A report is still waiting on the lead | Handle it |
+| `PENDING <id> [status]` | A report is still waiting on the lead; one older than your last `send` to its worker counts as answered | Handle it |
 | `SCOPE <path> (<kind>) …` | A file outside every ticket changed while workers ran; it never wakes the lead on its own | Find out who changed it ([the scope check](#the-scope-check)) |
 | `GATE-FAILED <id> after N rounds: <summary>; evidence <path>` | With `--gate`: the ticket's checks still fail after its gate rounds | Read the evidence, then decide ([the gate loop](#the-gate-loop)) |
 | `FANOUT <id>: n reports; agree on …; differ on …` | Every investigator of a [fan-out](#fan-out) ticket has handed back ([fan-out wakes](#fan-out-wakes)) | Read the reports, then `judge` or `verify` |
@@ -559,7 +559,7 @@ A Claude worker launches with Fleet's hooks ([provider notes](providers.md#claud
 
 A Codex worker launches with Codex's `notify` program ([turn signals](providers.md#turn-signals)), which appends `turn-ended` to the same file after each turn. There is no idle event, so a turn that ends without a hand-back wakes **`IDLE <id>`** at once, quoting its last words. An approval prompt has no event and still wakes as `STALLED`.
 
-A screen already reported as `PERMISSION` or `IDLE` does not also wake as `STALLED`. Other adapters, and workers from runs launched before hooks and signals, keep the screen check.
+A turn that ended, or an idle reported, before your last message to the worker (a gate round, `send --changes`, an answer) belongs to the turn that message answered, so it wakes no `IDLE` while the worker works on it. A screen already reported as `PERMISSION` or `IDLE` does not also wake as `STALLED`. Other adapters, and workers from runs launched before hooks and signals, keep the screen check.
 
 #### The gate loop
 
