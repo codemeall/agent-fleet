@@ -56,7 +56,7 @@ class Lifecycle(RuntimeCase):
         """Change run.json by hand, as a run saved by an earlier Fleet left it."""
         state = self.state()
         change(state)
-        self.run_file("run.json").write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)  # Fleet's own write, so its record of run.json follows
 
     def no_effort_provider(self):
         """An adapter whose launch line needs an effort its tiers never give: build_launch refuses it, after launch
