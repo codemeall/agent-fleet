@@ -32,6 +32,7 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`supervise`](#supervise) | `wait --gate` that also starts reviews, sends findings back to the writer and dispatches unblocked tickets, as the owner opted in; wakes the lead for a judgment call or a ticket ready to accept | In place of `wait --gate`, when the owner's config or `--auto` names steps |
 | [`status`](#status) | Lists workers and report statuses | You need a snapshot after `EXITED` or a recovery |
 | [`cost`](#cost) | Shows each ticket's worker launches, wall time and tokens, and the run's caps | Reporting a wave's outcome, or a launch refused at a cap |
+| [`usage`](#usage) | Read-only report over one or more runs: rework, first-pass acceptance, review findings, wall time and tokens per ticket, provider, model, tier or role | The owner asks how routing performs, or before changing tiers ([reading it](routing.md#reading-fleet-usage)) |
 | [`review`](#review) | Stops the writer, saves its diff and launches a reviewer from another family | A writer hands back on a ticket that needs review |
 | [`judge`](#judge) | Launches a read-only judge from a family outside a fan-out ticket's investigators | Every investigator of a fan-out ticket has handed back and their reports differ |
 | [`accept`](#accept) | Stops the ticket's workers, verifies the reviewer then the writer, and lists what that unblocks | Your checks and any review are done and the evidence is written |
@@ -626,6 +627,44 @@ Two keys under `[defaults]` in the owner's config limit a run; `fleet init` save
 - `max_wall_minutes`: the run's total worker wall time, summed over launches, running workers counted up to now.
 
 Once either is reached, `launch`, `launch --ready`, `review` (before it stops the writer) and `accept --launch-ready` refuse a new worker, naming the cap and the use so far. Running workers are never stopped. The ways out are the owner's: raise the key in their config, which applies to new runs, or start a follow-up run with `fleet init <new-run>` for the remaining work. Tell the owner; don't work around a cap.
+
+### usage
+
+```text
+fleet usage [<run> ...] [--all] [--by ticket|provider|model|tier|role] [--json]
+```
+
+Reports, per group, how the work went: tickets and their outcome, rework, first-pass acceptance, review findings per round, launches, wall time and tokens. With no run named it reads the run changed most recently; `--all` reads every run in this checkout. `--by` picks the groups (default `ticket`). `--json` prints every group, the totals and each ticket's own numbers.
+
+It is read-only and takes no lock, so it runs beside any command, a background `supervise` included. It loads each run, reconciles exit receipts and fills a run's missing ledger entries in a copy, and saves nothing. Under `--all`, a run Fleet cannot read (a legacy run, another checkout's, a damaged `run.json`) prints as `skipped run <run>: <reason>`; a run you name must be readable.
+
+```text
+usage of run demo, by provider (ticket numbers go to the ticket's first writer, launches to their own provider):
+  reviewer  no ticket of its own
+            2 launches, wall 9.5m, tokens unknown
+  writer    5 tickets (4 verified, 1 dropped); first pass 2 of 4 verified (50%); repairs 2, gate rounds 1, review rounds 2; findings 1.0 per round (2 in 2 rounds)
+            8 launches, wall 41m, tokens in 41.2K out 9.8K (unknown for 6 of 8 workers)
+total: 5 tickets (4 verified, 1 dropped); first pass 2 of 4 verified (50%); repairs 2, gate rounds 1, review rounds 2; findings 1.0 per round (2 in 2 rounds)
+       10 launches, wall 51m, tokens in 41.2K out 9.8K (unknown for 8 of 10 workers)
+dropped, neither a pass nor a fail: 05
+```
+
+**Groups.** A ticket's numbers (tickets, outcome, rework, first pass, findings) go to the group of its first writer launch: that launch's provider, model, tier and role (`writer`, or `investigator` for an investigate ticket). That is the attempt first pass judges, so a later steer or relaunch does not move the ticket. Launch numbers (launches, wall time, tokens) go to each launch's own group: a reviewer's launches count under the reviewer's provider, model, `review` tier and `reviewer` role, and a group that only reviewed says `no ticket of its own`. By `ticket`, a reviewer's launches count toward the ticket it reviews, as in [`cost`](#cost), and a group is named `<run>/<ticket>` when more than one run is read. A ticket that never launched is not counted.
+
+**The numbers.**
+
+- **Launches:** ledger entries, one per launch: writers, reviewers, investigators and judges, relaunches and `--resume` included.
+- **Repairs:** a writer's or investigator's launches after its first, fresh or `--resume`. One exception: a `--resume` that continues a launch which never handed back (a usage limit, a crash) continues the same round and is no repair. Fleet tells them apart by the reports a launch archives: the earlier launch handed back when its report, at `needs-verification` or `changes-requested`, was archived by the resume. A fresh relaunch is always a repair. A warm ticket's first launch (`--after`) is its own first.
+- **Gate rounds:** the [gate loop](#the-gate-loop)'s messages in the ticket's inbox, each a failing gate sent back to the worker, at least the run state's count. Each fresh worker gets new gate rounds, but the inbox keeps every one.
+- **Review rounds:** the ticket's [review rounds](#review-rounds), as the cap counts them: reviewer launches that reached the terminal, a reviewer's own `--resume` and plan reviews excluded. A run from before Fleet counted rounds counts its reviewer launches and reviewer IDs.
+- **Findings per round:** the findings in each review round's reviewer header (the current report and those later rounds archived), divided by the rounds whose header could be read. A round without a readable header is left out and shown as `unknown for N more`; with none readable, findings are `unknown`.
+- **Changes requested:** the ticket had a gate round, findings sent with `send --findings`, or a writer report (current or archived) at `changes-requested`, which `send --changes` and the gate loop set. A `send --changes` the writer has answered on the same launch leaves only an ordinary inbox message, so Fleet cannot see it once the ticket is verified.
+- **First pass:** a verified ticket with no repair and no changes requested. It is shown as passes of verified tickets. A dropped ticket is neither a pass nor a fail: drops are counted and listed apart. An open ticket is neither too.
+- **Wall time and tokens:** as [`cost`](#cost) counts them, summed over the group's launches. A count Fleet does not have stays `unknown`, never zero, with how many launches lack it.
+
+A run from before the ledger, review rounds or the report header reads without errors: its ledger is rebuilt in the copy from the latest launch of each worker, and what it never recorded is `unknown`.
+
+**Use:** when the owner asks how providers, models or tiers perform, or before proposing a routing change. It never changes routing; [routing](routing.md#reading-fleet-usage) says how to read it.
 
 ## Review and acceptance
 
