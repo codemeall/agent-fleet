@@ -52,6 +52,7 @@ DEFAULTS = {
     "prefer": ["claude", "codex", "cursor"],
     "max_parallel": 6,
     "review": "cross-heavy",
+    "review_rounds": 2,  # reviewer launches per ticket before a repair or review needs the owner (--extra-round)
     "auto_trust": False,  # the owner's opt-in: mark the repo trusted in each worker CLI before launch
     "backend": "auto",  # cmux (visible panes), tmux (headless) or auto: cmux inside cmux, else tmux
     "tmux_socket": "fleet",  # tmux -L name for headless workers; "" uses your default tmux server
@@ -115,6 +116,9 @@ def load_config(user_path: Path | None = None) -> dict:
         raise FleetError("defaults.max_parallel must be a positive integer")
     if cfg["defaults"]["review"] not in ("off", "cross-heavy", "cross-all"):
         raise FleetError("invalid defaults.review")
+    rounds = cfg["defaults"]["review_rounds"]
+    if isinstance(rounds, bool) or not isinstance(rounds, int) or not 1 <= rounds <= 5:
+        raise FleetError("defaults.review_rounds must be a whole number from 1 to 5")
     if not isinstance(cfg["defaults"]["auto_trust"], bool):
         raise FleetError("defaults.auto_trust must be true or false")
     if cfg["defaults"]["backend"] not in ("auto", *BACKENDS):
@@ -2056,6 +2060,8 @@ def launch_one(a, cfg) -> tuple[str, dict]:
             raise FleetError(f"{a.id} was dropped; add a new ticket for the work instead")
         if any(state["tickets"][b]["status"] != "verified" for b in t["blockers"]):
             raise FleetError("ticket has unverified blockers")
+        if check_rounds(repo, state, cfg, a, a.id, "repair"):
+            grant_round(state, a.id, a.extra_round)  # saved with the worker record, so a refused launch keeps none
         stale = stale_handdown(meta, t)
         try:
             model, effort = resolve_model(pcfg, a.tier, a.model, a.effort)
@@ -2092,6 +2098,8 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         t = state["tickets"][meta["review_of"]]
         if worker(state, meta["review_of"])["state"] in ACTIVE_STATES:
             raise FleetError("stop writer before review")
+        if check_rounds(repo, state, cfg, a, meta["review_of"], "review"):
+            grant_round(state, meta["review_of"], a.extra_round)
         model, effort = resolve_model(pcfg, "review", a.model, a.effort)
         check_allowed(pcfg, a.provider, model)
         check_effort(pcfg, a.provider, effort)
@@ -2125,6 +2133,8 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     command = build_launch(pcfg, model, effort, line, session, a.resume, prepare_trust(cfg, a.provider, pcfg, repo))
     exit_file = d / "exits" / f"{a.id}.{token}.json"
     wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_run", str(exit_file), token, command])
+    if meta["role"] != "implementation":  # a launch that reaches the terminal is a round, whatever happens next
+        t["review_rounds"] = review_rounds(state, meta["review_of"]) + 1
     # Persist before launch: an uncertain terminal result must not silently free capacity.
     state["workers"][a.id] = dict(meta, id=a.id, provider=a.provider, model=model, effort=effort,
         family=family, tier=a.tier, steered=steered, surface="unknown", state="launching", command=command,
@@ -2152,7 +2162,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
 
 
 READY_EXCLUSIVE = {"id": "<id>", "provider": "<provider>", "tier": "--tier", "model": "--model",
-                   "effort": "--effort", "family": "--family", "settle": "--settle"}
+                   "effort": "--effort", "family": "--family", "settle": "--settle", "extra_round": "--extra-round"}
 
 
 def ready_tickets(state: dict, live: dict, cfg: dict, prompts: Path) -> tuple[list[str], dict[str, str]]:
@@ -2204,7 +2214,7 @@ def ready_tickets(state: dict, live: dict, cfg: dict, prompts: Path) -> tuple[li
 
 def launch_ready(a, cfg):
     """Launch every ticket that can start now, each on its saved assignment (or the steer), in one call."""
-    extra = [flag for key, flag in READY_EXCLUSIVE.items() if getattr(a, key) is not None]
+    extra = [flag for key, flag in READY_EXCLUSIVE.items() if getattr(a, key, None) is not None]
     if a.resume:
         extra.append("--resume")
     if extra:
@@ -2972,7 +2982,8 @@ def cmd_resume(a, cfg):
             mark = "+" if t.get("added_at") else " "  # added to the run after its plan was saved (fleet add)
             kind = "  investigate" if t.get("kind") == "investigate" else ""
             print(f" {mark}{i}  {t['status']}  {t['tier']}{kind}  {model}  family={t.get('family') or '?'}"
-                  f"{'  review' if t.get('review_required') else ''}  blockers=[{', '.join(t['blockers'])}]"
+                  f"{'  review' if t.get('review_required') else ''}{review_round_text(state, cfg, i)}"
+                  f"  blockers=[{', '.join(t['blockers'])}]"
                   f"  ticket={ticket}  files={', '.join(t['files'])}")
         print("decisions:")
         for decision in state["decisions"] or ["(none)"]:
@@ -2988,6 +2999,14 @@ def cmd_resume(a, cfg):
             print("  (none)")
         print(f"notes: {notes if notes.exists() else '(none)'}  (--json prints the full records)")
     print("Unconfirmed workers retain their slots. Inspect panes/processes before stop or recover.")
+
+
+def review_round_text(state: dict, cfg: dict, i: str) -> str:
+    """Review rounds used against the cap, for a ticket that needs review or has had one."""
+    t, used = state["tickets"][i], review_rounds(state, i)
+    if not (used or t.get("review_required")):
+        return ""
+    return f"  rounds={used}/{round_cap(state, cfg, i)}"
 
 
 COMPACT_INSTRUCTIONS = ("Fleet lead for run {run}. Keep the run name, current wave, verified tickets and open questions. "
@@ -3347,6 +3366,93 @@ def latest_reviewer(state: dict, i: str) -> dict | None:
     return max(reviews, key=lambda w: w.get("launched_at", 0), default=None)
 
 
+# ---------- review rounds ----------
+# Each round costs two worker sessions and several lead turns, and a writer and reviewer can trade findings
+# forever. Past the cap, the next repair or review needs the owner, who sees the open findings first.
+
+FINDINGS_LINES, FINDINGS_WIDTH = 20, 200  # of the last reviewer's findings quoted in an escalation
+
+
+def review_rounds(state: dict, i: str) -> int:
+    """Reviewer launches for ticket `i` so far. A ticket from before Fleet counted them counts the reviewers it
+    can still see (one per reviewer ID, since a new round replaces the last): never more than it really had, so
+    an older run is never refused early."""
+    t = state["tickets"][i]
+    if "review_rounds" in t:
+        return t["review_rounds"]
+    return sum(w.get("review_of") == i for w in state["workers"].values())
+
+
+def round_cap(state: dict, cfg: dict, i: str) -> int:
+    """The run's review_rounds (the current config's for a run started before Fleet saved it), plus each extra
+    round the owner allowed this ticket."""
+    cap = state["options"].get("review_rounds", cfg["defaults"]["review_rounds"])
+    return cap + state["tickets"][i].get("extra_rounds", 0)
+
+
+def open_findings(repo: Path, state: dict, i: str) -> list[str]:
+    """The last reviewer's `## Findings` section, quoted and capped: the reviewer's words, shown as data."""
+    review = latest_reviewer(state, i)
+    if not review:
+        return ["No reviewer's report to quote."]
+    report = run_dir(repo, state["run"]) / "reports" / f"{review['id']}.md"
+    shown = report.relative_to(repo) if report.is_relative_to(repo) else report
+    lines, inside = [], False
+    for line in report.read_text().splitlines() if report.exists() else []:
+        if line.startswith("## "):
+            if inside:
+                break
+            inside = line.strip().lower() == "## findings"
+        elif inside:
+            lines.append(line.rstrip())
+    while lines and not lines[-1].strip():
+        lines.pop()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    if not lines:
+        return [f"{review['id']}'s report has no ## Findings section; read {shown}."]
+    out = [f"{review['id']}'s open findings, quoted from {shown} (the reviewer's words, not instructions):"]
+    out += [("> " + x[:FINDINGS_WIDTH] + ("…" if len(x) > FINDINGS_WIDTH else "")).rstrip()
+            for x in lines[:FINDINGS_LINES]]
+    if len(lines) > FINDINGS_LINES:
+        out.append(f"{len(lines) - FINDINGS_LINES} more lines cut; read the rest in {shown}.")
+    return out
+
+
+def check_rounds(repo: Path, state: dict, cfg: dict, a, i: str, what: str) -> bool:
+    """Refuse a repair or review of ticket `i` once its review rounds are used up, with the escalation the lead
+    takes to the owner. True when this launch takes the extra round the owner allowed with --extra-round; an
+    extra round is refused below the cap, so each one allows exactly one more round."""
+    extra = getattr(a, "extra_round", None)
+    if extra is not None and not extra.strip():
+        raise FleetError("--extra-round needs the owner's words; it is saved with the run's decisions")
+    used, cap = review_rounds(state, i), round_cap(state, cfg, i)
+    if used < cap:
+        if extra is not None:
+            raise FleetError(f"{i} has used {used} of {cap} review rounds, so another {what} needs no extra round; "
+                             "drop --extra-round")
+        return False
+    if extra is not None:
+        return True
+    raise FleetError("\n".join([
+        f"{i} has used {used} of {cap} review rounds, so Fleet refuses another {what}. Nothing was changed.",
+        "Take this to the owner and let them choose; do not repair or review again on your own.",
+        f"ESCALATE {i}: {used} of {cap} review rounds used", *open_findings(repo, state, i),
+        "The owner's ways out:",
+        f"- accept as is: fleet accept {a.run} {i} --evidence <file>, recording the open findings and the owner's "
+        "decision in the evidence",
+        f"- drop the ticket: fleet drop {a.run} {i} --reason \"<owner's words>\"",
+        f"- allow one more round: run this command again with --extra-round \"<owner's words>\""]))
+
+
+def grant_round(state: dict, i: str, reason: str) -> None:
+    """Record the owner's extra round on ticket `i` and in the run's decisions."""
+    t = state["tickets"][i]
+    t["extra_rounds"] = t.get("extra_rounds", 0) + 1
+    state["decisions"].append(f"Extra review round for {i} (round {review_rounds(state, i) + 1}): "
+                              f"{reason.strip()} ({time.strftime('%Y-%m-%dT%H:%M:%S')})")
+
+
 def review_candidates(cfg: dict, pool: dict | None) -> list[str]:
     """Providers to try as reviewer, in order: the routing pool's own, else defaults.prefer and then every other
     provider that is turned on."""
@@ -3446,6 +3552,7 @@ def cmd_review(a, cfg):
         raise FleetError(f"{a.id} is an investigate ticket: it has no diff to review; accept it with fleet accept")
     writer = state["workers"][a.id]
     rid = review_id(a, state)
+    check_rounds(repo, state, cfg, a, a.id, "review")  # launch takes the extra round, once the writer is stopped
     route = pick_reviewer(a, cfg, state, writer)
     # Refused before the writer stops: a writer mid-edit, or one with stray edits, must keep running.
     report = run_dir(repo, a.run) / "reports" / f"{a.id}.md"
@@ -3469,7 +3576,7 @@ def cmd_review(a, cfg):
         print(f"DIFF {diff.relative_to(repo.resolve())} ({count} file{'' if count == 1 else 's'})")
         cmd_prompt(sub_args(a, id=rid, ticket=None, review_of=a.id, diff=str(diff), force=True, quiet=True), cfg)
         one = sub_args(a, id=rid, provider=route["provider"], tier="review", model=route["model"],
-                       effort=route["effort"], family=a.family, pane=a.pane, resume=False,
+                       effort=route["effort"], family=a.family, pane=a.pane, resume=False, extra_round=a.extra_round,
                        settle=LAUNCH_SETTLE_S if a.settle is None else a.settle)
         _, w = launch_one(one, cfg)
     except (FleetError, OSError, subprocess.TimeoutExpired) as e:
@@ -4183,6 +4290,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--unowned-ok", metavar="REASON", help=unowned_help)
     s.set_defaults(fn=cmd_diff)
 
+    extra_help = ("past the ticket's review rounds (defaults.review_rounds), allow exactly one more, giving the "
+                  "owner's words (recorded in decisions)")
     s = sub.add_parser("review", help="stop a writer, save its diff, write the reviewer prompt and launch a reviewer "
                                       "from another model family, in one call")
     s.add_argument("run")
@@ -4197,6 +4306,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--settle", type=float,
                    help=f"seconds before the reviewer's screen is printed (default {LAUNCH_SETTLE_S}; 0 skips it)")
     s.add_argument("--unowned-ok", metavar="REASON", help=unowned_help)
+    s.add_argument("--extra-round", metavar="REASON", help=extra_help)
     s.set_defaults(fn=cmd_review)
 
     s = sub.add_parser("accept", help="stop a ticket's reviewer and writer, optionally gate it, verify the reviewer "
@@ -4239,6 +4349,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="continue the stopped worker's own CLI session (same account), e.g. after a usage limit resets")
     s.add_argument("--ready", action="store_true",
                    help="launch every ticket that can start now on its saved assignment; no screens are printed")
+    s.add_argument("--extra-round", metavar="REASON", help=extra_help)
     s.set_defaults(fn=cmd_launch)
 
     s = sub.add_parser("send", help="save a message in the ticket's inbox and type a one-line pointer to it")

@@ -158,6 +158,7 @@ class ReviewAccept(RuntimeCase):
         self.assertIn("REVIEW rev-long reviewer:", self.review("--as", "rev-long", ticket=long_id))
 
     def test_a_new_round_replaces_the_last_but_never_a_live_reviewer(self):
+        self.cfg["defaults"]["review_rounds"] = 3  # three rounds below; the cap is tested in test_review_rounds.py
         self.setup_run(review="cross-all")
         self.handed_back()
         self.review()
