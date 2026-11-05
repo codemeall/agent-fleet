@@ -2430,6 +2430,9 @@ def park_report(repo: Path, run: str, ticket_id: str) -> None:
     n = next(n for n, line in enumerate(lines) if STATUS_RE.match(line))
     lines[n] = "Status: changes-requested" + ("\n" if lines[n].endswith("\n") else "")
     f.write_text("".join(lines))
+    # Forget what wait saw: a hand-back identical to the first one, landing in the same mtime tick before
+    # wait scans the park, must still wake the lead.
+    (run_dir(repo, run) / ".seen" / ticket_id).unlink(missing_ok=True)
 
 
 def cmd_send(a, cfg):

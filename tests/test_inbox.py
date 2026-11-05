@@ -1,6 +1,7 @@
 """fleet send's durable inbox: messages saved per ticket, a one-line pointer typed into the pane."""
 import io
 import shlex
+import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -142,3 +143,16 @@ class Inbox(RuntimeCase):
         self.hand_back()
         self.review_prompt()
         self.assertIn(str(self.inbox("review-01")), (prompts / "review-01.md").read_text())
+
+    def test_an_identical_hand_back_in_the_same_mtime_tick_after_changes_still_wakes(self):
+        self.setup_run()
+        self.launch()
+        self.report()
+        report = self.repo / ".fleet/runs/demo/reports/01.md"
+        first, stamp = report.read_text(), report.stat().st_mtime_ns
+        self.assertIn("REPORT 01 [needs-verification]", self.call("wait", "demo", "--timeout", "0", "--settle", "0"))
+        self.call("send", "demo", "01", "--changes", "fix the edge case")
+        report.write_text(first)                                           # the same bytes, the same tick
+        os.utime(report, ns=(stamp, stamp))
+        self.assertIn("REPORT 01 [needs-verification]", self.call("wait", "demo", "--timeout", "0", "--settle", "0"))
+
