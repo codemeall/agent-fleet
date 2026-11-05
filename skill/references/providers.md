@@ -98,6 +98,24 @@ Claude Code, Codex and Antigravity ask once per folder whether to trust it. With
 
 Cursor always launches with `--trust`; OpenCode asks nothing. Launch never creates a CLI's file: a CLI that has not run yet, or a file it cannot read or write, gets one stderr line and the worker shows its trust screen as before. `auto_trust` is the owner's decision. The lead never turns it on, and never answers a trust, login or permission prompt with `fleet send`.
 
+### Worktrees
+
+In a [worktree run](commands.md#worktree-isolation) each worker starts in its own tree outside the checkout. With `auto_trust` on, launch marks both the checkout and the worker's tree trusted, the same way: `claude-config` and `agy-settings` write both paths, and `codex-flag` passes both in one `projects={…}` table. With it off, launch warns on stderr that a trust prompt may stall the worker until the owner answers it in the pane.
+
+A worker in a tree also needs its prompt, inbox, report and ticket, which stay in the run's folder, `.fleet/runs/<run>/`. A ticket file kept anywhere else is copied to `.fleet/runs/<run>/tickets/<id>.md` when the prompt is written, and the prompt names that copy. An adapter's `add_dir` field is a launch fragment with a `{dir}` slot; launch adds it after `{bin}` for the run's folder, and never for any other folder of the checkout. It is used only in a worktree run, and never on a headless line that runs a subcommand (`codex exec`): a root flag may not reach it, and Fleet's runner writes that report. An adapter without `add_dir` launches as before and may ask before it reads or writes those files. For Codex, `--add-dir` makes the run's folder writable, as the whole checkout is in a shared run.
+
+What was checked, on 2026-11-05:
+
+| CLI | Trust for a worktree path | `add_dir` | Source |
+| --- | --- | --- | --- |
+| Claude Code 2.1.318 | Keyed on the Git repository root, and in a linked worktree on the main checkout's root, so a trusted checkout covers its worktrees. The installed binary resolves a worktree's `.git` file through `commondir` to the main checkout before it reads `projects[…].hasTrustDialogAccepted` | `--add-dir={dir}`. Reads need no approval only inside the working directory and additional directories; `--add-dir <directories...>` takes several values, so the `=` form keeps it to one | [permissions](https://code.claude.com/docs/en/permissions) ("Permission system" table, "Working directories", "Project allow rules and workspace trust"); `claude --help`; strings of the installed binary |
+| Codex | Resolves a linked worktree to its main repository before it looks up `projects."<path>".trust_level` (`resolve_root_git_project_for_trust`, merged 2025-08-22), so a trusted checkout covers its worktrees | `--add-dir {dir}`: "Additional directories that should be writable alongside the primary workspace", so the `workspace-write` sandbox lets the worker write its report | [openai/codex#2585](https://github.com/openai/codex/pull/2585); `codex-rs/utils/cli/src/shared_options.rs` on `main`. Not installed here, so no `codex --help` was read |
+| Cursor Agent | `--trust` is in the launch line for any folder; whether the TUI honours it is unverified, as before | none: no checked flag | none new; not installed here |
+| Antigravity | Unknown whether `trustedWorkspaces` covers a worktree of a trusted folder; `auto_trust` adds the tree's own path | none: no checked flag | none; not installed here |
+| OpenCode | Asks nothing | none | as before |
+
+**Not checked live:** no signed-in CLI ran in a worktree. The Codex rows come from its source and pull request, not its `--help`. A Codex community report says Codex's own app checked trust against its generated worktree path rather than the original checkout; Fleet's `auto_trust` passes both paths for that reason. Check each with `fleet smoke` in a worktree run and record it here.
+
 ## Permission profiles
 
 Each adapter launches a role through a profile. `profiles.worker` runs implementation tickets. `profiles.review` runs reviewers and investigate tickets, which write only their report. A profile has `args`, the fragment that fills the launch line's `{profile}` slot (dropped when empty), and a `level`, what that launch lets the CLI do without the owner answering in its pane:
@@ -308,8 +326,8 @@ For every new adapter, test a harmless local ticket, multiple waves, a required 
 | Section | Keys |
 | --- | --- |
 | Top level | `defaults`, `providers`, `lead_context` |
-| `[defaults]` | `workspace`, `routing`, `prefer`, `max_parallel`, `review`, `review_rounds`, `gate`, `gate_rounds`, `auto_trust`, `backend`, `tmux_socket`, `max_workers`, `max_wall_minutes`, `scope_ignore`, `permission_ceiling`, `check_policy`, `scope_permissions`, `review_transport`, `headless_timeout_minutes` |
-| `[providers.<name>]` | `enabled`, `placeholder`, `extends`, `bin`, `bin_aliases`, `launch`, `profiles`, `session`, `resume`, `quit`, `login`, `login_ok`, `account_env`, `env`, `trust`, `models`, `model_config`, `default_home`, `model_note`, `models_allow`, `model_families`, `family_prefixes`, `efforts`, `family`, `plugins`, `max`, `tiers`, `hooks`, `headless`, `review_transport` |
+| `[defaults]` | `workspace`, `routing`, `prefer`, `max_parallel`, `review`, `review_rounds`, `gate`, `gate_rounds`, `supervise`, `auto_trust`, `backend`, `tmux_socket`, `max_workers`, `max_wall_minutes`, `scope_ignore`, `permission_ceiling`, `check_policy`, `scope_permissions`, `review_transport`, `headless_timeout_minutes`, `worktree_root`, `worktree_setup` |
+| `[providers.<name>]` | `enabled`, `placeholder`, `extends`, `bin`, `bin_aliases`, `launch`, `profiles`, `session`, `resume`, `quit`, `login`, `login_ok`, `account_env`, `env`, `trust`, `models`, `model_config`, `default_home`, `model_note`, `models_allow`, `model_families`, `family_prefixes`, `efforts`, `family`, `plugins`, `max`, `tiers`, `hooks`, `headless`, `review_transport`, `add_dir` |
 | `[providers.<name>.tiers.<tier>]` | `model`, `effort`, `family` (any tier name) |
 | `[providers.<name>.profiles.<role>]` | `args`, `level`; the roles are `worker` and `review` |
 | `[lead_context.<host>]` | `warn_at`, `dumb_at`; the hosts are `claude` and `codex`. Here another host or key is already an error |

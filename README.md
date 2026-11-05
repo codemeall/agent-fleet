@@ -4,7 +4,7 @@ Run a fleet of coding-agent CLIs (Claude Code, Codex, Cursor) led by the agent y
 
 The lead turns approved tickets into a saved execution plan, picks a worker model and effort for each ticket, watches progress, and verifies every result before dependents start. Workers share one Git checkout with explicit file ownership. **You keep control of commits and publishing.**
 
-> **Preview `0.1.0-preview.26`.** Bundled adapters exist for Claude Code, Codex and Cursor, plus Antigravity and OpenCode (disabled by default). Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
+> **Preview `0.1.0-preview.27`.** Bundled adapters exist for Claude Code, Codex and Cursor, plus Antigravity and OpenCode (disabled by default). Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
 
 - [Quick start](#quick-start)
 - [Installation](#installation)
@@ -303,7 +303,7 @@ Every Fleet worker costs a pane, a prompt, a report and a verification turn by t
 
 - **Small or single-file tickets: use one agent.** Rule of thumb: if the whole job is one or two tickets that would run one after the other, or touches a single file, or you could review the change in one sitting, ask your agent to do it directly. Reach for Fleet when at least two tickets with disjoint files can run at the same time, or a ticket needs cross-family review.
 - **A quick read-only lookup: use the lead's own subagent.** Where something is defined, what a function does, which files a change would touch: your host's subagent (Claude Code's Explore, a Codex `explorer`) answers for less. Fleet's `investigate` tickets are for questions that need another vendor's model, a long investigation you want verified, or one kept out of the lead's context ([Fleet or your own subagent](skill/references/delegation.md#0-fleet-or-your-own-subagent)).
-- **No speed or quality claim.** Fleet is not yet benchmarked against one agent doing the same tickets ([#16](https://github.com/codemeall/agent-fleet/issues/16)), so this README makes no performance claim: parallel workers may finish sooner or later than one agent would.
+- **No speed or quality claim.** Fleet is not yet benchmarked against one agent doing the same tickets ([#16](https://github.com/codemeall/agent-fleet/issues/16)), so this README makes no performance claim: parallel workers may finish sooner or later than one agent would. The [benchmark kit](benchmarks/README.md) is how that will be measured; it has no results yet.
 - **Only Claude Code, Codex and Cursor are on by default.** Antigravity and OpenCode ship disabled (`fleet provider enable agy`, then `fleet doctor agy`), and Grok and Muse are placeholders, not supported CLIs ([compatibility](#compatibility-and-adapters)).
 
 ## Where workers run: cmux or headless

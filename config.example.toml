@@ -13,6 +13,10 @@ review = "cross-heavy"
 # only for a pass, a scope problem, or once gate_rounds failures (1 to 5) have gone back. Off by default.
 # gate = true
 # gate_rounds = 2
+# The steps `fleet supervise` takes itself, from "gate", "review" and "dispatch". "gate" alone (the default) is
+# `fleet wait --gate`; "review" also starts the cross-family review of a hand-back whose gate passed; "dispatch"
+# runs `launch --ready` once the lead has verified a ticket. --auto overrides it for one supervise.
+# supervise = ["gate", "review"]
 # Mark the repo trusted in Claude, Codex and Antigravity before each launch, so their first-run
 # "trust this folder?" screen does not stall a worker. Off by default; only the owner turns it on.
 # auto_trust = true
@@ -49,6 +53,13 @@ review = "cross-heavy"
 # What plan and add do with a ticket whose checks hold neither a {"run": …} command nor a {"manual": "<reason>"}
 # marker: "refuse" it (the default) or "warn" and save it.
 # check_policy = "refuse"
+# Runs started with `fleet init <run> --isolation worktree` give each implement ticket its own Git worktree outside
+# this checkout. worktree_root replaces the default folder ($XDG_CACHE_HOME, else ~/.cache, then
+# agent-fleet/worktrees); it must be outside the checkout. worktree_setup runs in each new tree before its worker
+# starts, for example to install dependencies; a failure launches nothing. It runs while launch holds the checkout's lock,
+# so keep it short. A run keeps the values it was started with.
+# worktree_root = "~/.cache/agent-fleet/worktrees"
+# worktree_setup = "npm ci --prefer-offline"
 # Set only when you intentionally target a validated cmux workspace:
 # workspace = "workspace:3"
 

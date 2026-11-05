@@ -277,7 +277,7 @@ class GateLoop(RuntimeCase):
         self.stop_with_receipt()
         with patch.object(fleet, "run_check", side_effect=AssertionError("the gate ran again")):
             out = self.call("accept", "demo", "01", "--evidence", str(self.evidence), "--gate")
-        self.assertIn("GATE 01 reused the passing gate wait --gate ran at ", out)
+        self.assertIn("GATE 01 reused the passing gate the gate loop ran at ", out)
         self.assertIn("01: verified", out)
         self.assertIn("Gate evidence: 01", self.state()["workers"]["01"]["verification_evidence"])
 
