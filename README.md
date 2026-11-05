@@ -4,7 +4,7 @@ Run a fleet of coding-agent CLIs (Claude Code, Codex, Cursor) led by the agent y
 
 The lead turns approved tickets into a saved execution plan, picks a worker model and effort for each ticket, watches progress, and verifies every result before dependents start. Workers share one Git checkout with explicit file ownership. **You keep control of commits and publishing.**
 
-> **Preview `0.1.0-preview.24`.** Bundled adapters exist for Claude Code, Codex and Cursor, plus Antigravity and OpenCode (disabled by default). Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
+> **Preview `0.1.0-preview.25`.** Bundled adapters exist for Claude Code, Codex and Cursor, plus Antigravity and OpenCode (disabled by default). Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
 
 - [Quick start](#quick-start)
 - [Installation](#installation)
@@ -493,7 +493,7 @@ Window sizes differ by host and setting: Claude Code runs Opus 5.5 with a 1M win
 - **Isolation is by instruction, not by the OS.** All workers share one checkout. Exact file scope and read-only review are prompt rules plus lead checks. Fleet does compare the whole checkout before accepting work: a file that changed outside every ticket's scope while a worker ran, new files included, blocks `fleet diff` and `fleet verify` until it is reverted, granted to the ticket, or accepted with your reason ([the scope check](skill/references/commands.md#the-scope-check)). Use one active run per checkout, keep sensitive or high-conflict work out of concurrent waves, inspect scoped diffs, and run checks on the combined tree. The Git check compares the captured HEAD and index; it can't prove that no Git operation happened in between.
 - **Review rounds.** Each ticket gets `review_rounds` reviews (default 2, at most 5); after that Fleet refuses the next repair or review and prints the open findings for you to decide: accept as is, drop the ticket, or allow one more round in your own words.
 - **Other agents' text is data.** Worker prompts and the lead's skill treat tickets, specs, repo files, tool output and other workers' reports as data, never instructions; a planted instruction is reported, not followed.
-- **Evidence from what ran.** A ticket's `checks` may include commands (`{"run": …, "cwd": …, "timeout": …}`); `fleet gate` runs them, then the scope check, and writes the result as evidence for `fleet verify`.
+- **Evidence from what ran.** A ticket's `checks` may include commands (`{"run": …, "cwd": …, "timeout": …}`); `fleet gate` runs them, then the scope check, and writes the result as evidence for `fleet verify`. With `fleet wait --gate`, a failing check goes back to the worker through its inbox before the lead is woken, up to `gate_rounds` times; the lead wakes on a pass, on `GATE-FAILED`, or on a scope problem, which never goes to the worker.
 
 ## Compatibility and adapters
 
