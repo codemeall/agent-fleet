@@ -675,8 +675,11 @@ class Runtime(RuntimeCase):
             {"id": "a-light", "task": "Light.", "files": ["a.txt"], "tier": "light"},
             {"id": "b-heavy", "task": "Heavy.", "files": ["b.txt"], "tier": "heavy"},
             {"id": "c-wait", "task": "Waits.", "files": ["c.txt"], "blockers": ["a-light"]},
-            {"id": "d-clash", "task": "Same file.", "files": ["b.txt"]},
+            {"id": "d-clash", "task": "Same file.", "files": ["d.txt"]},
             {"id": "e-bare", "task": "No context.", "files": ["e.txt"], "context": None, "checks": None})
+        # Plan now refuses two tickets sharing a file unless one waits on the other; a run planned by an earlier
+        # Fleet may still hold such a pair, and --ready keeps them apart.
+        self.unsequenced("d-clash", ["b.txt"])
         out = self.call("launch", "demo", "--ready")
         launched = [line.split()[1] for line in out.splitlines() if line.startswith("LAUNCHED")]
         self.assertEqual(launched, ["b-heavy", "a-light"])
@@ -708,8 +711,15 @@ class Runtime(RuntimeCase):
         self.call("status", "demo")  # reconciles the exit; the ticket is still pending and unverified
         self.assertIn("NONE ready", self.call("launch", "demo", "--ready"))
 
+    def unsequenced(self, i, files):
+        """Give ticket `i` these files by hand: a run planned before plan sequenced tickets sharing a file."""
+        state = self.state()
+        state["tickets"][i]["files"] = files
+        (self.repo / ".fleet/runs/demo/run.json").write_text(json.dumps(state))
+
     def test_launch_ready_keeps_off_the_files_of_an_exited_unverified_ticket(self):
-        self.ready_plan({"id": "a", "task": "A.", "files": ["x.txt"]}, {"id": "b", "task": "B.", "files": ["x.txt"]})
+        self.ready_plan({"id": "a", "task": "A.", "files": ["x.txt"]}, {"id": "b", "task": "B.", "files": ["y.txt"]})
+        self.unsequenced("b", ["x.txt"])  # plan now refuses this pair unless one waits on the other
         self.assertIn("SKIPPED b: files overlap a", self.call("launch", "demo", "--ready"))
         self.receipt("a")
         self.call("status", "demo")  # a exited; its diff awaits the lead's verification
