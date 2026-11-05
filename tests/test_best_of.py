@@ -637,6 +637,24 @@ class BestOfCost(BestOfCase):
                           t["first_pass"]), ("verified", 1, 1, True, 0, False))
         self.assertEqual((t["findings"], t["finding_rounds"]), (1, 1))  # the judge's header
 
+    def test_usage_credits_the_kept_writer_and_judges_first_pass_on_it_alone(self):
+        """The kept writer's family gets the ticket, and a gate failure of the writer set aside is the ticket's cost,
+        not a mark against the one kept."""
+        self.launched()
+        self.hand_back("api--writer", "not yet\n")
+        self.hand_back("api--reviewer", "ok from reviewer\n")
+        self.wait("--gate", expected=2)  # api--writer's gate fails and goes back to it
+        self.hand_back("api--writer", "ok from writer\n")
+        self.assertIn("FANOUT api:", self.wait("--gate"))
+        self.judged(pick="api--reviewer", why="cleaner")
+        self.accept("--pick", "api--reviewer")
+        u = json.loads(self.call("usage", "demo", "--json"))
+        t = next(x for x in u["tickets"] if x["ticket"] == "api")
+        self.assertEqual((t["provider"], t["outcome"], t["gate_rounds"], t["first_pass"]),
+                         ("reviewer", "verified", 1, True))
+        by = self.call("usage", "demo", "--by", "provider")
+        self.assertRegex(by, r"\n  reviewer +1 ticket \(1 verified\); first pass 1 of 1 verified \(100%\)")
+
 
 class BestOfTemplates(unittest.TestCase):
     def test_the_pick_judge_template_marks_every_input_as_data(self):

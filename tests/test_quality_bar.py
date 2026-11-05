@@ -235,6 +235,11 @@ class Override(QualityCase):
                       '- 01: check "make lint" reports exit 2\n- 01: open question "Should the lint rule stay?"', report)
         self.assertIn("Status: verified", report)
         self.assertIn(OWNER, self.state()["workers"]["01"]["verification_evidence"])
+        # Below the bar and kept by the owner's words: fleet usage never counts it as a first pass.
+        usage = json.loads(self.call("usage", "demo", "--json"))
+        t = next(x for x in usage["tickets"] if x["ticket"] == "01")
+        self.assertEqual((t["outcome"], t["first_pass"], t["accepted_anyway"]), ("verified", False, True))
+        self.assertIn("first pass 0 of 1 verified (0%), 1 accepted anyway", self.call("usage", "demo"))
 
     def test_verify_takes_the_override_too(self):
         self.plan()

@@ -15,7 +15,7 @@ Teamwork release 7 (#51): Codex workers signal their turns, Fleet reports how ea
   - repairs, gate rounds and review rounds, and findings per round;
   - launches, wall time and tokens.
 
-  It takes no lock and saves nothing, and a count Fleet lacks stays `unknown`, never zero. A best-of-two ticket counts both writers' rework, and its judges count as its review rounds. `--all` lists a run it cannot read, or a folder that is not a run, as skipped. A report that is not valid UTF-8 never stops it.
+  It takes no lock and saves nothing, and a count Fleet lacks stays `unknown`, never zero. A best-of-two ticket goes to the writer kept with `--pick` and counts both writers' rework, and its judges count as its review rounds; its first pass is the kept writer's own. A ticket kept below the bar by the owner's words is never a first pass: it shows as `accepted anyway`. `--all` lists a run it cannot read, or a folder that is not a run, as skipped. A report that is not valid UTF-8 never stops it.
 - **Best of two (#50).** In a worktree run, `"fanout"` on an implement ticket runs two writers from two model families, `<id>--<provider>`, each in its own tree.
   - Each writer has its own prompt, gate rounds and ledger entry. `wait` and `supervise` gate both, then wake once with `FANOUT`, giving each writer's gate result, header and diff size.
   - `fleet judge` freezes both diffs and launches a read-only judge from a third family, whose `pick` wakes the lead as `VERDICT`.

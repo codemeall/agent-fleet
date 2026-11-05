@@ -2504,15 +2504,26 @@ def usage_ticket(d: Path, state: dict, i: str, entries: list[dict]) -> dict | No
     own = [e for e in entries if e.get("role") in ("writer", "investigator")]
     if not own:
         return None
-    first = min(own, key=lambda e: e.get("start") or 0)
+    kept = (t.get("picked") or {}).get("writer") if best_of_two(t) else None
+    first = min([e for e in own if e["worker"] == kept] or own, key=lambda e: e.get("start") or 0)
     by_worker: dict[str, list[dict]] = {}
     for e in own:
         by_worker.setdefault(e["worker"], []).append(e)
-    repairs = sum(usage_repairs(d, es) for es in by_worker.values())
-    # A best-of-two ticket's writers each keep their own inbox, gate rounds and reports: its rework is their sum.
+    # A best-of-two ticket's writers each keep their own inbox, gate rounds and reports. Its rework is their sum, the
+    # ticket's cost; its first pass is the kept writer's own, so the writer set aside never marks the one kept.
     writers = pick_writers(t) if best_of_two(t) else [i]
-    gates = sum(max(len(GATE_ROUND_RE.findall(read_text(d / "inbox" / f"{w}.md"))), gate_rounds_used(t, w))
-                for w in writers)
+
+    def rework(ws: list[str]) -> tuple[int, int, bool]:
+        """Repairs, gate rounds and whether changes were requested, over writers `ws`."""
+        repairs = sum(usage_repairs(d, es) for w, es in by_worker.items() if w in ws or not best_of_two(t))
+        gates = sum(max(len(GATE_ROUND_RE.findall(read_text(d / "inbox" / f"{w}.md"))), gate_rounds_used(t, w))
+                    for w in ws)
+        parked = [f for w in ws for f in (d / "reports" / f"{w}.md", *archived_reports(d, w))]
+        return repairs, gates, (gates > 0 or bool(t.get("findings_sent"))
+                                or any(usage_status(f) == "changes-requested" for f in parked if f.exists()))
+
+    repairs, gates, changes = rework(writers)
+    kept_repairs, _, kept_changes = rework([kept]) if kept else (repairs, gates, changes)
     if best_of_two(t):  # its judges are its review rounds (fleet review refuses these tickets)
         judged = [e for e in entries if e.get("role") == "judge"]
         rounds = max(sum(not e.get("resume") for e in judged), len(judges(state, i)))
@@ -2521,15 +2532,14 @@ def usage_ticket(d: Path, state: dict, i: str, entries: list[dict]) -> dict | No
         rounds = t["review_rounds"] if "review_rounds" in t else max(
             sum(not e.get("resume") for e in reviews), review_rounds(state, i) if i in state["tickets"] else 0)
     findings, read = usage_findings(d, state, i)
-    parked = [f for w in writers for f in (d / "reports" / f"{w}.md", *archived_reports(d, w))]
-    changes = (gates > 0 or bool(t.get("findings_sent"))
-               or any(usage_status(f) == "changes-requested" for f in parked if f.exists()))
     outcome = t.get("status") if t.get("status") in ("verified", "dropped") else "open"
     return {"run": state["run"], "ticket": i, "outcome": outcome, "role": first.get("role"),
             "provider": first.get("provider"), "model": first.get("model"), "tier": first.get("tier") or t.get("tier"),
             "repairs": repairs, "gate_rounds": gates, "review_rounds": rounds, "changes_requested": changes,
             "findings": findings if read else None, "finding_rounds": read,
-            "first_pass": (repairs == 0 and not changes) if outcome == "verified" else None}
+            "accepted_anyway": bool(t.get("accepted_anyway")) and outcome == "verified",
+            "first_pass": (kept_repairs == 0 and not kept_changes and not t.get("accepted_anyway"))
+            if outcome == "verified" else None}
 
 
 def usage_run(repo: Path, run: str, cfg: dict, now: float) -> tuple[list[dict], list[dict]]:
@@ -2564,6 +2574,7 @@ def usage_group(tickets: list[dict], launches: list[dict]) -> dict:
         for k, v in (x["tokens"] or {}).items():
             tokens[k] = tokens.get(k, 0) + v
     return {"tickets": len(tickets), "verified": len(verified), "first_pass": sum(t["first_pass"] for t in verified),
+            "accepted_anyway": sum(t["accepted_anyway"] for t in verified),
             "dropped": sum(t["outcome"] == "dropped" for t in tickets),
             "open": sum(t["outcome"] == "open" for t in tickets),
             "repairs": sum(t["repairs"] for t in tickets), "gate_rounds": sum(t["gate_rounds"] for t in tickets),
@@ -2607,6 +2618,8 @@ def usage_lines(g: dict) -> tuple[str, str]:
         outcome = ", ".join(f"{g[k]} {k}" for k in ("verified", "dropped", "open") if g[k])
         first = (f"first pass {g['first_pass']} of {g['verified']} verified "
                  f"({round(100 * g['first_pass'] / g['verified'])}%)" if g["verified"] else "first pass none verified")
+        if g.get("accepted_anyway"):  # below the bar, kept by the owner's words: never a first pass
+            first += f", {g['accepted_anyway']} accepted anyway"
         if not g["review_rounds"] and not g["finding_rounds"]:
             findings = "no review"
         elif g["findings"] is None:
@@ -7598,12 +7611,13 @@ def quality_check(repo: Path, state: dict, a, i: str, writer: str | None = None)
         raise FleetError(f"{i} is below the strict acceptance bar (acceptance strict), so it is not verified; nothing "
                          "was changed:\n" + "\n".join(f"- {x}" for x in lines) + ("" if hard else f"\n{OVERRIDE_HINT}"))
     now, who = time.strftime("%Y-%m-%dT%H:%M:%S"), writer or i
-    q = {"text": "", "decisions": [], "notes": []}
+    q = {"text": "", "decisions": [], "notes": [], "ticket": i}
     if accepted:
         q["decisions"] += [f"Accepted {who}'s rebuttal of {fid} on {i}: {why} ({now})" for fid, why in accepted.items()]
         q["text"] += ("\n\n## Accepted findings\n\nThe lead accepted the writer's rebuttal of each finding below, which "
                       "the latest review still lists:\n" + "\n".join(f"- {fid}: {why}" for fid, why in accepted.items()))
     if words and overrode:
+        q["overrode"] = overrode
         q["decisions"].append(f"Accepted {i} regardless of the quality bar, by the owner: {words}. It overrode: "
                               f"{'; '.join(overrode)} ({now})")
         q["text"] += (f"\n\n## Accepted anyway\n\nThe owner's words: {words}\n\nThey overrode:\n"
@@ -7616,8 +7630,12 @@ def quality_check(repo: Path, state: dict, a, i: str, writer: str | None = None)
 
 
 def quality_commit(state: dict, q: dict) -> None:
-    """Record a passed bar's decisions in run state (the caller saves), once nothing else can refuse the verify."""
+    """Record a passed bar's decisions in run state (the caller saves), once nothing else can refuse the verify. A
+    ticket the owner's words accepted below the bar keeps what they overrode, so fleet usage never counts it as a
+    first pass."""
     state["decisions"] += q["decisions"]
+    if q.get("overrode"):
+        state["tickets"][q["ticket"]]["accepted_anyway"] = q["overrode"]
 
 
 def quality_say(q: dict) -> None:
