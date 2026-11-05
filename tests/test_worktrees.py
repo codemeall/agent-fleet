@@ -97,6 +97,12 @@ class WorktreeCase(RuntimeCase):
 
 
 class Isolation(WorktreeCase):
+    def setUp(self):
+        super().setUp()
+        # Written before the quality bar: these tests cover verify and accept's mechanics with header-less
+        # reports, so their runs start under acceptance = "warn". tests/test_quality_bar.py covers "strict".
+        self.cfg["defaults"]["acceptance"] = "warn"
+
     def test_parallel_tickets_get_the_owners_edits_and_accept_applies_both_without_touching_git_state(self):
         (self.repo / ".gitignore").write_text(".env\nbuild/\n")
         (self.repo / "tracked.txt").write_text("committed\n")
@@ -332,6 +338,12 @@ class Isolation(WorktreeCase):
 
 
 class Reads(WorktreeCase):
+    def setUp(self):
+        super().setUp()
+        # Written before the quality bar: these tests cover verify and accept's mechanics with header-less
+        # reports, so their runs start under acceptance = "warn". tests/test_quality_bar.py covers "strict".
+        self.cfg["defaults"]["acceptance"] = "warn"
+
     def test_diff_and_scope_check_read_the_worktree_against_its_base(self):
         self.start([{"id": "a", "files": ["owned.txt"]}])
         self.launch("a")
@@ -624,8 +636,12 @@ class LiveWorktrees(FleetCase):
         log = self.root / "log"
         log.mkdir()
         plan = self.root / "behaviour.json"
-        plan.write_text(json.dumps({"a": {"edit": {"a.txt": "from a\n"}, "report": "- a.txt"},
-                                    "b": {"edit": {"b.txt": "from b\n"}, "report": "- b.txt"}}))
+        def report(i):  # the report template's fleet block, as a worker that ran its check writes it
+            data = {"files_changed": [f"{i}.txt"], "checks": [{"run": f"test -f {i}.txt", "exit": 0}],
+                    "criteria": [], "findings": [], "questions": []}
+            return "```fleet\n" + json.dumps(data) + f"\n```\n\n- {i}.txt"
+        plan.write_text(json.dumps({"a": {"edit": {"a.txt": "from a\n"}, "report": report("a")},
+                                    "b": {"edit": {"b.txt": "from b\n"}, "report": report("b")}}))
         worker = " ".join(shlex.quote(p) for p in (sys.executable, str(FIXTURES / "scripted_worker.py")))
         env = f'env = {{ FAKE_PLAN = {json.dumps(str(plan))}, FAKE_LOG = {json.dumps(str(log))} }}'
         self.write_config(f'max_parallel = 2\nreview = "off"\nprefer = ["vendora"]\nworktree_root = {json.dumps(str(trees))}\n'

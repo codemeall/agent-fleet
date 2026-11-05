@@ -15,6 +15,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "fixtures"))
 from fleet_harness import FIXTURES, HAS_TMUX, FleetCase  # noqa: E402
 
 APPENDIX = "- long notes the dependent should not get"
+PY = shlex.quote(sys.executable)
+API_CHECK = f"{PY} tests/test_api.py"
+UI_CHECK = f"{PY} -c \"import sys; sys.path.insert(0, 'src'); import ui\""
+
+
+def header(files: list[str], checks: list[str]) -> str:
+    """The report template's `fleet` block, as a worker that ran its checks writes it."""
+    return ("```fleet\n" + json.dumps({"files_changed": files, "checks": [{"run": c, "exit": 0} for c in checks],
+                                       "criteria": [], "findings": [], "questions": []}) + "\n```\n\n")
+
+
 WORKERS = {
     "api": {
         # A stray README.md edit, outside every ticket's files, rides along with the first hand-back.
@@ -27,14 +38,16 @@ WORKERS = {
                        "## Acceptance criteria\n- [x] get() returns 1: tests/test_api.py passes\n\n"
                        f"## Appendix\n{APPENDIX}"},
             {"edit": {"src/util.py": "def helper():\n    return 'ok'\n"},
-             "report": "## Work or review performed\n- src/api.py: get()\n- tests/test_api.py: covers get()\n"
+             "report": header(["src/api.py", "tests/test_api.py", "src/util.py"], [API_CHECK])
+                       + "## Work or review performed\n- src/api.py: get()\n- tests/test_api.py: covers get()\n"
                        "- src/util.py: helper() (granted)\n\n## Acceptance criteria\n"
                        f"- [x] get() returns 1: tests/test_api.py passes\n\n## Appendix\n{APPENDIX}"},
         ],
     },
-    "review-api": {"report": "## Work or review performed\n- Read the captured diff.\n\n## Findings\n- No actionable findings."},
+    "review-api": {"report": header([], []) + "## Work or review performed\n- Read the captured diff.\n\n"
+                                              "## Findings\n- No actionable findings."},
     "ui": {"edit": {"src/ui.py": "import api\nprint(api.get())\n"},
-           "report": "## Work or review performed\n- src/ui.py: shows get()"},
+           "report": header(["src/ui.py"], [UI_CHECK]) + "## Work or review performed\n- src/ui.py: shows get()"},
 }
 FIXES = "Changes requested:\n1) add tests/test_api.py covering get()\n2) set your report back to needs-verification\n"
 
@@ -70,15 +83,14 @@ class TeamworkRelease1(FleetCase):
         issues.mkdir(parents=True)
         (issues / "api.md").write_text("# api: add get()\n")
         (issues / "ui.md").write_text("# ui: show get()\n")
-        py = shlex.quote(sys.executable)
         self.plan = self.repo / ".scratch/feat/plan.json"
         self.plan.write_text(json.dumps({"tickets": [
             {"id": "api", "ticket": ".scratch/feat/issues/api.md", "files": ["src/api.py", "tests/test_api.py"],
              "provider": "vendora", "tier": "heavy", "context": "Spec: get() returns 1.",
-             "checks": ["Read src/api.py", {"run": f"{py} tests/test_api.py", "timeout": 30}]},
+             "checks": ["Read src/api.py", {"run": API_CHECK, "timeout": 30}]},
             {"id": "ui", "ticket": ".scratch/feat/issues/ui.md", "files": ["src/ui.py"], "blockers": ["api"],
              "provider": "vendora", "tier": "standard", "context": "Use api.get().",
-             "checks": [{"run": f"{py} -c \"import sys; sys.path.insert(0, 'src'); import ui\"", "timeout": 30}]},
+             "checks": [{"run": UI_CHECK, "timeout": 30}]},
         ], "decisions": ["Plan-time decision: keep it tiny."]}))
         self.fixes = self.root / "fixes.md"  # the lead's own files live outside the checkout
         self.fixes.write_text(FIXES)

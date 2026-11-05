@@ -249,6 +249,9 @@ class HeadlessRuntime(RuntimeCase):
         return [e for e in json.loads(self.call("cost", "demo", "--json"))["ledger"] if e["worker"] == i][-1]
 
     def test_a_headless_reviewers_final_message_is_its_report_and_wait_wakes_on_it(self):
+        # The headless reviewer is what this covers; the writer's report has no header, so the run starts
+        # under acceptance = "warn".
+        self.cfg["defaults"]["acceptance"] = "warn"
         self.use_headless()
         out = self.reviewed()
         self.assertIn("REVIEW review-01 reviewer:reviewer-model@high family=anthropic", out)

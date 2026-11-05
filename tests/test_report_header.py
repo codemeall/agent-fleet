@@ -155,6 +155,7 @@ class ReportHeader(RuntimeCase):
     # ---------- verify, accept and the hand-down ----------
 
     def test_verify_warns_about_header_problems_on_stderr_and_still_verifies(self):
+        self.cfg["defaults"]["acceptance"] = "warn"  # the warn policy: header problems warn and never refuse
         self.setup_checked()
         (self.repo / "owned.txt").write_text("changed\n")
         self.write(report(header(files_changed=["src/x.py"])))
@@ -166,6 +167,7 @@ class ReportHeader(RuntimeCase):
         self.assertEqual(self.state()["tickets"]["01"]["status"], "verified")
 
     def test_verify_names_a_missing_header_and_is_silent_for_a_good_one(self):
+        self.cfg["defaults"]["acceptance"] = "warn"  # the warn policy: header problems warn and never refuse
         self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"]}, {"id": "02", "files": ["next.txt"]}])
         for i, text in (("01", report("")), ("02", report(header(files_changed=["next.txt"], checks=[])))):
             self.launch(i)
@@ -176,6 +178,7 @@ class ReportHeader(RuntimeCase):
         self.assertEqual(self.split_call("verify", "demo", "02", "--evidence", str(self.evidence))[1], "")
 
     def test_accept_warns_for_the_reviewer_and_the_writer_and_still_accepts(self):
+        self.cfg["defaults"]["acceptance"] = "warn"  # the warn policy: header problems warn and never refuse
         self.setup_checked(blockers=[])
         (self.repo / "owned.txt").write_text("changed\n")
         self.write(report(header(checks=[])))

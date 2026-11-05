@@ -352,8 +352,8 @@ class Loop(RuntimeCase):
         self.assertTrue(lines[1].startswith("REPAIRING 01: F1, F2 from review-01 as message 1 in "), out)
         self.assertTrue(lines[2].startswith("REVIEWING 01: review-01 "), out)
         self.assertIn("responses 2 fixed", lines[2])
-        self.assertIn("READY 01: gate passed (1/1), review clean (anthropic, findings 0); fleet accept demo 01 --gate "
-                      "--evidence <file>", out)
+        self.assertIn("READY 01: gate passed (1/1), review clean (anthropic, findings 0), strict ok; fleet accept "
+                      "demo 01 --gate --evidence <file>", out)
         self.assertNotIn("FINDINGS", out)
         self.assertNotIn(INJECTED, out)
         self.assertEqual(self.lead_calls, ["supervise"])

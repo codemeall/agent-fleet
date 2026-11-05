@@ -58,9 +58,12 @@ class UsageCase(RuntimeCase):
 
     def hand_back(self, ticket, change="implemented change\n", **fields):
         """The writer edits its own file and hands back with a clean header; fields add to it."""
-        own = self.state()["tickets"][ticket]["files"][0]
+        t = self.state()["tickets"][ticket]
+        own = t["files"][0]
         (self.repo / own).write_text(change)
         fields.setdefault("files_changed", [own])
+        # An honest header reports every planned command with its exit code, as the strict bar requires.
+        fields.setdefault("checks", [{"run": c["run"], "exit": 0} for c in t.get("commands", [])])
         self.write_report(ticket, **fields)
 
     def plan(self, tickets):
@@ -109,7 +112,7 @@ class UsageCase(RuntimeCase):
         self.call("accept", "demo", "01", "--gate", *ev)
 
         self.launch("02")
-        self.hand_back("02", change="draft\n")
+        self.hand_back("02", change="draft\n", checks=[{"run": "grep -q fixed b.txt", "exit": 1}])
         self.assertNotIn("REPORT", self.call("wait", "demo", "--gate", "--timeout", "0", "--settle", "0", expected=2))
         self.hand_back("02", change="fixed\n")
         self.assertIn("REPORT 02", self.call("wait", "demo", "--gate", "--timeout", "0", "--settle", "0"))

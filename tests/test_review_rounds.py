@@ -116,6 +116,8 @@ class ReviewRounds(RuntimeCase):
         self.assertIn("refuses another review", out)
 
     def test_an_accepted_ticket_is_unaffected_by_the_cap(self):
+        # The cap is what this covers; its reports have no header, so the run starts under acceptance = "warn".
+        self.cfg["defaults"]["acceptance"] = "warn"
         self.two_rounds()
         with self.quits():
             out = self.call("accept", "demo", "01", "--evidence", str(self.evidence))

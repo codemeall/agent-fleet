@@ -378,7 +378,7 @@ For every new adapter, test a harmless local ticket, multiple waves, a required 
 | Section | Keys |
 | --- | --- |
 | Top level | `defaults`, `providers`, `lead_context` |
-| `[defaults]` | `workspace`, `routing`, `prefer`, `max_parallel`, `review`, `review_rounds`, `gate`, `gate_rounds`, `supervise`, `auto_trust`, `backend`, `tmux_socket`, `max_workers`, `max_wall_minutes`, `scope_ignore`, `permission_ceiling`, `check_policy`, `scope_permissions`, `review_transport`, `headless_timeout_minutes`, `worktree_root`, `worktree_setup`, `warm_max`, `warm_context_tokens`, `plan_first` |
+| `[defaults]` | `workspace`, `routing`, `prefer`, `max_parallel`, `review`, `review_rounds`, `gate`, `gate_rounds`, `supervise`, `auto_trust`, `backend`, `tmux_socket`, `max_workers`, `max_wall_minutes`, `scope_ignore`, `permission_ceiling`, `check_policy`, `scope_permissions`, `review_transport`, `headless_timeout_minutes`, `worktree_root`, `worktree_setup`, `warm_max`, `warm_context_tokens`, `plan_first`, `acceptance`, `accept_checks` |
 | `[providers.<name>]` | `enabled`, `placeholder`, `extends`, `bin`, `bin_aliases`, `launch`, `profiles`, `session`, `resume`, `quit`, `login`, `login_ok`, `account_env`, `env`, `trust`, `models`, `model_config`, `default_home`, `model_note`, `models_allow`, `model_families`, `family_prefixes`, `efforts`, `family`, `plugins`, `max`, `tiers`, `hooks`, `signals`, `headless`, `review_transport`, `add_dir` |
 | `[providers.<name>.tiers.<tier>]` | `model`, `effort`, `family` (any tier name) |
 | `[providers.<name>.profiles.<role>]` | `args`, `level`; the roles are `worker` and `review` |

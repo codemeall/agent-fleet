@@ -44,6 +44,8 @@ If the allowed pool cannot provide a known different-family reviewer, tell the o
 
 The review sequence is in the skill's step 5. Review-only is a prompt contract in a shared checkout, not a security sandbox: inspect for unauthorized changes. Dependents remain blocked until the writer is verified.
 
+Under `acceptance = "strict"`, the default for new runs, accept also refuses a ticket whose latest review lists an open high or medium finding, until a re-review no longer lists it; only the owner's words accept it regardless ([the quality bar](commands.md#the-quality-bar)).
+
 ## Fan-out
 
 `fanout` on an `investigate` ticket runs one investigator per model family on the same question ([plan](commands.md#fan-out)). Use it only for heavy or uncertain questions: a hard bug with competing hypotheses, a design question where one model's blind spot would be costly, or a finding you would otherwise doubt. It multiplies cost: each entry is a full investigator session, plus a judge when you launch one. For a routine question, one investigator is enough.

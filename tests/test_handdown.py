@@ -11,6 +11,12 @@ RUN = ".fleet/runs/demo"
 
 
 class HandDown(RuntimeCase):
+    def setUp(self):
+        super().setUp()
+        # Written before the quality bar: these tests cover verify and accept's mechanics with header-less
+        # reports, so their runs start under acceptance = "warn". tests/test_quality_bar.py covers "strict".
+        self.cfg["defaults"]["acceptance"] = "warn"
+
     def prompt_text(self, ticket="02"):
         return (self.repo / RUN / "prompts" / f"{ticket}.md").read_text()
 

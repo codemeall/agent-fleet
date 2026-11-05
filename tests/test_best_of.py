@@ -380,11 +380,44 @@ class BestOfAccept(BestOfCase):
         self.launched()
         self.both_back()
         self.judged(pick=None, why="neither handles an empty file")
-        out = self.accept("--pick", "api--writer")
+        # Under the strict bar (#53) keeping a writer against the verdict needs the owner's words.
+        out = self.accept("--pick", "api--writer", "--accept-anyway", "the owner keeps the writer's version")
         self.assertIn("NOTE api--writer is kept against judge-api's verdict", out)
         self.assertEqual((self.repo / "api.txt").read_text(), "ok from writer\n")
         self.assertTrue(any("(judge judge-api (google) recommended neither)" in d
                             for d in self.state()["decisions"]))
+
+    def test_strict_keeps_only_the_judges_pick_unless_the_owner_says_otherwise(self):
+        self.launched()
+        self.both_back()
+        self.judged(pick=None, why="neither handles the empty case")
+        out = self.accept("--pick", "api--writer", expected=1)
+        self.assertIn("judge-api recommends neither writer", out)
+        self.assertIn("--accept-anyway", out)
+        self.assertEqual(self.state()["tickets"]["api"]["status"], "pending")  # nothing was stopped or verified
+        self.write_report("judge-api", pick="api--reviewer", why="it adds a test")
+        out = self.accept("--pick", "api--writer", expected=1)
+        self.assertIn("judge-api picked api--reviewer, not api--writer", out)
+        out = self.accept("--pick", "api--writer", "--accept-anyway", "the owner prefers the smaller diff")
+        self.assertIn("accepted regardless of the quality bar, by the owner's words", out)
+        self.assertEqual(self.state()["tickets"]["api"]["status"], "verified")
+        self.assertTrue(any("the owner prefers the smaller diff" in d for d in self.state()["decisions"]))
+
+    def test_strict_refuses_a_kept_writer_whose_own_header_shows_a_failed_check(self):
+        self.launched()
+        self.hand_back("api--writer", "ok from writer\n", checks=[{"run": CHECK, "exit": 1}])
+        self.hand_back("api--reviewer", "ok from reviewer\n")
+        out = self.accept("--pick", "api--writer", expected=1)
+        self.assertIn(f'api--writer: check "{CHECK}" reports exit 1', out)
+        self.assertEqual(self.state()["tickets"]["api"]["status"], "pending")
+
+    def test_accept_checks_run_after_the_picked_merge(self):
+        self.cfg["defaults"]["accept_checks"] = [{"run": "grep -q reviewer api.txt"}]
+        self.launched()
+        self.both_back()
+        out = self.accept("--pick", "api--writer", expected=1)        # the combined tree holds the writer's text
+        self.assertIn("ACCEPT-CHECKS api 0/1 passed in the checkout", out)
+        self.assertIn("api--writer's diff is already in the checkout's working tree", out)
 
     def test_without_required_review_the_lead_may_pick_without_a_judge(self):
         self.launched()
@@ -408,7 +441,10 @@ class BestOfAccept(BestOfCase):
         out = self.accept("--pick", "api--reviewer", expected=1)
         self.assertIn("judge-api judged an earlier diff of api--reviewer; judge again: fleet judge demo api", out)
         (self.tree("api--reviewer") / "api.txt").write_text("ok from reviewer\nand a test\n")
-        out = self.accept("--pick", "api--reviewer")
+        # The judge picked api--writer; keeping the other writer is below the strict bar (#53) without the owner.
+        self.assertIn("judge-api picked api--writer, not api--reviewer",
+                      self.accept("--pick", "api--reviewer", expected=1))
+        out = self.accept("--pick", "api--reviewer", "--accept-anyway", "the owner wants the version with a test")
         self.assertIn("api: verified with api--reviewer, judge-api", out)
 
     def test_a_merge_conflict_applies_nothing_and_names_the_pick(self):

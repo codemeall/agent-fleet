@@ -11,6 +11,12 @@ from test_runtime import RuntimeCase, fleet  # noqa: E402
 
 
 class ReviewAccept(RuntimeCase):
+    def setUp(self):
+        super().setUp()
+        # Written before the quality bar: these tests cover verify and accept's mechanics with header-less
+        # reports, so their runs start under acceptance = "warn". tests/test_quality_bar.py covers "strict".
+        self.cfg["defaults"]["acceptance"] = "warn"
+
     def quits(self):
         """Like stop_with_receipt, for stops made inside review and accept: quitting a worker writes its receipt."""
         def quit_keys(workspace, surface, items):

@@ -12,9 +12,10 @@ also holds the case's model, effort and checks. Three roles, told apart by the c
   would: init, plan, launch --ready, wait --gate, review, accept --gate, stop, cost. Both print their final
   message the way the real CLI does: one JSON result for Claude, JSONL events for Codex, with usage.
 - Anything else is a worker that Fleet launched in a tmux window. It does not check its launch line (that is
-  tests/test_adapters_smoke.py's job): it finds its Fleet prompt file, a writer applies the edits, a reviewer
-  reports the plan's findings, it writes its report, and it waits for /exit or /quit. A Claude writer also
-  writes a session log under $HOME/.claude, so `fleet cost` reads its tokens as for a real Claude worker.
+  tests/test_adapters_smoke.py's job): it finds its Fleet prompt file, a writer applies the edits and runs the
+  case's checks, a reviewer reports the plan's findings, it writes its report with its `fleet` header, and it
+  waits for /exit or /quit. A Claude writer also writes a session log under $HOME/.claude, so `fleet cost` reads
+  its tokens as for a real Claude worker.
 """
 import json
 import os
@@ -179,7 +180,11 @@ def worker(cli: str, argv: list[str]) -> int:
     review = wid.startswith("review-")
     findings = PLAN.get("review_findings", []) if review else []
     files = [] if review else apply_edits()
-    header = {"files_changed": files, "checks": [], "criteria": [], "questions": [],
+    # A writer runs the case's checks, as its prompt asks, and reports each with its real exit code.
+    checks = [] if review else [{"run": c["run"], "exit": subprocess.run(c["run"], shell=True, capture_output=True,
+                                                                         timeout=c.get("timeout", 300)).returncode}
+                                for c in PLAN["checks"]]
+    header = {"files_changed": files, "checks": checks, "criteria": [], "questions": [],
               "findings": [{"severity": f.get("severity", "low"), "file": f.get("file", ""),
                             "confidence": f.get("confidence", "suspected")} for f in findings]}
     body = "\n".join(f"- {f.get('text', 'a finding')}" for f in findings) or "- No actionable findings."

@@ -71,6 +71,15 @@ review = "cross-heavy"
 # wait until the lead approves it (fleet approve) before it edits anything. "off" (the default) leaves it to each
 # ticket's "plan_first" field. A run keeps the value it was started with.
 # plan_first = "heavy"
+# The quality bar at fleet verify and fleet accept. "strict" (the default) refuses a ticket below it, naming each
+# item: a writer's report without a clean fleet header, an unmet criterion, a failed check, an open question, or a
+# missing, stale or unsettled review. Only your words accept one regardless (--accept-anyway "<your words>"), and
+# they are recorded. "warn" only warns, as before. A run keeps the value it was started with.
+# acceptance = "warn"
+# Combined-tree checks fleet accept runs in this checkout, after a worktree ticket's merge and before anything is
+# verified; a failure refuses the ticket. Same shape as a ticket's checks: cwd (default ".") and timeout (seconds,
+# 1 to 3600, default 300) are optional. A passing run is reused while HEAD and the tree are unchanged.
+# accept_checks = [{run = "npm test", cwd = ".", timeout = 900}, {run = "npm run typecheck"}]
 # Set only when you intentionally target a validated cmux workspace:
 # workspace = "workspace:3"
 
