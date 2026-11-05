@@ -167,7 +167,7 @@ None of this changes the owner's HEAD, index or refs. `git stash create` stores 
 fleet plan <run> --file <plan.json>
 ```
 
-Saves every ticket, blocker, exact file list, tier, provider and decision, and validates dependencies, cycles, scopes and assignments. When the review mode requires review of a ticket, plan also checks that some provider in the routing pool could review it: turned on, its review-tier model allowed, a known family different from the writer's. That is `fleet review`'s own test without the capacity part. If none could, it refuses, naming the writer's family, the routing and each provider's reason, and saves nothing; see [routing](routing.md#model-family-and-review-policy) for the owner's ways out. The plan is frozen once a worker launches. The plan format is in [SKILL.md step 2](../SKILL.md#2-save-a-complete-plan). Each ticket may give `task` (inline text) instead of `ticket`, and `kind: "investigate"` for read-only work that owns no files.
+Saves every ticket, blocker, exact file list, tier, provider and decision, and validates dependencies, cycles, scopes and assignments. When the review mode requires review of a ticket, plan also checks that some provider in the routing pool could review it: turned on, its review-tier model allowed, a known family different from the writer's. That is `fleet review`'s own test without the capacity part. If none could, it refuses, naming the writer's family, the routing and each provider's reason, and saves nothing; see [routing](routing.md#model-family-and-review-policy) for the owner's ways out. The plan is frozen once a worker launches. The plan format is in [SKILL.md step 2](../SKILL.md#2-save-a-complete-plan). Each ticket may give `task` (inline text) instead of `ticket`, and `kind: "investigate"` for read-only work that owns no files. `"after": "<id>"` starts the ticket [warm](#warm-workers) in that ticket's session through `launch --ready` and `supervise`'s dispatch. Plan also adds it to the ticket's `blockers`, so the ticket waits for it to be verified whether or not you list it. Plan refuses an `after` that names no other ticket, a heavy or investigate ticket on either side, a different provider, model or effort, an adapter that cannot resume, a worktree run, two tickets after the same one, or a chain longer than `warm_max`.
 
 `checks` is a list that may mix text with two kinds of check object: commands Fleet can run for you, and manual checks for what no command can check:
 
@@ -188,7 +188,7 @@ Every ticket that gives `checks` needs at least one command or manual check, `in
 fleet add <run> --file <tasks.json|->
 ```
 
-Appends tickets to a run, before or after its first launch; `-` reads stdin. Same JSON as `plan`. Saved tickets never change. Each entry gives `ticket` (a local file) or `task` (inline text, written to `.fleet/runs/<run>/tasks/<id>.md`), and may set `kind: "investigate"` for read-only work that owns no files. Its `checks` follow [`plan`](#plan)'s rule: at least one command or manual check, else add refuses (or warns, under `check_policy = "warn"`). A new ticket whose files overlap an unverified ticket must list it in `blockers`, except in a [worktree run](#worktree-isolation). Like `plan`, it refuses a ticket whose required review no provider in the pool could give. Added tickets show as `+<id>` in `resume`; added decisions end with `(added <time>)`.
+Appends tickets to a run, before or after its first launch; `-` reads stdin. Same JSON as `plan`. Saved tickets never change. Each entry gives `ticket` (a local file) or `task` (inline text, written to `.fleet/runs/<run>/tasks/<id>.md`), and may set `kind: "investigate"` for read-only work that owns no files. Its `checks` follow [`plan`](#plan)'s rule: at least one command or manual check, else add refuses (or warns, under `check_policy = "warn"`). A new ticket whose files overlap an unverified ticket must list it in `blockers`, except in a [worktree run](#worktree-isolation). Like `plan`, it refuses a ticket whose required review no provider in the pool could give. An `after` follows `plan`'s rules and may name a saved ticket, verified or not. Added tickets show as `+<id>` in `resume`; added decisions end with `(added <time>)`.
 
 **Use:** for delegation from the conversation and new work in a live run ([delegation](delegation.md)). To give an existing ticket another file, use [`grant`](#grant).
 
@@ -254,7 +254,7 @@ A ticket's prompt (not a reviewer's) also gets a "Since this ticket was planned"
 
 ```text
 fleet launch <run> <id> <provider> --tier heavy|standard|light|review
-             [--model <m>] [--effort <e>] [--family <f>] [--pane <ref|uuid|index>] [--resume]
+             [--model <m>] [--effort <e>] [--family <f>] [--pane <ref|uuid|index>] [--resume | --after <verified-id>]
              [--settle <seconds>] [--extra-round <owner's words>]
 fleet launch <run> --ready [--pane <ref|uuid|index>]
 ```
@@ -275,15 +275,45 @@ screen after 5s:
     1. Yes, proceed
 ```
 
-`--ready` launches every ticket that can start now, heaviest first: never launched, blockers verified, files clear of running work, a complete prompt (written for it when the plan has `context` and `checks`), and room under `max_parallel` and the provider's `max` (the steered provider's, under a steer). It prints `LAUNCHED <id> <provider>:<model>[@<effort>] <tier> <surface>` or `SKIPPED <id>: <reason>` per ticket (`pane limit` when every pane has a live worker), `NONE ready` when nothing started, and no worker screens. If a launch fails after cmux was asked for a pane, it stops there, lists the tickets it did not attempt, and asks you to inspect that worker first. It takes no ticket, provider, pins, `--settle` or `--extra-round`, and never launches reviewers.
+`--ready` launches every ticket that can start now, heaviest first: never launched, blockers verified, files clear of running work, a complete prompt (written for it when the plan has `context` and `checks`), and room under `max_parallel` and the provider's `max` (the steered provider's, under a steer). A ticket with a planned `after` starts [warm](#warm-workers), or is skipped with the rule that stops it. It prints `LAUNCHED <id> <provider>:<model>[@<effort>] <tier> <surface>` or `SKIPPED <id>: <reason>` per ticket (`pane limit` when every pane has a live worker), `NONE ready` when nothing started, and no worker screens. If a launch fails after cmux was asked for a pane, it stops there, lists the tickets it did not attempt, and asks you to inspect that worker first. It takes no ticket, provider, pins, `--settle`, `--extra-round` or `--after`, and never launches reviewers.
 
 - `--pane` (cmux only) picks the pane to split, replace or add a tab to.
 - `--family` names the model family when an account-specific model isn't recognized.
 - `--resume` continues the stopped worker's own session (same provider and account, adapters with `resume` such as Claude), for example after a usage limit resets.
+- `--after <verified-id>` hands this ticket to the session that did a verified ticket ([warm workers](#warm-workers)). It cannot be combined with `--resume`.
 - `--settle` sets the seconds before the screen is printed (default 5, at most 30; 0 skips it).
 - `--extra-round` allows one more round once the ticket's review rounds are used up, in the owner's words ([review rounds](#review-rounds)).
 
 **Use:** for each ready ticket, and with `--tier review` for a reviewer you launch yourself ([`review`](#review) launches one for you). Read the printed screen; `wait` covers a prompt that appears later.
+
+### Warm workers
+
+`fleet launch <run> <id> <provider> --tier <tier> --after <verified-id>` hands ticket `<id>` to the CLI session that did `<verified-id>`, through the adapter's `resume` fragment. The worker keeps what it already read. Its first line says the earlier ticket is closed, names the new prompt, inbox and report, and says that the new ticket's rules and files replace the old ones:
+
+```text
+Fleet ticket api-client is closed: it was verified, so leave its work as it is. You are now fleet worker api-retry. Read /repo/.fleet/runs/demo/prompts/api-retry.md and follow it exactly: its rules and files replace api-client's, and you may edit only the files it names. Read /repo/.fleet/runs/demo/inbox/api-retry.md if it exists: it holds the lead's messages. Write your report to /repo/.fleet/runs/demo/reports/api-retry.md.
+```
+
+Launch refuses, saying which rule, unless:
+
+- the earlier ticket is verified and its worker's exit is confirmed;
+- the earlier ticket is an implement ticket: a reviewer's or investigator's session is never continued, and a reviewer of the earlier ticket always had a session of its own;
+- the new ticket is an implement ticket, `light` or `standard`;
+- the adapter is resumable (Claude today; [Codex is not](providers.md#codex));
+- the provider (so the account), model and effort match the earlier worker's, after any steer;
+- no other ticket has already continued that session: chain the next one after the latest;
+- the session's chain stays within `[defaults] warm_max` tickets (default 4, the first ticket included);
+- the run is shared. In a [worktree run](#worktree-isolation) the session lived in a tree that `accept` removed, and Claude finds sessions by their folder.
+
+When the earlier session's log can be read (a Claude worker's, as `fleet context` reads it), launch warns on stderr when its context is above `[defaults] warm_context_tokens` (default 150000). It never refuses on size alone.
+
+Everything else is the new ticket's own: its prompt, report, inbox, hooks settings and scope file, which hold its files only. The earlier ticket's report and evidence are untouched. The worker record and the [ledger](#cost) entry get `warm_after: <verified-id>` and `warm_chain`, the ticket's place in the session (2 for the first warm ticket). `launch --resume` of a warm ticket continues the same session and keeps the marks.
+
+If the resume fails, for example the CLI exits with "No conversation found", `wait` reports the exit as usual. Relaunch the ticket fresh, without `--after`.
+
+A plan's `after` does the same through `launch --ready` and `supervise`'s dispatch ([plan](#plan)). When a planned ticket cannot start warm (a steer moved it to another provider, say), `--ready` skips it with the reason; launch it yourself without `--after` to start it fresh.
+
+**Use:** for a light or standard follow-up in the same files or area as a ticket the same worker just finished ([routing](routing.md#warm-workers)).
 
 ### peek
 
@@ -448,7 +478,7 @@ total: 3 workers, 1 running, wall 41m, tokens in 41.2K out 9.8K cache-read 2100K
 caps: max_workers 3/10, max_wall_minutes 41m (no cap)
 ```
 
-The ledger lives in `run.json`, one entry per launch: ticket, role (`writer`, `reviewer` or `investigator`), provider, model, effort, tier, start, end and wall seconds. A relaunch or `--resume` adds an entry and never changes an earlier one. The end is the exit receipt's time, or the time of a `recover`; a running worker's wall time counts up to now. Tokens are read once the exit is confirmed, for a Claude worker only: from its own session log (found by its session ID under the adapter's `CLAUDE_CONFIG_DIR`, else `~/.claude`), its subagents included, summing input, output, cache-read and cache-write counts; a resumed session counts only the calls made during that launch. Every other worker's tokens are `unknown`, never zero, unless its CLI reported usage itself: a [headless](providers.md#headless-reviewers) run's runner saves the usage its CLI printed in `.fleet/runs/<run>/usage/`, and the next command that reconciles the run records it (`tokens_source: reported`); one whose CLI printed none stays `unknown`. A run started before the ledger gets an entry for each worker's latest launch. `--json` prints the per-ticket groups, totals, caps and every ledger entry.
+The ledger lives in `run.json`, one entry per launch: ticket, role (`writer`, `reviewer` or `investigator`), provider, model, effort, tier, start, end and wall seconds. A relaunch or `--resume` adds an entry and never changes an earlier one. A [warm](#warm-workers) launch's entry also has `warm_after` and `warm_chain`, and shares its session with the earlier ticket's; each entry counts only its own launch's calls. The end is the exit receipt's time, or the time of a `recover`; a running worker's wall time counts up to now. Tokens are read once the exit is confirmed, for a Claude worker only: from its own session log (found by its session ID under the adapter's `CLAUDE_CONFIG_DIR`, else `~/.claude`), its subagents included, summing input, output, cache-read and cache-write counts; a resumed session counts only the calls made during that launch. Every other worker's tokens are `unknown`, never zero, unless its CLI reported usage itself: a [headless](providers.md#headless-reviewers) run's runner saves the usage its CLI printed in `.fleet/runs/<run>/usage/`, and the next command that reconciles the run records it (`tokens_source: reported`); one whose CLI printed none stays `unknown`. A run started before the ledger gets an entry for each worker's latest launch. A session that more than one ticket used prints as a chain line after the tickets, such as `chain api-client -> api-retry: one claude session, 2 tickets, 2 launches`. `--json` prints the per-ticket groups, totals, caps, the chains and every ledger entry.
 
 **Use:** when reporting a wave's outcome to the owner, and when a launch is refused at a cap.
 

@@ -18,6 +18,22 @@ The skill's step 2 says when to use `heavy`, `standard` and `light`. `review` is
 
 Take consequential work first, balance ready providers without exceeding global or provider caps, and queue remaining tickets. Never raise caps merely to avoid waiting. Waves require satisfied blockers and disjoint exact file scopes. A `needs-verification` report does not free a slot: the process must exit.
 
+## Warm workers
+
+A warm worker takes a follow-up ticket in the session that did an earlier one, so it does not reread the same repo instructions, spec and code. Plan it with `"after": "<id>"`, or launch with `--after <verified-id>` ([warm workers](commands.md#warm-workers)).
+
+Keep a worker warm when:
+
+- the follow-up is `light` or `standard`, and works in the same files or area as the earlier ticket;
+- both tickets run on the same provider, model and effort, on an adapter that can resume (Claude);
+- the run is shared, not a worktree run.
+
+Start fresh instead for heavy work, for a different area, and when launch warns that the earlier session is past `warm_context_tokens` (150000 by default): context only grows, and answers degrade well before the window is full.
+
+`warm_max` (default 4) caps the tickets one session takes, the first included. Claude Code's docs suggest 5–6 tasks per teammate; the cap stays below that because each ticket also brings its prompt, checks and review fixes. Past the cap, start the next ticket fresh; it can start a new chain.
+
+A warm ticket still waits for the earlier one to be verified, and its reviewer is a separate session, as for any ticket. If its resume fails, relaunch it fresh without `--after`.
+
 ## Model family and review policy
 
 `cross-heavy` (default) requires a different-family reviewer for each heavy implementation ticket. `cross-all` requires one for every ticket; `off` means lead verification alone. Record the chosen mode at run creation.

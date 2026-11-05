@@ -195,6 +195,8 @@ The default `claude` adapter uses the normal account and interactive permission 
 
 Claude workers start with `--session-id` set to a UUID Fleet records, so `fleet launch --resume` can continue the same conversation with `--resume` after a usage limit resets. A session stays with the account that ran it. Other adapters can opt in through the `session` and `resume` fields in `providers.toml`.
 
+A [warm worker](commands.md#warm-workers) (`fleet launch --after <id>`) uses the same fragment on the earlier writer's session. The line is `claude --resume <its session> --model <m> --effort <e> --settings <new ticket's settings> <continuation line>`, and the continuation line names the new ticket's prompt, inbox and report. `claude-co` works the same way inside its own account. Claude keeps a session's log under the folder it ran in, so Fleet allows this only in a shared run.
+
 ## Claude hooks
 
 The `claude` adapter (and `claude-co`, which `extends` it) sets `hooks = "claude-settings"`. Each launch, `--resume` included, then writes `.fleet/runs/<run>/settings/<id>.json` and passes `--settings <path>` through the launch line's `{settings}` slot. Claude layers that file above the account's and the project's own settings and merges lists, so its hooks and rules add to the owner's ([settings precedence](https://code.claude.com/docs/en/settings#settings-precedence)). It holds:
@@ -267,6 +269,8 @@ An older copy of this line that spells out `-s workspace-write -a on-request` in
 
 This is approval routing inside Codex. It is unrelated to Fleet's cross-family review of a ticket's diff, which `review=` controls.
 
+Codex workers have no `session` or `resume`, so `launch --resume` and [warm workers](commands.md#warm-workers) (`launch --after`) refuse them. Codex can resume a session by its ID (`codex resume <SESSION_ID> [PROMPT]`), but it picks that ID itself: no public flag names a new session at launch, so Fleet cannot record one. Checked in the source of `openai/codex` at `main` commit `49f0c60` (2026-11-05): `codex-rs/cli/src/main.rs` (`ResumeCommand`) and `codex-rs/tui/src/cli.rs` (`resume_session_id` is internal and set only by `codex resume`). Codex is not installed here and its docs site was blocked from this session, so neither `codex --help` nor the docs were read.
+
 Use model IDs and effort levels supported by the authenticated account. The shipped OpenAI IDs are examples. Model changes must be reflected in the plan and recorded worker metadata; do not silently switch a running worker's model in its UI and leave routing records stale.
 
 ## Cursor
@@ -326,7 +330,7 @@ For every new adapter, test a harmless local ticket, multiple waves, a required 
 | Section | Keys |
 | --- | --- |
 | Top level | `defaults`, `providers`, `lead_context` |
-| `[defaults]` | `workspace`, `routing`, `prefer`, `max_parallel`, `review`, `review_rounds`, `gate`, `gate_rounds`, `supervise`, `auto_trust`, `backend`, `tmux_socket`, `max_workers`, `max_wall_minutes`, `scope_ignore`, `permission_ceiling`, `check_policy`, `scope_permissions`, `review_transport`, `headless_timeout_minutes`, `worktree_root`, `worktree_setup` |
+| `[defaults]` | `workspace`, `routing`, `prefer`, `max_parallel`, `review`, `review_rounds`, `gate`, `gate_rounds`, `supervise`, `auto_trust`, `backend`, `tmux_socket`, `max_workers`, `max_wall_minutes`, `scope_ignore`, `permission_ceiling`, `check_policy`, `scope_permissions`, `review_transport`, `headless_timeout_minutes`, `worktree_root`, `worktree_setup`, `warm_max`, `warm_context_tokens` |
 | `[providers.<name>]` | `enabled`, `placeholder`, `extends`, `bin`, `bin_aliases`, `launch`, `profiles`, `session`, `resume`, `quit`, `login`, `login_ok`, `account_env`, `env`, `trust`, `models`, `model_config`, `default_home`, `model_note`, `models_allow`, `model_families`, `family_prefixes`, `efforts`, `family`, `plugins`, `max`, `tiers`, `hooks`, `headless`, `review_transport`, `add_dir` |
 | `[providers.<name>.tiers.<tier>]` | `model`, `effort`, `family` (any tier name) |
 | `[providers.<name>.profiles.<role>]` | `args`, `level`; the roles are `worker` and `review` |

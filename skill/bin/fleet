@@ -79,8 +79,14 @@ DEFAULTS = {
     # then agent-fleet/worktrees), and a shell command run in each new tree before its worker starts ("": none).
     "worktree_root": "",
     "worktree_setup": "",
+    # Warm workers (launch --after, plan "after"): tickets one CLI session may take in a row, and the earlier
+    # session's context size above which launch warns (it never refuses on size alone).
+    "warm_max": 4,
+    "warm_context_tokens": 150000,
 }
 CHECK_POLICIES = ("refuse", "warn")
+WARM_KEYS = ("warm_max", "warm_context_tokens")
+WARM_TIERS = ("light", "standard")  # a heavy ticket starts fresh: a warm session already carries a full context
 STATUS_RE = re.compile(r"^\s*[*_`]*\s*status\s*[*_`]*\s*:\s*[*_`]*\s*(.+?)\s*[*_`]*\s*$", re.I)
 SURFACE_RE = re.compile(r"(surface:\d+)(?: \(([^)\s]+)\))?")  # the UUID follows when cmux is asked for both
 WORKSPACE_REF_RE = re.compile(r"workspace:\d+\Z")
@@ -217,6 +223,10 @@ def load_config(user_path: Path | None = None) -> dict:
     if not isinstance(cfg["defaults"]["supervise"], list):
         raise FleetError(f"defaults.supervise must be a list drawn from {', '.join(SUPERVISE_STEPS)}")
     supervise_steps(cfg["defaults"]["supervise"], "defaults.supervise")
+    for key in WARM_KEYS:
+        value = cfg["defaults"][key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise FleetError(f"defaults.{key} must be a positive whole number")
     for key in CAP_KEYS:
         cap = cfg["defaults"][key]
         if isinstance(cap, bool) or not isinstance(cap, int) or cap < 0:
@@ -2025,6 +2035,8 @@ def ledger_entry(state: dict, wid: str, w: dict, resume: bool = False, log_home:
          "tokens": None}
     if w.get("session"):
         e["session"] = w["session"]
+    if w.get("warm_after"):  # launched with --after: the session continued, and the ticket's place in its chain
+        e["warm_after"], e["warm_chain"] = w["warm_after"], w.get("warm_chain")
     if log_home:
         e["log_home"] = log_home
     return e
@@ -2238,7 +2250,8 @@ def run_cost(state: dict, now: float | None = None) -> dict:
     for e in entries:
         tickets.setdefault(e["ticket"], []).append(e)
     return {"run": state["run"], "tickets": {i: cost_group(state, es, now) for i, es in tickets.items()},
-            "totals": cost_group(state, entries, now), "caps": cap_use(state, now), "ledger": entries}
+            "totals": cost_group(state, entries, now), "caps": cap_use(state, now), "chains": warm_chains(entries),
+            "ledger": entries}
 
 
 def cmd_cost(a, cfg):
@@ -2256,6 +2269,9 @@ def cmd_cost(a, cfg):
         print(f"  {i:<12} {cost_line(g)}")
     if not c["tickets"]:
         print("  (no worker launched yet)")
+    for chain in c["chains"]:  # warm workers: tickets that one writer's CLI session took in turn (launch --after)
+        print(f"  chain {' -> '.join(chain['tickets'])}: one {chain['provider']} session, "
+              f"{len(chain['tickets'])} tickets, {chain['launches']} launches")
     print(f"total: {cost_line(c['totals'])}")
     print(caps_text(c["caps"]))
     if c["totals"]["tokens_unknown"]:
@@ -2573,6 +2589,7 @@ def cmd_plan(a, cfg):
             texts[t["id"]] = text
     if not tickets:
         raise FleetError("plan must contain at least one ticket")
+    plan_after(state, cfg, tickets, list(tickets))
     check_graph(tickets)
     check_reviewable(cfg, state, pool, tickets)
     write_tasks(d, texts)
@@ -2617,6 +2634,7 @@ def cmd_add(a, cfg):
     if not added:
         raise FleetError("add needs at least one ticket")
     tickets = {**state["tickets"], **added}
+    plan_after(state, cfg, tickets, list(added))
     check_graph(tickets)
     check_reviewable(cfg, state, pool, added)
     for i, t in added.items():
@@ -3051,6 +3069,179 @@ def cmd_prompt(a, cfg):
             print(f"fill before launch: {', '.join(todo)} (or add them to the plan)")
 
 
+# ---------- warm workers ----------
+# `launch --after <id>` (or a planned "after") hands a light or standard ticket to the CLI session that did a verified
+# ticket, through the adapter's `resume`, so the worker keeps what it already read. Only a writer's session is
+# continued, one ticket at a time, in a shared run, on the same provider, model and effort, up to warm_max tickets.
+# The new ticket gets its own prompt, report, inbox and hooks scope; the earlier ticket's records are never touched.
+
+def warm_prompt_line(prompt_path: Path, ticket_id: str, after: str, report: Path, inbox: Path) -> str:
+    return (f"Fleet ticket {after} is closed: it was verified, so leave its work as it is. You are now fleet worker "
+            f"{ticket_id}. Read {prompt_path} and follow it exactly: its rules and files replace {after}'s, and you "
+            f"may edit only the files it names. Read {inbox} if it exists: it holds the lead's messages. Write your "
+            f"report to {report}.")
+
+
+def warm_route_text(name: str, model: str, effort: str | None) -> str:
+    return f"{name}:{model}" + (f"@{effort}" if effort else "")
+
+
+def warm_setting(state: dict, cfg: dict, key: str) -> int:
+    """warm_max or warm_context_tokens: the run's value (a run keeps the one it was started with)."""
+    return state["options"].get(key, cfg["defaults"].get(key, DEFAULTS[key]))
+
+
+def warm_route(state: dict, cfg: dict, i: str, after: str, name: str, model: str, effort: str | None,
+               tier: str) -> dict:
+    """The session ticket `i` would continue with --after `after`, on this provider, model, effort and tier, and its
+    place in the session's chain. Refuses, naming the rule, whatever Fleet cannot hand over safely."""
+    why = f"{i} cannot continue {after}'s session (--after {after})"
+    if after == i:
+        raise FleetError(f"{why}: a ticket cannot follow itself")
+    if isolated(state):
+        raise FleetError(f"{why}: this is a worktree run. {after}'s session ran in a tree that accept removed, and "
+                         "Claude finds sessions by their folder; launch without --after")
+    t = state["tickets"].get(i)
+    if t is None or t.get("kind", "implement") != "implement":
+        raise FleetError(f"{why}: only an implement ticket continues a writer's session, and {i} is "
+                         f"{'a reviewer' if t is None else 'an investigate ticket'}")
+    if tier not in WARM_TIERS:
+        raise FleetError(f"{why}: {i} is a {tier} ticket; only {' or '.join(WARM_TIERS)} tickets start warm, "
+                         "because the session already carries the earlier ticket's context. Launch without --after")
+    earlier = state["tickets"].get(after)
+    if earlier is None:
+        if (state["prompts"].get(after) or state["workers"].get(after) or {}).get("review_of"):
+            raise FleetError(f"{why}: {after} is a reviewer; only a writer's session is continued")
+        raise FleetError(f"{why}: no ticket '{after}' in this run")
+    if earlier.get("kind", "implement") != "implement":
+        raise FleetError(f"{why}: {after} is an investigate ticket; only a writer's session is continued")
+    if earlier["status"] != "verified":
+        raise FleetError(f"{why}: {after} is {earlier['status']}, not verified; accept or verify it first")
+    w = state["workers"].get(after)
+    if not w:
+        raise FleetError(f"{why}: {after} never had a worker, so there is no session to continue")
+    if w.get("state") in ACTIVE_STATES:
+        raise FleetError(f"{why}: {after}'s worker exit is not confirmed ({w['state']}); stop it or recover it first")
+    pcfg = provider(cfg, name)
+    if not resumable(pcfg):
+        raise FleetError(f"{why}: {name}'s adapter cannot resume a session (it needs a {{session}} slot and "
+                         "session/resume fields); launch without --after")
+    if not w.get("session") or w.get("transport") == HEADLESS:
+        raise FleetError(f"{why}: {after}'s worker ran on {w['provider']} without a session Fleet named, so "
+                         "there is none to continue; launch without --after")
+    if (name, model, effort) != (w["provider"], w["model"], w.get("effort")):
+        raise FleetError(f"{why}: its session ran {warm_route_text(w['provider'], w['model'], w.get('effort'))}, "
+                         f"and {i} would run {warm_route_text(name, model, effort)}; a session continues only on the "
+                         "same provider (account), model and effort. Launch without --after")
+    later = sorted(x["id"] for x in state["workers"].values() if x.get("session") == w["session"]
+                   and x["id"] not in (after, i) and (x.get("launched_at") or 0) >= (w.get("launched_at") or 0))
+    if later:
+        raise FleetError(f"{why}: {', '.join(later)} already continued that session; a session takes one ticket "
+                         f"at a time, so use --after {later[-1]} once it is verified, or launch without --after")
+    chain, cap = w.get("warm_chain", 1) + 1, warm_setting(state, cfg, "warm_max")
+    if chain > cap:
+        raise FleetError(f"{why}: {i} would be ticket {chain} in one session, over warm_max {cap}; "
+                         "launch without --after to start fresh")
+    return {"after": after, "session": w["session"], "chain": chain, "home": usage_home(pcfg)}
+
+
+def warm_context(warm: dict) -> int | None:
+    """Tokens in the earlier session's context at its latest call, read as `fleet context` reads a Claude log;
+    None when its log cannot be found or read."""
+    if not warm.get("home") or not SESSION_ID_RE.match(warm["session"]):
+        return None
+    for log in Path(warm["home"]).glob(f"projects/*/{warm['session']}.jsonl"):
+        try:
+            return context_tokens("claude", log)
+        except OSError:
+            return None
+    return None
+
+
+def warm_launch(state: dict, cfg: dict, a, model: str, effort: str | None) -> dict:
+    """launch_one's check for --after, before any side effect; warns when the session is already large."""
+    warm = warm_route(state, cfg, a.id, a.after, a.provider, model, effort, a.tier)
+    size, limit = warm_context(warm), warm_setting(state, cfg, "warm_context_tokens")
+    if size is not None and size > limit:
+        print(f"warning: {a.after}'s session already holds about {kilo(size)} tokens of context, above "
+              f"warm_context_tokens {kilo(limit)}, and {a.id} starts with all of it. Launched anyway; a fresh "
+              "launch (without --after) starts small", file=sys.stderr)
+    return warm
+
+
+def ready_warm(state: dict, cfg: dict, live: dict, i: str) -> str | None:
+    """Why launch --ready cannot start ticket `i` warm after its planned `after` now, on its saved route or the
+    steer; None when it can. launch_one checks again inside the launch."""
+    t = state["tickets"][i]
+    route = argparse.Namespace(provider=t["provider"], model=t["model"], effort=t["effort"], family=None)
+    apply_steer(route, live)
+    try:
+        model, effort = resolve_model(provider(cfg, route.provider), t["tier"], route.model, route.effort)
+        warm_route(state, cfg, i, t["after"], route.provider, model, effort, t["tier"])
+    except FleetError as e:
+        return f"{e}; to start it fresh, launch it yourself without --after"
+    return None
+
+
+def plan_after(state: dict, cfg: dict, tickets: dict, new: list[str]) -> None:
+    """Check each new ticket's planned `after` and make it a blocker too, so the ticket waits for the earlier one to
+    be verified whether or not the plan lists it. What only launch can know (a confirmed exit, the session, a
+    steer, the context size) is checked again at launch."""
+    for i in new:
+        t = tickets[i]
+        if "after" not in t:
+            continue
+        after = t["after"]
+        why = f"{i}: after {json.dumps(after)}"
+        if not isinstance(after, str) or after not in tickets or after == i:
+            raise FleetError(f"{why} must name another ticket of this run")
+        if isolated(state):
+            raise FleetError(f"{why}: a worktree run cannot keep a worker warm, because each ticket's session ends "
+                             "with its tree; drop after")
+        earlier = tickets[after]
+        if t["kind"] != "implement" or earlier.get("kind", "implement") != "implement":
+            raise FleetError(f"{why}: both tickets must be implement tickets; only a writer's session is continued")
+        if t["tier"] not in WARM_TIERS:
+            raise FleetError(f"{why}: {i} is {t['tier']}; only {' or '.join(WARM_TIERS)} tickets start warm")
+        if not resumable(provider(cfg, t["provider"])):
+            raise FleetError(f"{why}: {t['provider']}'s adapter cannot resume a session")
+        if (t["provider"], t["model"], t["effort"]) != (earlier["provider"], earlier["model"], earlier["effort"]):
+            raise FleetError(f"{why}: a session continues only on the same provider, model and effort, and {i} "
+                             f"plans {warm_route_text(t['provider'], t['model'], t['effort'])} while {after} plans "
+                             f"{warm_route_text(earlier['provider'], earlier['model'], earlier['effort'])}")
+        twin = next((j for j, o in tickets.items() if j != i and o.get("after") == after), None)
+        if twin:
+            raise FleetError(f"{why}: {twin} already follows {after}, and a session takes one ticket at a time; "
+                             f"chain {i} after {twin} instead")
+        if after not in t["blockers"]:
+            t["blockers"] = [*t["blockers"], after]
+    cap = warm_setting(state, cfg, "warm_max")
+    for i in new:  # the chain each new ticket ends, counted back through planned `after`s
+        n, j, seen = 1, i, {i}
+        while tickets[j].get("after") in tickets and tickets[j]["after"] not in seen:
+            j = tickets[j]["after"]
+            seen.add(j)
+            n += 1
+        if n > cap:
+            raise FleetError(f"{i}: its after chain holds {n} tickets, over warm_max {cap} per session; "
+                             "start one of them fresh (no after)")
+
+
+def warm_chains(entries: list[dict]) -> list[dict]:
+    """Writer sessions that more than one ticket used, tickets in launch order, from the ledger."""
+    sessions: dict[str, list[dict]] = {}
+    for e in entries:
+        if e.get("session") and e.get("role") == "writer":
+            sessions.setdefault(e["session"], []).append(e)
+    chains = []
+    for session, es in sessions.items():
+        tickets = list(dict.fromkeys(e["ticket"] for e in sorted(es, key=lambda e: e.get("start") or 0)))
+        if len(tickets) > 1:
+            chains.append({"session": session, "provider": es[0].get("provider"), "tickets": tickets,
+                           "launches": len(es)})
+    return chains
+
+
 def stale_handdown(meta: dict, t: dict) -> list[str]:
     """Blockers verified since the prompt was written, so missing from its hand-down. A prompt written by an
     earlier Fleet recorded none, and had no hand-down to go stale."""
@@ -3097,6 +3288,8 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     w = state["workers"].get(a.id)
     if w and w.get("state") in ACTIVE_STATES:
         raise FleetError(f"worker {a.id} may still be running on {w['surface']}; stop or recover it first")
+    if a.resume and getattr(a, "after", None):
+        raise FleetError(f"--resume continues {a.id}'s own session and --after hands it {a.after}'s; pass one")
     if a.resume and profile == HEADLESS:
         raise FleetError(f"{a.id} runs headless on {a.provider}: a one-shot run has no session to resume; "
                          "relaunch without --resume")
@@ -3109,7 +3302,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         if not resumable(pcfg):
             raise FleetError(f"{a.provider}'s adapter cannot resume: its launch needs a {{session}} slot and "
                              "session/resume fields; relaunch without --resume")
-    session = w["session"] if a.resume else str(uuid.uuid4()) if resumable(pcfg) and profile != HEADLESS else None
+    session =w["session"] if a.resume else str(uuid.uuid4()) if resumable(pcfg) and profile != HEADLESS else None
     running = active(state)
     if len(running) >= state["options"]["max_parallel"]:
         raise FleetError("max_parallel reached; stop and confirm an existing worker's exit first")
@@ -3178,6 +3371,9 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         assert_scope_idle(state, t["files"], meta["review_of"])
         if digest(scoped_diff(repo, state, meta["review_of"]).encode()) != meta["diff_sha"]:
             raise FleetError("review snapshot is stale; regenerate diff and prompt")
+    warm = warm_launch(state, cfg, a, model, effort) if getattr(a, "after", None) else None
+    if warm:  # the earlier writer's session, continued through the adapter's resume
+        session = warm["session"]
     # Place before any side effect: a refused placement must not freeze a baseline or move the report.
     term = terminal(state)
     place = term.place(state, a.pane)
@@ -3199,6 +3395,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
             report.replace(d / "reports" / f"{a.id}.{uuid.uuid4().hex}.previous")
         token = uuid.uuid4().hex
         line = (resume_prompt_line(prompt_path, a.id, report, inbox_path(repo, a.run, a.id)) if a.resume
+                else warm_prompt_line(prompt_path, a.id, warm["after"], report, inbox_path(repo, a.run, a.id)) if warm
                 else worker_prompt_line(prompt_path, a.id))
         hooks = None
         if hooks_on(pcfg, profile):  # a worker writes its own files; a reviewer or investigator only its report
@@ -3208,7 +3405,8 @@ def launch_one(a, cfg) -> tuple[str, dict]:
                                 t.get("commands", []) if worker_role else [])
         trust = prepare_trust(cfg, a.provider, pcfg, repo, () if work == repo else (work,))
         trust = " ".join(x for x in (trust, tree_launch_args(repo, state, cfg, a.provider, pcfg, profile, work)) if x)
-        command = build_launch(pcfg, model, effort, line, session, a.resume, trust, profile, hooks and hooks["settings"])
+        command = build_launch(pcfg, model, effort, line, session, a.resume or bool(warm), trust, profile,
+                               hooks and hooks["settings"])
         exit_file = d / "exits" / f"{a.id}.{token}.json"
         headless = {}
         if profile == HEADLESS:  # its runner writes the report, usage and receipt; reconcile records the usage
@@ -3229,7 +3427,10 @@ def launch_one(a, cfg) -> tuple[str, dict]:
             family=family, tier=a.tier, steered=steered, surface="unknown", state="launching", command=command,
             token=token, exit_file=str(exit_file), launched=time.strftime("%Y-%m-%dT%H:%M:%S"),
             launched_at=time.time(),
-            **({"session": session} if session else {}), **headless, **({"hooks": hooks} if hooks else {}))
+            **({"session": session} if session else {}), **headless, **({"hooks": hooks} if hooks else {}),
+            # a warm launch's place in its session's chain; --resume keeps the same session, so it keeps the mark
+            **({"warm_after": warm["after"], "warm_chain": warm["chain"]} if warm else
+               {k: w[k] for k in ("warm_after", "warm_chain") if a.resume and k in w}))
         # Counted before the terminal opens: a failed open is an uncertain launch that may be running, so it holds a
         # launch and wall time, as it holds capacity, until the lead stops or recovers it.
         state.setdefault("ledger", []).append(ledger_entry(state, a.id, state["workers"][a.id], a.resume,
@@ -3258,7 +3459,8 @@ def launch_one(a, cfg) -> tuple[str, dict]:
 
 
 READY_EXCLUSIVE = {"id": "<id>", "provider": "<provider>", "tier": "--tier", "model": "--model",
-                   "effort": "--effort", "family": "--family", "settle": "--settle", "extra_round": "--extra-round"}
+                   "effort": "--effort", "family": "--family", "settle": "--settle", "extra_round": "--extra-round",
+                   "after": "--after"}
 
 
 def ready_tickets(state: dict, live: dict, cfg: dict, prompts: Path,
@@ -3298,6 +3500,8 @@ def ready_tickets(state: dict, live: dict, cfg: dict, prompts: Path,
             why[i] = f"prompt incomplete: fill {', '.join(unfilled)} in {prompt}"
         elif i not in state["prompts"] and not (t.get("context") and t.get("checks")):
             why[i] = "prompt incomplete: the plan has no context or checks; fleet prompt it and fill the LEAD comments"
+        elif t.get("after") and (cold := ready_warm(state, cfg, live, i)):
+            why[i] = cold
         elif slots <= 0:
             why[i] = "capacity (max_parallel)"
         elif load.get(name, 0) >= provider(cfg, name).get("max", 2):
@@ -3331,7 +3535,8 @@ def launch_ready(a, cfg):
     for i in picked:
         t = state["tickets"][i]
         one = argparse.Namespace(run=a.run, id=i, provider=t["provider"], tier=t["tier"], model=t["model"],
-                                 effort=t["effort"], family=t["family"], pane=a.pane, settle=0, resume=False)
+                                 effort=t["effort"], family=t["family"], pane=a.pane, settle=0, resume=False,
+                                 after=t.get("after"))  # a planned `after` starts it warm, as --after would
         try:
             if i not in load_run(repo, a.run)["prompts"]:
                 cmd_prompt(argparse.Namespace(run=a.run, id=i, ticket=None, review_of=None, diff=None, force=False,
@@ -7465,6 +7670,8 @@ def main(argv: list[str] | None = None) -> int:
                    help=f"seconds before launch prints the worker's screen (default {LAUNCH_SETTLE_S}; 0 skips it)")
     s.add_argument("--resume", action="store_true",
                    help="continue the stopped worker's own CLI session (same account), e.g. after a usage limit resets")
+    s.add_argument("--after", metavar="VERIFIED_ID",
+                   help="hand this light or standard ticket to the CLI session that did a verified ticket (warm worker)")
     s.add_argument("--ready", action="store_true",
                    help="launch every ticket that can start now on its saved assignment; no screens are printed")
     s.add_argument("--extra-round", metavar="REASON", help=extra_help)
