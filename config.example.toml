@@ -22,6 +22,13 @@ review = "cross-heavy"
 # Headless workers use Fleet's own tmux server (tmux -L fleet). "" puts their sessions on your default server,
 # so `tmux ls` lists them and, inside tmux, `fleet attach` switches to a worker instead of nesting.
 # tmux_socket = "fleet"
+# Caps per run (0, the default, means no cap). Once a run reaches one, Fleet refuses new workers and the lead brings
+# it to you; running workers are never stopped. A run keeps the values it was started with: raising one here
+# applies to new runs, or start a follow-up run (fleet init) for the remaining work. fleet cost shows the use.
+# max_workers counts every worker launch: writers, reviewers, investigators, relaunches and resumes.
+# max_workers = 20
+# max_wall_minutes sums every worker's wall time, running workers included.
+# max_wall_minutes = 600
 # Paths the whole-tree scope check never blames on a worker, besides .fleet/ and gitignored files. "name/" is a
 # directory at any depth, "a/b/" is anchored at the root, anything else is an exact path. Your list replaces this one.
 # scope_ignore = [".scratch/", "node_modules/", "__pycache__/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/"]

@@ -12,6 +12,7 @@ import difflib
 import fcntl
 import hashlib
 import uuid
+from datetime import datetime
 from contextlib import contextmanager
 import json
 import os
@@ -58,6 +59,8 @@ DEFAULTS = {
     "auto_trust": False,  # the owner's opt-in: mark the repo trusted in each worker CLI before launch
     "backend": "auto",  # cmux (visible panes), tmux (headless) or auto: cmux inside cmux, else tmux
     "tmux_socket": "fleet",  # tmux -L name for headless workers; "" uses your default tmux server
+    "max_workers": 0,  # worker launches per run (writers, reviewers, investigators, relaunches); 0 is no cap
+    "max_wall_minutes": 0,  # summed worker wall time per run, running workers included; 0 is no cap
     # Paths the whole-tree scope check never blames on a worker, besides .fleet/ and gitignored files:
     # "name/" is a directory at any depth ("a/b/" is anchored at the root), anything else an exact path.
     "scope_ignore": [".scratch/", "node_modules/", "__pycache__/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/"],
@@ -124,6 +127,10 @@ def load_config(user_path: Path | None = None) -> dict:
             raise FleetError(f"defaults.{key} must be a whole number from 1 to 5")
     if not isinstance(cfg["defaults"]["gate"], bool):
         raise FleetError("defaults.gate must be true or false")
+    for key in CAP_KEYS:
+        cap = cfg["defaults"][key]
+        if isinstance(cap, bool) or not isinstance(cap, int) or cap < 0:
+            raise FleetError(f"defaults.{key} must be a whole number, or 0 for no cap")
     if not isinstance(cfg["defaults"]["auto_trust"], bool):
         raise FleetError("defaults.auto_trust must be true or false")
     if cfg["defaults"]["backend"] not in ("auto", *BACKENDS):
@@ -930,6 +937,7 @@ def reconcile(repo: Path, state: dict) -> None:
             if data.get("token") == w.get("token"):
                 w["state"] = "exited"
                 w["returncode"] = data["returncode"]
+    ledger_sync(state)
 
 
 def assert_scope_idle(state: dict, files: list[str]) -> None:
@@ -1353,6 +1361,269 @@ def cmd_context(a, cfg):
         print(f"lead context: {kilo(r['tokens'])} tokens, {zone} (warning at {kilo(r['warn_at'])}, "
               f"dumb zone at {kilo(r['dumb_at'])})")
     print(f"session: {r['host']} {r['session'][:8]}  {r['log']}")
+
+
+# ---------- ledger and caps ----------
+# One entry per worker launch, kept in run.json beside the worker records: a relaunch or --resume replaces the
+# worker record but appends an entry, and an entry's end is saved in the same atomic write as the exit it reports.
+
+CAP_KEYS = ("max_workers", "max_wall_minutes")  # [defaults]; 0 is no cap, and a run keeps the values it began with
+USAGE_KEYS = {"input": ("input_tokens", "input"), "output": ("output_tokens", "output"),
+              "cache_read": ("cache_read_input_tokens", "cache_read"),
+              "cache_write": ("cache_creation_input_tokens", "cache_write")}
+USAGE_NAMES = {"input": "in", "output": "out", "cache_read": "cache-read", "cache_write": "cache-write"}
+USAGE_SLACK_S = 5  # a log line stamped just before launch recorded its start still belongs to that launch
+
+
+def ledger_role(state: dict, wid: str, w: dict) -> str:
+    if w.get("role") == "review":
+        return "reviewer"
+    return "investigator" if state["tickets"].get(wid, {}).get("kind") == "investigate" else "writer"
+
+
+def ledger_entry(state: dict, wid: str, w: dict, resume: bool = False, log_home: str | None = None) -> dict:
+    """What one launch cost, from its worker record; end, wall and tokens fill in once its exit is confirmed."""
+    e = {"worker": wid, "ticket": w.get("review_of") or wid, "role": ledger_role(state, wid, w),
+         "provider": w.get("provider"), "model": w.get("model"), "effort": w.get("effort"), "tier": w.get("tier"),
+         "token": w.get("token"), "resume": resume, "start": w.get("launched_at"), "end": None, "wall_s": None,
+         "tokens": None}
+    if w.get("session"):
+        e["session"] = w["session"]
+    if log_home:
+        e["log_home"] = log_home
+    return e
+
+
+def usage_home(pcfg: dict) -> str | None:
+    """The Claude account directory a worker's session log lands in: the adapter's own CLAUDE_CONFIG_DIR, else
+    ~/.claude, never the lead's, since launch clears an inherited one. None for a CLI whose log Fleet cannot read."""
+    if pcfg.get("account_env") != "CLAUDE_CONFIG_DIR":
+        return None
+    return account_env(pcfg)[0].get("CLAUDE_CONFIG_DIR") or str(Path("~/.claude").expanduser())
+
+
+def ledger_end(e: dict, end: float, source: str) -> None:
+    e["end"], e["end_source"] = end, source
+    if e.get("start") is not None:
+        e["wall_s"] = max(0.0, round(end - e["start"], 1))
+
+
+def ledger_sync(state: dict) -> list[dict]:
+    """Give every worker record an entry (a run from before the ledger gets its latest launches) and end each
+    entry whose exit is now confirmed, at the receipt's own time so a late reconcile does not stretch it."""
+    entries = state.setdefault("ledger", [])
+    by_token = {e.get("token"): e for e in entries}
+    for wid, w in state["workers"].items():
+        if not w.get("token"):
+            continue
+        e = by_token.get(w["token"])
+        if e is None:
+            e = dict(ledger_entry(state, wid, w), backfilled=True)
+            entries.append(e)
+        if e["end"] is not None or w.get("state") in ACTIVE_STATES or not w.get("exit_file"):
+            continue
+        receipt = Path(w["exit_file"])
+        if receipt.exists():
+            ledger_end(e, receipt.stat().st_mtime, "receipt")
+    return entries
+
+
+def worker_entry(state: dict, worker_id: str) -> dict:
+    w = worker(state, worker_id)
+    for e in reversed(ledger_sync(state)):
+        if e.get("token") == w.get("token"):
+            return e
+    raise FleetError(f"{worker_id} has no launch on record to attach usage to")
+
+
+def usage_totals(usage: dict) -> dict | None:
+    """input, output, cache_read and cache_write counts from a CLI's usage, under its names or Fleet's; None
+    when it names none of them, so a missing count never reads as zero."""
+    out = {}
+    for key, names in USAGE_KEYS.items():
+        value = next((usage[n] for n in names if usage.get(n) is not None), None)
+        if value is not None:
+            out[key] = int(value)
+    return out or None
+
+
+def record_usage(state: dict, worker_id: str, usage: dict) -> None:
+    """Record token usage a CLI reported itself (a headless run's JSON output, say) on the worker's latest
+    launch, replacing any count read from a session log. The caller saves the run."""
+    totals = usage_totals(usage)
+    if totals is None:
+        raise FleetError(f"usage for {worker_id} names no token counts (input_tokens, output_tokens, ...)")
+    e = worker_entry(state, worker_id)
+    e["tokens"], e["tokens_source"] = totals, "reported"
+
+
+def log_time(stamp) -> float | None:
+    try:
+        return datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def in_window(at: float | None, start: float | None, end: float | None) -> bool:
+    if at is None:
+        return True
+    return (start is None or at >= start - USAGE_SLACK_S) and (end is None or at <= end + USAGE_SLACK_S)
+
+
+def session_usage(home: Path, session: str, start: float | None, end: float | None) -> dict | None:
+    """Token totals of one Claude Code session, its subagents included, between start and end. A resumed
+    session's log also holds the earlier launches, hence the window. None when no log or no usage is found."""
+    if not SESSION_ID_RE.match(session):
+        return None
+    logs = [*home.glob(f"projects/*/{session}.jsonl"), *home.glob(f"projects/*/{session}/subagents/*.jsonl")]
+    calls: dict = {}
+    for path in logs:
+        for n, line in enumerate(path.read_text(errors="replace").splitlines()):
+            if '"usage"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            message = e.get("message") if e.get("type") == "assistant" else None
+            if isinstance(message, dict) and message.get("usage") and in_window(log_time(e.get("timestamp")), start, end):
+                # A streamed reply logs a line per content block, each repeating the call's usage: count it once.
+                calls[message.get("id") or f"{path}:{n}"] = message["usage"]
+    totals: dict = {}
+    for u in calls.values():
+        for key, value in (usage_totals(u) or {}).items():
+            totals[key] = totals.get(key, 0) + value
+    return totals or None
+
+
+def ledger_usage(state: dict, cfg: dict | None = None) -> None:
+    """Read each ended Claude worker's tokens from its own session log, once; other workers stay unknown."""
+    for e in ledger_sync(state):
+        if e["end"] is None or e.get("tokens") is not None or e.get("usage_read") or not e.get("session"):
+            continue
+        home = e.get("log_home")
+        if not home and cfg:  # a backfilled entry: its adapter's directory as configured now
+            home = usage_home(cfg.get("providers", {}).get(e.get("provider"), {}))
+        if not home:
+            continue
+        e["usage_read"] = True
+        try:
+            if tokens := session_usage(Path(home), e["session"], e.get("start"), e["end"]):
+                e["tokens"], e["tokens_source"] = tokens, "session log"
+        except OSError:
+            pass
+
+
+def live_entry(state: dict, e: dict) -> bool:
+    w = state["workers"].get(e["worker"], {})
+    return w.get("token") == e.get("token") and w.get("state") in ACTIVE_STATES
+
+
+def entry_wall(state: dict, e: dict, now: float) -> float | None:
+    """Seconds a launch has used: its confirmed wall time, or so far while it runs; None when unknown."""
+    if e.get("wall_s") is not None:
+        return e["wall_s"]
+    return max(0.0, now - e["start"]) if e.get("start") is not None and live_entry(state, e) else None
+
+
+def cap_use(state: dict, now: float | None = None) -> dict:
+    """Launches and wall seconds used so far, running workers counted to now, beside the run's caps."""
+    now = time.time() if now is None else now
+    entries = state.get("ledger", [])
+    walls = [entry_wall(state, e, now) for e in entries]
+    return {"workers": len(entries), "wall_s": round(sum(w for w in walls if w is not None), 1),
+            **{k: state["options"].get(k) or 0 for k in CAP_KEYS}}
+
+
+def check_caps(state: dict) -> None:
+    """Refuse a new worker past the run's max_workers or max_wall_minutes. Running workers are never stopped."""
+    use = cap_use(state)
+    if use["max_workers"] and use["workers"] >= use["max_workers"]:
+        key, over = "max_workers", f"{use['workers']} of {use['max_workers']} worker launches used"
+    elif use["max_wall_minutes"] and use["wall_s"] >= use["max_wall_minutes"] * 60:
+        key, over = "max_wall_minutes", (f"{minutes(use['wall_s'])} of {use['max_wall_minutes']} minutes of worker "
+                                         "wall time used, running workers included")
+    else:
+        return
+    raise FleetError(f"run {state['run']} reached its {key} cap: {over}. No worker was launched; running workers "
+                     f"continue. Tell the owner and let them choose: raise defaults.{key} in their config (it applies "
+                     f"to new runs), or start a follow-up run with fleet init <new-run> for the remaining work. "
+                     f"fleet cost {state['run']} shows the use per ticket")
+
+
+def minutes(seconds: float) -> str:
+    m = seconds / 60
+    return f"{m:.1f}m" if m < 10 else f"{round(m)}m"
+
+
+def count(n: int) -> str:
+    return str(n) if n < 1000 else f"{n / 1000:.1f}K" if n < 100_000 else kilo(n)
+
+
+def tokens_text(tokens: dict | None, unknown: int = 0, of: int = 1) -> str:
+    """Known counts, and how many launches have none; an unknown count is never shown as zero."""
+    if not tokens:
+        return "tokens unknown"
+    text = "tokens " + " ".join(f"{USAGE_NAMES[k]} {count(tokens[k])}" for k in USAGE_KEYS if k in tokens)
+    return text + (f" (unknown for {unknown} of {of} workers)" if unknown else "")
+
+
+def cost_group(state: dict, entries: list[dict], now: float) -> dict:
+    walls = [entry_wall(state, e, now) for e in entries]
+    tokens: dict = {}
+    for e in entries:
+        for k, v in (e.get("tokens") or {}).items():
+            tokens[k] = tokens.get(k, 0) + v
+    return {"workers": len(entries), "running": sum(live_entry(state, e) for e in entries),
+            "wall_s": round(sum(w for w in walls if w is not None), 1), "wall_unknown": walls.count(None),
+            "tokens": tokens or None, "tokens_unknown": sum(not e.get("tokens") for e in entries)}
+
+
+def cost_line(g: dict) -> str:
+    if g["wall_unknown"] == g["workers"]:
+        wall = "unknown"
+    else:
+        wall = minutes(g["wall_s"]) + (f" (unknown for {g['wall_unknown']})" if g["wall_unknown"] else "")
+    running = f", {g['running']} running" if g["running"] else ""
+    return (f"{g['workers']} worker{'' if g['workers'] == 1 else 's'}{running}, wall {wall}, "
+            f"{tokens_text(g['tokens'], g['tokens_unknown'], g['workers'])}")
+
+
+def caps_text(use: dict) -> str:
+    def one(key: str, used: str) -> str:
+        return f"{key} {used}/{use[key]}" if use[key] else f"{key} {used} (no cap)"
+    return f"caps: {one('max_workers', str(use['workers']))}, {one('max_wall_minutes', minutes(use['wall_s']))}"
+
+
+def run_cost(state: dict, now: float | None = None) -> dict:
+    now = time.time() if now is None else now
+    entries = state.get("ledger", [])
+    tickets: dict[str, list[dict]] = {}
+    for e in entries:
+        tickets.setdefault(e["ticket"], []).append(e)
+    return {"run": state["run"], "tickets": {i: cost_group(state, es, now) for i, es in tickets.items()},
+            "totals": cost_group(state, entries, now), "caps": cap_use(state, now), "ledger": entries}
+
+
+def cmd_cost(a, cfg):
+    repo = repo_root()
+    state = load_run(repo, a.run)
+    reconcile(repo, state)
+    ledger_usage(state, cfg)
+    save_run(repo, a.run, state)
+    c = run_cost(state)
+    if a.json:
+        print(json.dumps(c, indent=2))
+        return
+    print(f"run {state['run']} cost, per ticket (a reviewer counts toward the ticket it reviews):")
+    for i, g in c["tickets"].items():
+        print(f"  {i:<12} {cost_line(g)}")
+    if not c["tickets"]:
+        print("  (no worker launched yet)")
+    print(f"total: {cost_line(c['totals'])}")
+    print(caps_text(c["caps"]))
+    if c["totals"]["tokens_unknown"]:
+        print("Tokens come from a Claude worker's own session log, or usage its CLI reported; the rest are unknown.")
 
 
 # ---------- commands ----------
@@ -2079,6 +2350,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     valid_id(a.id)
     reconcile(repo, state)
     save_run(repo, a.run, state)
+    check_caps(state)
     planned = (a.provider, a.model)
     if state["prompts"].get(a.id, {}).get("role") == "implementation":  # reviews keep their cross-family route
         apply_steer(a, load_live_state(repo, a.run))
@@ -2202,6 +2474,8 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         token=token, exit_file=str(exit_file), launched=time.strftime("%Y-%m-%dT%H:%M:%S"),
         launched_at=time.time(),
         **({"session": session} if session else {}))
+    state.setdefault("ledger", []).append(ledger_entry(state, a.id, state["workers"][a.id], a.resume,
+                                                       usage_home(pcfg) if session else None))
     save_run(repo, a.run, state)
     label = f"{a.id} · {a.provider}:{model}" + (f"@{effort}" if effort else "")
     surface, sid, why = term.open(state, place, repo, wrapped, label)
@@ -2287,6 +2561,7 @@ def launch_ready(a, cfg):
     state = load_run(repo, a.run)
     reconcile(repo, state)
     save_run(repo, a.run, state)
+    check_caps(state)
     picked, why = ready_tickets(state, load_live_state(repo, a.run), cfg, run_dir(repo, a.run) / "prompts")
     launched = 0
     for i in picked:
@@ -2767,6 +3042,8 @@ class AgentsView:
 def report_rows(repo: Path, state: dict) -> list[dict]:
     d = run_dir(repo, state["run"]) / "reports"
     ids = set(state["workers"]) | {p.stem for p in d.glob("*.md")}
+    entries = {e.get("token"): e for e in state.get("ledger", [])}
+    now = time.time()
     rows = []
     for i in sorted(ids):
         w = state["workers"].get(i, {})
@@ -2776,7 +3053,8 @@ def report_rows(repo: Path, state: dict) -> list[dict]:
         rows.append({"id": i, "worker": f"{w.get('provider', '?')}:{w.get('model', '?')}",
                      "surface": w.get("surface", "-"), "state": w.get("state", "-"),
                      "report": status or ("-" if not f.exists() else "no status line"),
-                     "report_age_s": age, "process": w.get("process")})
+                     "report_age_s": age, "process": w.get("process"),
+                     "elapsed_s": entry_wall(state, entries[w["token"]], now) if w.get("token") in entries else None})
     return rows
 
 
@@ -2794,7 +3072,8 @@ def cmd_status(a, cfg):
         print(f"hold: {hold_text(hold)}; running workers continue, `fleet release` lifts it")
     for r in rows:
         age = f"{r['report_age_s'] // 60}m ago" if r["report_age_s"] is not None else ""
-        print(f"  {r['id']:<10} {r['worker']:<34} {r['surface']:<12} {r['state']:<9} {r['report']} {age}")
+        ran = f"  ran {minutes(r['elapsed_s'])}" if r["elapsed_s"] is not None else ""
+        print(f"  {r['id']:<10} {r['worker']:<34} {r['surface']:<12} {r['state']:<9} {r['report']} {age}{ran}".rstrip())
 
 
 WAKE_STATUSES = ("needs-verification", "blocked")
@@ -3156,6 +3435,7 @@ def cmd_stop(a, cfg):
             if w["state"] in ACTIVE_STATES:
                 w["state"] = "stop-failed"
             print(f"{i}: {e}", file=sys.stderr)
+        ledger_usage(state, cfg)
         save_run(repo, a.run, state)
         print(f"{i}: {w['state']} ({w['surface']})")
         if was_live and w["state"] not in ACTIVE_STATES:
@@ -3176,8 +3456,10 @@ def cmd_resume(a, cfg):
     repo = repo_root()
     state = load_run(repo, a.run)
     reconcile(repo, state)
+    ledger_usage(state, cfg)
     save_run(repo, a.run, state)
     rows = report_rows(repo, state)
+    cost = run_cost(state)
     notes = run_dir(repo, a.run) / "notes.md"
     live = load_live_state(repo, a.run)
     hold = load_hold(repo)
@@ -3187,6 +3469,7 @@ def cmd_resume(a, cfg):
                           "steer": live or None,
                           "hold": hold,
                           "tickets": state["tickets"], "decisions": state["decisions"], "workers": rows,
+                          "cost": {"totals": cost["totals"], "caps": cost["caps"]},
                           "notes": str(notes) if notes.exists() else None}, indent=2))
     else:
         o = state["options"]
@@ -3223,6 +3506,8 @@ def cmd_resume(a, cfg):
             print(f"  {r['id']}  {r['worker']}  {r['surface']}  {r['state']}  report={r['report']}{extra}")
         if not rows:
             print("  (none)")
+        print(f"cost: {cost_line(cost['totals'])}  (fleet cost {state['run']} per ticket)")
+        print(caps_text(cost["caps"]))
         print(f"notes: {notes if notes.exists() else '(none)'}  (--json prints the full records)")
     print("Unconfirmed workers retain their slots. Inspect panes/processes before stop or recover.")
 
@@ -3333,6 +3618,10 @@ def cmd_recover(a, cfg):
     # Deliberate lead attestation for externally stopped/legacy/crashed processes.
     w["state"] = "recovered"
     w["recovery_evidence"] = evidence
+    entry = next((e for e in ledger_sync(state) if e.get("token") == w.get("token")), None)
+    if entry and entry["end"] is None:  # no receipt: the lead's confirmation is the only end on record
+        ledger_end(entry, time.time(), "recover")
+    ledger_usage(state, cfg)
     save_run(repo, a.run, state)
     print("Recorded lead-confirmed process exit; ticket acceptance is unchanged.")
 
@@ -4104,6 +4393,7 @@ def cmd_review(a, cfg):
     writer = state["workers"][a.id]
     rid = review_id(a, state)
     check_rounds(repo, state, cfg, a, a.id, "review")  # launch takes the extra round, once the writer is stopped
+    check_caps(state)  # like the rounds, refused while the writer still runs
     route = pick_reviewer(a, cfg, state, writer)
     # Refused before the writer stops: a writer mid-edit, or one with stray edits, must keep running.
     report = run_dir(repo, a.run) / "reports" / f"{a.id}.md"
@@ -4923,6 +5213,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("id")
     s.add_argument("--lines", type=int, default=20, help="raise it when a dialog or error is cut off")
     s.set_defaults(fn=cmd_peek)
+
+    s = sub.add_parser("cost", help="per ticket: worker launches, wall time and tokens (or unknown), with totals "
+                                    "and the run's caps")
+    s.add_argument("run")
+    s.add_argument("--json", action="store_true", help="print the totals, caps and every ledger entry")
+    s.set_defaults(fn=cmd_cost)
 
     s = sub.add_parser("status", help="workers and their report status")
     s.add_argument("run")
