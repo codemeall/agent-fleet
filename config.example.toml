@@ -13,9 +13,11 @@ review = "cross-heavy"
 # only for a pass, a scope problem, or once gate_rounds failures (1 to 5) have gone back. Off by default.
 # gate = true
 # gate_rounds = 2
-# The steps `fleet supervise` takes itself, from "gate", "review" and "dispatch". "gate" alone (the default) is
-# `fleet wait --gate`; "review" also starts the cross-family review of a hand-back whose gate passed; "dispatch"
-# runs `launch --ready` once the lead has verified a ticket. --auto overrides it for one supervise.
+# The steps `fleet supervise` takes itself, from "gate", "review", "dispatch" and "repair". "gate" alone (the
+# default) is `fleet wait --gate`; "review" also starts the cross-family review of a hand-back whose gate passed;
+# "dispatch" runs `launch --ready` once the lead has verified a ticket; "repair" (needs "review") sends a review's
+# findings back to the writer (`fleet send --findings`) and reviews again, waking the lead only for a rebuttal, a
+# disputed fix or an escalation. --auto overrides it for one supervise.
 # supervise = ["gate", "review"]
 # Mark the repo trusted in Claude, Codex and Antigravity before each launch, so their first-run
 # "trust this folder?" screen does not stall a worker. Off by default; only the owner turns it on.
