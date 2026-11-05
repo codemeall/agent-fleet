@@ -5326,9 +5326,10 @@ def cmd_supervise(a, cfg):
     return watch(a, loop_for)
 
 
-def header_doubts(repo: Path, state: dict, wid: str, text: str) -> str | None:
+def header_doubts(repo: Path, state: dict, wid: str, text: str, findings: bool = True) -> str | None:
     """Why a report's `fleet` header leaves something for the lead to judge (None when it shows nothing): missing,
-    a problem, an unmet criterion, a check not at exit 0, a finding or an open question."""
+    a problem, an unmet criterion, a check not at exit 0, a finding (unless `findings` is False: the caller judged
+    them) or an open question."""
     _, problems = header_summary(repo, state, wid, text)
     if problems:
         return "its report has no fleet header" if problems == ["header missing"] else header_text(problems)
@@ -5338,7 +5339,7 @@ def header_doubts(repo: Path, state: dict, wid: str, text: str) -> str | None:
         why.append(f"{unmet} criteria unmet")
     if failed := sum(c.get("exit") != 0 for c in data["checks"]):
         why.append(f"{failed} check(s) not at exit 0")
-    if data["findings"]:
+    if findings and data["findings"]:
         why.append(f"{len(data['findings'])} finding(s)")
     if asked := sum(1 for q in data["questions"] if q.strip()):
         why.append(f"{asked} open question(s)")
@@ -5517,15 +5518,17 @@ class Supervisor:
         data, _ = parse_header(text)
         findings = data.get("findings") if isinstance(data, dict) else None
         family = meta.get("family") or "unknown family"
+        low = []  # under strict, open findings that are all low: READY names them, and nothing goes back
         if isinstance(findings, list) and (meta.get("finding_history") or findings and "repair" in self.steps):
             settled = self.settle(state, i, rid, meta, family, f, text, data)  # the findings loop's wake or step
             if settled is not None:
                 return settled
-        if isinstance(findings, list) and findings:
+            low = numbered_findings(meta, data)  # settle left them: nothing open, or only low ones under strict
+        if isinstance(findings, list) and findings and not low:
             self.lines[rid] = [f"FINDINGS {i}: {severity_counts(findings)} ({rid}, {family}); decide each, then "
                                "repair the writer or take a disputed one to the owner", *open_findings(self.repo, state, i)]
             return
-        if why := header_doubts(self.repo, state, rid, text):
+        if why := header_doubts(self.repo, state, rid, text, findings=not low):
             self.note(rid, f"not ready: {why}")
             return
         try:
@@ -5538,7 +5541,10 @@ class Supervisor:
         n = len(t.get("commands", []))
         gate = (f"gate passed ({n}/{n})" if reusable_gate(self.repo, state, self.cfg, i) else
                 f"gate to run again ({n} check(s) changed or the tree moved since)") if n else "no planned commands"
-        self.lines[rid] = [f"READY {i}: {gate}, review clean ({family}, findings 0){quality_note(self.repo, state, i)}; "
+        named = ", ".join(f"{fid} ({finding_label(x)})" for fid, x in low)
+        found = (f"review found only low findings ({family}: {named}), which strict acceptance never blocks on, so "
+                 "supervise sent none back" if low else f"review clean ({family}, findings 0)")
+        self.lines[rid] = [f"READY {i}: {gate}, {found}{quality_note(self.repo, state, i)}; "
                            f"fleet accept {self.run} {i}" + (" --gate" if n else "") + " --evidence <file>"]
 
     # ---------- repair ----------
@@ -5546,7 +5552,8 @@ class Supervisor:
     def settle(self, state: dict, i: str, rid: str, meta: dict, family: str, f: Path, text: str,
                data: dict) -> bool | None:
         """A review in the findings loop, from the report text and header verdict already read. None: nothing open
-        and nothing rebutted, so the clean path (READY) decides. True: the lead wakes with FINDINGS naming each
+        and nothing rebutted, or (strict, with the repair step) only low findings, which the bar never blocks on, so
+        none goes back: the clean path (READY) decides. True: the lead wakes with FINDINGS naming each
         rebuttal, disputed fix, unanswered or reopened finding (or, without the repair step, any finding, or with it
         any finding its writer cannot be sent because the lead relaunched it). False: the repair step sent the
         findings back to the writer."""
@@ -5557,14 +5564,27 @@ class Supervisor:
             return None
         doubt = header_summary(self.repo, state, rid, text)[1] or any(
             isinstance(q, str) and q.strip() for q in data.get("questions") or [])
-        running = False
+        running, strict = False, acceptance_mode(state) == "strict"
         if "repair" in self.steps and not lead and not doubt:
+            live = (state["workers"].get(i) or {}).get("state") in ACTIVE_STATES  # relaunched: the lead's, below
+            if strict and not live and numbered and all(
+                    isinstance(x, dict) and str(x.get("severity", "")).lower() == "low" for _, x in numbered):
+                return None  # the bar never blocks on a low finding: READY names them, and no round is spent
             sent = self.repair(i, rid, report_key(f, text))
             if sent is not None:
                 return sent
             running = True  # its writer is live again: the findings go to the lead, never lost
-        next_step = (f"decide each, then fleet send {self.run} {i} --findings returns the open ones to the writer, or "
-                     "take a disputed one to the owner" if numbered else
+        answers, still = history.get("responses", {}), {fid for fid, _ in numbered}
+        blocking = {fid for fid, x in numbered
+                    if isinstance(x, dict) and str(x.get("severity", "")).lower() in BLOCKING_SEVERITIES}
+        rebutted = [fid for fid in history.get("sent", []) if strict and fid in blocking
+                    and (answers.get(fid) or {}).get("action") == "rebutted"]  # still open, and the bar blocks on it
+        gate = " --gate" if (state["tickets"].get(i) or {}).get("commands") else ""
+        accept = (f", or accept the writer's rebuttal yourself, with your reason: fleet accept {self.run} {i}{gate} "
+                  f"--evidence <file> " + " ".join(f'--accept-finding {fid} "<why>"' for fid in rebutted)
+                  if rebutted else "")
+        next_step = (f"decide each, then fleet send {self.run} {i} --findings returns the open ones to the writer"
+                     f"{accept}, or take a disputed one to the owner" if numbered else
                      "nothing is open: weigh the rebuttal's evidence, then accept with it in your evidence, or take it "
                      "to the owner")
         if running:
@@ -5573,7 +5593,6 @@ class Supervisor:
                          f"nothing; decide each, then tell the writer with fleet send {self.run} {i} \"<message>\", "
                          f"or stop it and run fleet send {self.run} {i} --findings")
         self.lines[rid] = [f"FINDINGS {i}: {', '.join(items)} ({rid}, {family}); {next_step}"]
-        answers, still = history.get("responses", {}), {fid for fid, _ in numbered}
         quoted = [fid for fid in history.get("sent", [])  # each rebuttal, and each fix the re-reviewer disputes
                   if fid in answers and (answers[fid]["action"] == "rebutted" or fid in still)]
         if quoted:
@@ -6572,13 +6591,19 @@ def check_rounds(repo: Path, state: dict, cfg: dict, a, i: str, what: str) -> bo
         return False
     if extra is not None:
         return True
+    anyway = acceptance_mode(state) == "strict"
+    if anyway:  # only for what the owner's words can override: accept refuses it when nothing is below the bar
+        try:
+            anyway = any(not hard for _, _, hard in quality_bar(repo, state, i))
+        except (FleetError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+            pass  # the bar could not be read: name the override, as accept will say whether it is needed
     raise FleetError("\n".join([
         f"{i} has used {used} of {cap} review rounds, so Fleet refuses another {what}. Nothing was changed.",
         "Take this to the owner and let them choose; do not repair or review again on your own.",
         f"ESCALATE {i}: {used} of {cap} review rounds used", *open_findings(repo, state, i),
         "The owner's ways out:",
         f"- accept as is: fleet accept {a.run} {i} --evidence <file>"
-        + (" --accept-anyway \"<owner's words>\"" if acceptance_mode(state) == "strict" else "")
+        + (" --accept-anyway \"<owner's words>\"" if anyway else "")
         + ", recording the open findings and the owner's decision in the evidence",
         f"- drop the ticket: fleet drop {a.run} {i} --reason \"<owner's words>\"",
         f"- allow one more round: run this command again with --extra-round \"<owner's words>\""]))
