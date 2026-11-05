@@ -8,12 +8,12 @@ Teamwork release 5 (#43): hard questions go to several vendors at once, follow-u
   - Plan refuses two entries in one family, an entry outside the pool or above the permission ceiling, and fan-out on an implement ticket.
   - When all investigators are back, `wait` and `supervise` wake once with `FANOUT <id>: n reports; agree on …; differ on …`. Agreement is computed from the report headers (findings by file and severity, criteria by id), and everything is quoted as data.
   - `fleet judge <run> <id>` launches a judge from a family none of them used. It gets every report as data, and its verdict wakes the lead as `VERDICT <id>`.
-  - One `verify` covers the whole ticket, and `fleet cost` lists each investigator and the judge.
+  - One `verify` covers the whole ticket, every judge that handed back included. A judge that exited without a verdict never blocks it: Fleet notes this and records it as a decision. `fleet cost` lists each investigator and the judge.
 - **Warm workers (#42).** `fleet launch … --after <verified-id>`, or the plan field `"after"`, hands a light or standard follow-up to the CLI session that did the earlier ticket, so the worker keeps what it read.
   - The new ticket's prompt, report, inbox and scope replace the old ones.
   - It works only for a verified, exited writer on a resumable adapter (Claude today; Codex cannot name a session at launch), with the same provider, model and effort, in a shared run.
   - A chain is capped at `warm_max` tickets (default 4), and launch warns above `warm_context_tokens`.
-  - Plan adds `after` to the ticket's blockers, and the ledger and `fleet cost` show each chain.
+  - Plan adds `after` to the ticket's blockers, and the ledger and `fleet cost` show each chain. A ticket relaunched fresh still counts as having used the session.
 - **Issue import (#20).** `fleet import <owner/repo#N|URL>... [--label L] [--milestone M] --dir <dir>` writes one local ticket per GitHub issue. Each file has its title, source link, labels and assignees, with the body fenced as untrusted data and its checkboxes kept.
   - It only reads (`gh issue view` and `gh issue list`; a test asserts it).
   - Re-import refreshes a file only when the issue changed. It keeps a file the lead edited unless `--force` is given.

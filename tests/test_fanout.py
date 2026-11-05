@@ -382,7 +382,6 @@ class FanoutVerify(FanoutCase):
         self.run_file("reports", "judge-q.md").unlink()
         out = self.call("verify", "demo", "q", "--evidence", str(self.evidence), expected=1)
         self.assertIn("judge-q may still be running", out)
-        self.assertIn("judge-q's report says nothing (no report yet)", out)
         self.assertIn("works on fan-out ticket q; verify the ticket",
                       self.call("verify", "demo", "q--writer", "--evidence", str(self.evidence), expected=1))
         self.write_report("judge-q", verdict=[{"claim": "x", "holds": None, "why": "unclear"}])
@@ -396,6 +395,46 @@ class FanoutVerify(FanoutCase):
             text = self.run_file("reports", f"{wid}.md").read_text()
             self.assertIn("Status: verified", text)
             self.assertIn("## Lead verification", text)
+
+    def test_a_judge_that_exited_without_a_verdict_does_not_block_the_ticket(self):
+        self.judged()
+        self.run_file("reports", "judge-q.md").unlink()           # its CLI crashed before writing a report
+        self.call("stop", "demo", "q")
+        out = self.call("verify", "demo", "q", "--evidence", str(self.evidence))
+        self.assertIn("NOTE judge-q gave no verdict (no report); the ticket is verified on its investigators' reports",
+                      out)
+        self.assertIn("q: verified with q--writer, q--reviewer, q--third;", out)
+        self.assertTrue(any("without a verdict" in d for d in self.state()["decisions"]))
+
+    def test_every_judge_that_handed_back_is_verified_not_only_the_latest(self):
+        self.judged()
+        self.call("stop", "demo", "q")
+        self.call("judge", "demo", "q", "--as", "judge-q2", "--settle", "0")
+        self.write_report("judge-q2")
+        self.call("stop", "demo", "q")
+        out = self.call("verify", "demo", "q", "--evidence", str(self.evidence))
+        self.assertIn("judge-q, judge-q2", out)
+        for jid in ("judge-q", "judge-q2"):
+            self.assertIn("Status: verified", self.run_file("reports", f"{jid}.md").read_text())
+        self.assertNotIn("PENDING", self.wait(2))
+
+    def test_statuses_are_read_the_same_way_by_the_wake_the_judge_and_verify(self):
+        self.launched()
+        self.all_back()
+        text = self.run_file("reports", "q--third.md").read_text()
+        self.run_file("reports", "q--third.md").write_text(text.replace("Status: needs-verification",
+                                                                        "Status: Needs-Verification"))
+        self.call("stop", "demo", "q")
+        self.assertIn("q: verified with", self.call("verify", "demo", "q", "--evidence", str(self.evidence)))
+
+    def test_a_verdict_counts_only_true_false_or_null(self):
+        self.assertIsNone(fleet.verdict_items({"verdict": [{"claim": "x", "holds": 1, "why": "?"}]}))
+        self.assertIsNone(fleet.verdict_items({"verdict": [{"claim": "x", "why": "no holds"}]}))
+        self.assertEqual(len(fleet.verdict_items({"verdict": [{"claim": "x", "holds": None, "why": "?"}]})), 1)
+
+    def test_a_fanout_entry_with_a_non_text_model_is_refused_not_a_crash(self):
+        out = self.plan(self.ticket(fanout=[{"provider": "writer", "model": 5}, "reviewer"]), expected=1)
+        self.assertIn("fanout entry 1 must be", out)
 
     def test_verify_without_a_judge_needs_every_investigators_report(self):
         self.launched()

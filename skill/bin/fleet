@@ -2696,13 +2696,7 @@ def cmd_drop(a, cfg):
     t["status"], t["dropped_at"], t["closed_at"] = "dropped", now, time.time()
     state["decisions"].append(f"Dropped {a.id}: {reason} ({now})")
     report = run_dir(repo, a.run) / "reports" / f"{a.id}.md"
-    if report.exists():  # a handed-back report would otherwise keep waking the lead as PENDING
-        lines = report.read_text().splitlines()
-        for n, line in enumerate(lines):
-            if STATUS_RE.match(line):
-                lines[n] = "Status: dropped"
-                break
-        report.write_text("\n".join(lines) + "\n")
+    set_report_status(report, "dropped")  # a handed-back report would otherwise keep waking the lead as PENDING
     for wid in fanout_members(state, a.id):  # a fan-out's investigators and judges, likewise
         set_report_status(run_dir(repo, a.run) / "reports" / f"{wid}.md", "dropped")
     save_run(repo, a.run, state)
@@ -3155,12 +3149,17 @@ def warm_route(state: dict, cfg: dict, i: str, after: str, name: str, model: str
         raise FleetError(f"{why}: its session ran {warm_route_text(w['provider'], w['model'], w.get('effort'))}, "
                          f"and {i} would run {warm_route_text(name, model, effort)}; a session continues only on the "
                          "same provider (account), model and effort. Launch without --after")
-    later = sorted(x["id"] for x in state["workers"].values() if x.get("session") == w["session"]
-                   and x["id"] not in (after, i) and (x.get("launched_at") or 0) >= (w.get("launched_at") or 0))
+    since = w.get("launched_at") or 0
+    on_session = [e for e in state.get("ledger", []) if e.get("session") == w["session"]]
+    later = sorted({x["id"] for x in state["workers"].values() if x.get("session") == w["session"]
+                    and x["id"] not in (after, i) and (x.get("launched_at") or 0) >= since}
+                   | {e["ticket"] for e in on_session if e.get("ticket") not in (after, i)
+                      and (e.get("start") or 0) >= since})  # a ticket relaunched fresh since still used it
     if later:
         raise FleetError(f"{why}: {', '.join(later)} already continued that session; a session takes one ticket "
                          f"at a time, so use --after {later[-1]} once it is verified, or launch without --after")
-    chain, cap = w.get("warm_chain", 1) + 1, warm_setting(state, cfg, "warm_max")
+    chain = max([w.get("warm_chain", 1)] + [e.get("warm_chain") or 1 for e in on_session]) + 1
+    cap = warm_setting(state, cfg, "warm_max")
     if chain > cap:
         raise FleetError(f"{why}: {i} would be ticket {chain} in one session, over warm_max {cap}; "
                          "launch without --after to start fresh")
@@ -4781,7 +4780,10 @@ class Supervisor:
             if error or not still:  # a refusal wakes the lead once; the lead decides what comes next
                 marker.write_text(json.dumps(verified))
         self.actions += [x for x in lines if x.startswith("LAUNCHED ")]
-        self.actions += [x for x in lines if x.startswith("SKIPPED ") and x.split()[1].rstrip(":") in wanted]
+        skipped = [x for x in lines if x.startswith("SKIPPED ")]
+        live = load_run(self.repo, self.run)
+        self.actions += [x for x in skipped if (fanout_of(live, x.split()[1].rstrip(":")) or x.split()[1].rstrip(":"))
+                         in wanted]  # a fan-out investigator's line names its own ID
         if error:
             self.lines["(dispatch)"] = [f"DISPATCH-REFUSED {', '.join(wanted)}: launch --ready refused: "
                                         f"{one_line(error, 400)}"]
@@ -5470,14 +5472,8 @@ def cmd_verify(a, cfg):
     w["verified"] = True
     w["verified_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     w["verification_evidence"] = evidence
-    text = report.read_text()
-    warn_header(repo, state, a.id, text)
-    lines = text.splitlines()
-    for n, line in enumerate(lines):
-        if STATUS_RE.match(line):
-            lines[n] = "Status: verified"
-            break
-    report.write_text("\n".join(lines) + "\n\n## Lead verification\n" + evidence + "\n")
+    warn_header(repo, state, a.id, report.read_text())
+    set_report_status(report, "verified", "\n## Lead verification\n" + evidence + "\n")
     save_run(repo, a.run, state)
     inline = Path(state["tickets"][owner]["ticket"]).parent == (run_dir(repo, a.run) / "tasks").resolve()
     if w["role"] == "implementation" and inline:
@@ -5989,7 +5985,8 @@ def fanout_entry(i: str, n: int, raw) -> dict:
     if isinstance(raw, str) and raw.strip():
         name, sep, model = raw.strip().partition(":")
         spec = {"provider": name.strip(), "model": (model.strip() or None) if sep else None}
-    elif isinstance(raw, dict) and not set(raw) - FANOUT_ENTRY_KEYS and isinstance(raw.get("provider"), str):
+    elif (isinstance(raw, dict) and not set(raw) - FANOUT_ENTRY_KEYS and isinstance(raw.get("provider"), str)
+          and all(raw.get(k) is None or isinstance(raw[k], str) for k in ("model", "effort", "family"))):
         spec = dict(raw)
     if not spec or not spec["provider"].strip():
         raise FleetError(f'{i}: fanout entry {n} must be "<provider>" or "<provider>:<model>", or an object with '
@@ -6184,7 +6181,7 @@ def fanout_back(state: dict, reports: Path, i: str) -> list[Path] | None:
     """Fan-out ticket `i`'s investigator reports once every one has handed back (Status: needs-verification), else
     None."""
     files = [reports / f"{e['worker']}.md" for e in state["tickets"][i]["fanout"]]
-    if all(f.exists() and (parse_status(f.read_text()) or "").lower() == "needs-verification" for f in files):
+    if all(report_status(f) == "needs-verification" for f in files):
         return files
     return None
 
@@ -6302,7 +6299,8 @@ def verdict_items(data) -> list[dict] | None:
     """A judge header's `verdict`: a nonempty list of {"claim", "holds": true, false or null, "why"}, else None."""
     items = data.get("verdict") if isinstance(data, dict) else None
     if not isinstance(items, list) or not items or not all(
-            isinstance(x, dict) and x.get("holds", "?") in (True, False, None) for x in items):
+            isinstance(x, dict) and "holds" in x and (x["holds"] is None or type(x["holds"]) is bool)
+            for x in items):
         return None
     return items
 
@@ -6480,9 +6478,8 @@ def cmd_judge(a, cfg):
     reports = run_dir(repo, a.run) / "reports"
     waiting = []
     for e in t["fanout"]:
-        f = reports / f"{e['worker']}.md"
-        status = parse_status(f.read_text()) if f.exists() else None
-        if (status or "").lower() != "needs-verification":
+        status = report_status(reports / f"{e['worker']}.md")
+        if status != "needs-verification":
             waiting.append(f"{e['worker']} ({'Status: ' + status if status else 'no report yet'})")
     if waiting:
         raise FleetError(f"{a.id}: a judge reads every investigator's report, and these have not handed back: "
@@ -6514,12 +6511,20 @@ def cmd_judge(a, cfg):
 
 # ---------- fan-out verify, accept and cost ----------
 
-def fanout_problems(repo: Path, state: dict, i: str, live_ok: bool = False) -> tuple[list[str], list[str]]:
-    """The workers verifying fan-out ticket `i` covers, every investigator and its latest judge, and what verify
-    would refuse for them. `live_ok`: accept stops running ones first."""
+def report_status(f: Path) -> str | None:
+    """A report's status, lowercased, or None when it has no file or no status line."""
+    return (parse_status(f.read_text()) or "").lower() or None if f.exists() else None
+
+
+def fanout_problems(repo: Path, state: dict, i: str, live_ok: bool = False) -> tuple[list[str], list[str], list[str]]:
+    """What verifying fan-out ticket `i` covers: every investigator, and every judge whose report hands back. Also
+    what verify would refuse, and notes on judges that gave no verdict: a judge is advisory, so one that exited
+    without a usable report never blocks the ticket. `live_ok`: accept stops running workers first."""
     t, run = state["tickets"][i], state["run"]
-    ids = [e["worker"] for e in t["fanout"]] + [w["id"] for w in judges(state, i)[-1:]]
+    reports = run_dir(repo, run) / "reports"
+    ids = [e["worker"] for e in t["fanout"]]
     problems = [] if t["status"] == "pending" else [f"{i} is {t['status']}"]
+    notes = []
     for wid in ids:
         w = state["workers"].get(wid)
         if not w:
@@ -6527,15 +6532,27 @@ def fanout_problems(repo: Path, state: dict, i: str, live_ok: bool = False) -> t
             continue
         if w["state"] in ACTIVE_STATES and not live_ok:
             problems.append(f"{wid} may still be running: fleet stop {run} {i} stops them all and confirms each exit")
-        f = run_dir(repo, run) / "reports" / f"{wid}.md"
-        status = parse_status(f.read_text()) if f.exists() else None
+        status = report_status(reports / f"{wid}.md")
         if status != "needs-verification":
-            said = f"Status: {status}" if status else "no status line" if f.exists() else "nothing (no report yet)"
+            said = (f"Status: {status}" if status else "no status line" if (reports / f"{wid}.md").exists()
+                    else "nothing (no report yet)")
             problems.append(f"{wid}'s report says {said}; it must say Status: needs-verification")
-    return ids, problems
+    for w in judges(state, i):
+        if w["state"] in ACTIVE_STATES and not live_ok:
+            problems.append(f"{w['id']} may still be running: fleet stop {run} {i} stops them all and confirms each "
+                            "exit")
+            continue
+        status = report_status(reports / f"{w['id']}.md")
+        if status == "needs-verification":
+            ids.append(w["id"])
+        elif not (live_ok and w["state"] in ACTIVE_STATES):  # a running judge's report may still come
+            notes.append(f"{w['id']} gave no verdict ({'Status: ' + status if status else 'no report'}); the "
+                         "ticket is verified on its investigators' reports")
+    return ids, problems, notes
 
 
 def set_report_status(f: Path, status: str, append: str = "") -> None:
+    """Rewrite a report's first status line (drop, verify), appending `append`; a missing report is left alone."""
     if not f.exists():
         return
     lines = f.read_text().splitlines()
@@ -6550,7 +6567,7 @@ def verify_fanout(repo: Path, state: dict, a) -> None:
     """fleet verify for a fan-out ticket: one evidence file accepts every investigator and, when one ran, the latest
     judge, each report set to verified with the evidence appended, then the ticket. Nothing changes on a refusal."""
     i = a.id
-    ids, problems = fanout_problems(repo, state, i)
+    ids, problems, notes = fanout_problems(repo, state, i)
     if problems:
         raise FleetError(f"{i} not verified; nothing was changed:\n" + "\n".join(f"- {p}" for p in problems))
     evidence = read_evidence_files(a.evidence)
@@ -6567,7 +6584,11 @@ def verify_fanout(repo: Path, state: dict, a) -> None:
         set_report_status(reports / f"{wid}.md", "verified", "\n## Lead verification\n" + evidence + "\n")
     t = state["tickets"][i]
     t["status"], t["closed_at"] = "verified", time.time()
+    for note in notes:
+        state["decisions"].append(f"Verified {i} without a verdict: {note} ({now})")
     save_run(repo, a.run, state)
+    for note in notes:
+        print(f"NOTE {note}")
     inline = Path(t["ticket"]).parent == (run_dir(repo, a.run) / "tasks").resolve()
     print(f"{i}: verified with {', '.join(ids)}; " + ("an inline task has no source ticket to update" if inline else
                                                      "update the source ticket now"))
@@ -6580,7 +6601,7 @@ def accept_fanout(repo: Path, state: dict, a, cfg) -> None:
         raise FleetError(f"{a.id} is a fan-out with no writer to gate or reviewer to verify; drop "
                          f"{'--gate' if a.gate else '--review-evidence'} and pass your evidence (a fleet gate file "
                          "included) with --evidence")
-    _, problems = fanout_problems(repo, state, a.id, live_ok=True)
+    _, problems, _ = fanout_problems(repo, state, a.id, live_ok=True)
     for flag, files in (("--evidence", a.evidence),):
         try:
             read_evidence_files(files)
@@ -8188,7 +8209,7 @@ GH_TIMEOUT_S = 120
 IMPORT_DIR = ".scratch/issues"
 IMPORT_MANIFEST = ".import.json"
 ISSUE_URL_RE = re.compile(r"https?://([^/\s]+)/([\w.-]+)/([\w.-]+)/issues/(\d+)/?(?:[?#]\S*)?\Z")
-ISSUE_REF_RE = re.compile(r"(?:([\w.-]+/[\w.-]+))?#?(\d+)\Z")
+ISSUE_REF_RE = re.compile(r"(?:([\w.-]+/[\w.-]+)#|#)?(\d+)\Z")  # owner/repo#N, #N or N
 REPO_ARG_RE = re.compile(r"(?:[\w.-]+/)?[\w.-]+/[\w.-]+\Z")
 GH_INSTALL = "the owner installs GitHub CLI (https://cli.github.com) and signs in with `gh auth login`"
 GH_SIGN_IN = "the owner runs `gh auth login` in their own terminal; Fleet never signs in"
@@ -8732,8 +8753,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("refs", nargs="*", metavar="ISSUE", help="owner/repo#N, an issue URL, or N with --repo")
     s.add_argument("--dir", default=IMPORT_DIR,
                    help=f"folder for the ticket files, inside the repository and outside .fleet/ (default {IMPORT_DIR})")
-    s.add_argument("--repo", metavar="OWNER/REPO", help="for bare issue numbers and the filters (default: gh's pick "
-                                                       "from this checkout's remote)")
+    s.add_argument("--repo", metavar="OWNER/REPO", help="needed for bare issue numbers; for the filters it defaults "
+                                                       "to gh's pick from this checkout's remote")
     s.add_argument("--label", action="append", help="import the issues with this label; repeat to require several")
     s.add_argument("--milestone", help="import the issues in this milestone (number or title)")
     s.add_argument("--state", choices=["open", "closed", "all"], default="open", help="with a filter (default open)")

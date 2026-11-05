@@ -132,7 +132,7 @@ class Import(RuntimeCase):
         self.assertEqual(self.gh_calls(), [])
 
     def test_bad_refs_are_refused_before_gh_is_called(self):
-        for ref in ("7", "https://github.com/acme/web/pull/7", "acme/web#x", "not an issue"):
+        for ref in ("7", "https://github.com/acme/web/pull/7", "acme/web#x", "not an issue", "acme/app2", "acme/web7"):
             with self.subTest(ref=ref):
                 self.assertIn("fleet: ", self.run_import(ref, expected=1))
         self.assertIn("is a pull request", self.run_import("https://github.com/acme/web/pull/7", expected=1))

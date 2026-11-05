@@ -291,6 +291,18 @@ class Refusals(WarmCase):
         self.assertIn("02 already continued that session; a session takes one ticket at a time, so use --after 02",
                       out)
 
+    def test_a_ticket_relaunched_fresh_after_using_the_session_still_counts(self):
+        self.cfg["defaults"]["max_parallel"] = self.cfg["providers"]["writer"]["max"] = 2
+        self.plan([{"id": "01", "files": ["owned.txt"]}, {"id": "02", "files": ["next.txt"]},
+                   {"id": "03", "files": ["third.txt"]}])
+        self.finish()
+        self.warm("02")
+        self.stop_with_receipt("02")
+        self.launch("02")                                  # relaunched fresh: its record now holds a new session
+        self.assertNotEqual(self.state()["workers"]["02"]["session"], self.state()["workers"]["01"]["session"])
+        out = self.warm("03", expected=1)                  # the ledger still shows 02 used 01's session
+        self.assertIn("02 already continued that session", out)
+
     def test_unknown_self_and_flag_conflicts(self):
         self.two()
         self.finish()
