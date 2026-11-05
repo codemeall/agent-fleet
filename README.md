@@ -10,6 +10,7 @@ The lead turns approved tickets into a saved execution plan, picks a worker mode
 - [Installation](#installation)
   - [Companion skills (optional)](#companion-skills-optional)
 - [Usage](#usage)
+- [When not to use Fleet](#when-not-to-use-fleet)
 - [Where workers run: cmux or headless](#where-workers-run-cmux-or-headless)
   - [Running workers in cmux](#running-workers-in-cmux)
   - [Running workers headless in tmux](#running-workers-headless-in-tmux)
@@ -214,7 +215,7 @@ It costs a little real usage, so it runs only with `--yes-paid`. It never writes
 
 ### Configure
 
-Personal overrides live in `~/.config/agent-fleet/config.toml`; start from [config.example.toml](config.example.toml). `backend` under `[defaults]` picks where workers run (see [below](#where-workers-run-cmux-or-headless)). No cmux workspace is pinned by default. Start the lead in the intended workspace, or pass `workspace=<ref>` explicitly.
+Personal overrides live in `~/.config/agent-fleet/config.toml`; start from [config.example.toml](config.example.toml). `backend` under `[defaults]` picks where workers run (see [below](#where-workers-run-cmux-or-headless)). No cmux workspace is pinned by default. Start the lead in the intended workspace, or pass `workspace=<ref>` explicitly. An unknown key in either file prints a warning naming the file, section and key, with the closest known one; the next version refuses it. The [allowed keys](skill/references/providers.md#config-keys) are listed with the provider notes.
 
 ### Updating
 
@@ -295,6 +296,15 @@ The lead drives Fleet through the `fleet` CLI; you rarely need to, but you can r
 | `fleet provider enable\|disable <name>` | Turn a provider on or off in your config |
 
 More: [safe first run](examples/README.md) · [agent workflow](skill/SKILL.md) · [commands](skill/references/commands.md) · [routing](skill/references/routing.md) · [host setup](skill/references/harnesses.md) · [providers](skill/references/providers.md) · [lead context](skill/references/lead-context.md) · [worked examples](skill/references/examples.md)
+
+## When not to use Fleet
+
+Every Fleet worker costs a pane, a prompt, a report and a verification turn by the lead. That pays off when tickets can run side by side or need a second model family's review; for small work it is overhead.
+
+- **Small or single-file tickets: use one agent.** Rule of thumb: if the whole job is one or two tickets that would run one after the other, or touches a single file, or you could review the change in one sitting, ask your agent to do it directly. Reach for Fleet when at least two tickets with disjoint files can run at the same time, or a ticket needs cross-family review.
+- **A quick read-only lookup: use the lead's own subagent.** Where something is defined, what a function does, which files a change would touch: your host's subagent (Claude Code's Explore, a Codex `explorer`) answers for less. Fleet's `investigate` tickets are for questions that need another vendor's model, a long investigation you want verified, or one kept out of the lead's context ([Fleet or your own subagent](skill/references/delegation.md#0-fleet-or-your-own-subagent)).
+- **No speed or quality claim.** Fleet is not yet benchmarked against one agent doing the same tickets ([#16](https://github.com/codemeall/agent-fleet/issues/16)), so this README makes no performance claim: parallel workers may finish sooner or later than one agent would.
+- **Only Claude Code, Codex and Cursor are on by default.** Antigravity and OpenCode ship disabled (`fleet provider enable agy`, then `fleet doctor agy`), and Grok and Muse are placeholders, not supported CLIs ([compatibility](#compatibility-and-adapters)).
 
 ## Where workers run: cmux or headless
 

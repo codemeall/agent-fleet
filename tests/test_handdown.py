@@ -132,9 +132,9 @@ class HandDown(RuntimeCase):
         self.assertNotIn("was verified", self.launch("02"))
 
     def test_launch_ready_writes_a_current_prompt(self):
-        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"], "context": "c", "checks": "k"},
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"], "context": "c", "checks": {"manual": "k"}},
                                 {"id": "02", "files": ["next.txt"], "blockers": ["01"], "context": "c",
-                                 "checks": "k"}])
+                                 "checks": {"manual": "k"}}])
         state = self.state()
         del state["prompts"]["02"]  # as if the plan alone had been saved: --ready writes 02's prompt itself
         (self.repo / RUN / "run.json").write_text(json.dumps(state))
@@ -154,9 +154,9 @@ class HandDown(RuntimeCase):
         self.assertNotIn("was verified", self.launch("02"))
 
     def test_a_lead_comment_quoted_from_a_blockers_report_does_not_block_launch(self):
-        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"], "context": "Spec.", "checks": "Read it."},
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"], "context": "Spec.", "checks": {"manual": "Read it."}},
                                 {"id": "02", "files": ["next.txt"], "blockers": ["01"], "context": "Spec.",
-                                 "checks": "Read it."}])
+                                 "checks": {"manual": "Read it."}}])
         self.launch()
         (self.repo / "owned.txt").write_text("implemented\n")
         report = self.repo / ".fleet/runs/demo/reports/01.md"

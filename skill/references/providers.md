@@ -226,3 +226,18 @@ To turn a placeholder into a working adapter, the owner fills it in under `[prov
 Then test it as below before routing real work to it.
 
 For every new adapter, test a harmless local ticket, multiple waves, a required review at capacity, process exit confirmation and recovery. Keep unavailable adapters out of auto routing. Login expiry needs the owner. On quota exhaustion the lead may resume after the reset or steer within the run's routing (skill step 1); otherwise it needs the owner. Neither is a reason to ignore the worker contract.
+
+## Config keys
+
+`skill/providers.toml` and the owner's `~/.config/agent-fleet/config.toml` take only the keys below. An unknown key prints a warning on stderr naming the file, the section and the key, with the closest known key when one is near (`[providers.codex.tiers.standard]: unknown key "modle" (did you mean "model"?)`), and the command still runs. **The next version refuses unknown keys**, so fix a warning when you see it.
+
+| Section | Keys |
+| --- | --- |
+| Top level | `defaults`, `providers`, `lead_context` |
+| `[defaults]` | `workspace`, `routing`, `prefer`, `max_parallel`, `review`, `review_rounds`, `gate`, `gate_rounds`, `auto_trust`, `backend`, `tmux_socket`, `max_workers`, `max_wall_minutes`, `scope_ignore`, `permission_ceiling`, `check_policy`, `scope_permissions`, `review_transport` |
+| `[providers.<name>]` | `enabled`, `placeholder`, `extends`, `bin`, `bin_aliases`, `launch`, `profiles`, `session`, `resume`, `quit`, `login`, `login_ok`, `account_env`, `env`, `trust`, `models`, `model_config`, `default_home`, `model_note`, `models_allow`, `model_families`, `family_prefixes`, `efforts`, `family`, `plugins`, `max`, `tiers`, `hooks`, `headless`, `review_transport` |
+| `[providers.<name>.tiers.<tier>]` | `model`, `effort`, `family` (any tier name) |
+| `[providers.<name>.profiles.<role>]` | `args`, `level`; the roles are `worker` and `review` |
+| `[lead_context.<host>]` | `warn_at`, `dumb_at`; the hosts are `claude` and `codex`. Here another host or key is already an error |
+
+`env`, `family_prefixes`, `model_families`, a `models_allow` table and `hooks` are free-form: their keys are variable names, model IDs or prefixes, so Fleet does not check them. The [providers.toml header](../providers.toml) documents each adapter field; `config.example.toml` comments each `[defaults]` key.

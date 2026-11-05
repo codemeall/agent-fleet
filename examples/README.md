@@ -32,7 +32,7 @@ To watch the workers yourself, run `fleet agents docs-demo` in another terminal:
 
 ## Verify and continue
 
-For each completed writer, read its report, inspect its file and run its exact check yourself. Stop the worker and capture its scoped diff:
+For each completed writer, read its report, inspect its file and run its exact check: the plan gives it as a command, so `fleet gate docs-demo overview` runs it and writes the evidence, and lists the manual prose review it leaves to you. Stop the worker and capture its scoped diff:
 
 ```sh
 fleet stop docs-demo overview

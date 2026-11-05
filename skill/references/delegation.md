@@ -44,16 +44,16 @@ fleet add desk-20261007 --file - <<'JSON'
 {"tickets": [
   {"id": "fix-flaky", "task": "test_retry fails about 1 run in 5; make it deterministic.",
    "files": ["tests/test_x.py"], "provider": "codex", "tier": "light",
-   "context": "Do not change src/.", "checks": "pytest -q tests/test_x.py five times; all pass"},
+   "context": "Do not change src/.", "checks": [{"run": "for i in 1 2 3 4 5; do pytest -q tests/test_x.py || exit 1; done"}]},
   {"id": "why-slow", "kind": "investigate", "task": "Why did test_perf get 3x slower this week?",
    "provider": "claude", "context": "Start at src/cache.py and git log -- src/cache.py.",
-   "checks": "pytest -q tests/test_perf.py --durations=5"}
+   "checks": [{"run": "pytest -q tests/test_perf.py --durations=5"}]}
 ], "decisions": ["Owner: fix the flake without touching src/."]}
 JSON
 fleet launch desk-20261007 --ready
 ```
 
-- `task` is inline text; Fleet writes it to `.fleet/runs/<run>/tasks/<id>.md`. Give `context` and `checks` so the prompt is complete and `--ready` can write it.
+- `task` is inline text; Fleet writes it to `.fleet/runs/<run>/tasks/<id>.md`. Give `context` and `checks` so the prompt is complete and `--ready` can write it. `checks` needs at least one `{"run": …}` command or `{"manual": "<one-line reason>"}` check, or `add` refuses the ticket ([plan](commands.md#plan)).
 - `add` appends and never changes saved tickets. A new ticket touching files of an unverified ticket must list it in `blockers`.
 - `--ready` prints `LAUNCHED` or `SKIPPED <id>: <reason>` per ticket and no worker screens; `fleet wait` reports a worker stuck at a prompt as `STALLED`.
 

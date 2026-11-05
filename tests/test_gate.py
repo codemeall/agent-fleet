@@ -41,6 +41,7 @@ class Gate(RuntimeCase):
                       "- `true` (from the repository root; Fleet runs it with fleet gate)\n", text)
 
     def test_prose_checks_save_no_commands(self):
+        self.cfg["defaults"]["check_policy"] = "warn"  # prose alone is refused under the default policy (#13)
         self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"], "checks": ["python3 -m unittest", "read it"]},
                                 {"id": "02", "files": ["next.txt"], "checks": "npm run lint"}])
         for t in self.state()["tickets"].values():
@@ -59,7 +60,7 @@ class Gate(RuntimeCase):
                  ({"run": "true", "cwd": "file.txt"}, "not a directory"),
                  ({"run": "true", "timeout": 0}, "timeout"), ({"run": "true", "timeout": 3601}, "timeout"),
                  ({"run": "true", "timeout": "30"}, "timeout"), ({"run": "true", "timeout": 1.5}, "timeout"),
-                 ({"run": "true", "timeout": True}, "timeout"), ({"run": "true", "manual": "x"}, "unknown key manual")]
+                 ({"run": "true", "timeout": True}, "timeout"), ({"run": "true", "manual": "x"}, 'takes only "manual"')]
         for command, message in cases:
             with self.subTest(command=command):
                 out = self.call("plan", "demo", "--file", str(self.plan_with(["prose", command])), expected=1)
@@ -167,7 +168,7 @@ class Gate(RuntimeCase):
         self.assertIn("GATE 01 1/1 passed, scope ok;", self.call("gate", "demo", "01"))
 
     def test_gate_refuses_prose_checks_reviewers_and_unknown_ids(self):
-        self.setup_run(review="cross-all", tickets=[{"id": "01", "files": ["owned.txt"], "checks": "Read it."}])
+        self.setup_run(review="cross-all", tickets=[{"id": "01", "files": ["owned.txt"], "checks": {"manual": "Read it."}}])
         self.assertIn("run its checks by hand", self.call("gate", "demo", "01", expected=1))
         self.launch()
         (self.repo / "owned.txt").write_text("in scope\n")

@@ -66,7 +66,9 @@ DEFAULTS = {
     # "name/" is a directory at any depth ("a/b/" is anchored at the root), anything else an exact path.
     "scope_ignore": [".scratch/", "node_modules/", "__pycache__/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/"],
     "permission_ceiling": "workspace-write",  # the widest profile level launch will start; the owner's to raise
+    "check_policy": "refuse",  # plan and add refuse a ticket without a runnable or manual check; "warn" saves it
 }
+CHECK_POLICIES = ("refuse", "warn")
 STATUS_RE = re.compile(r"^\s*[*_`]*\s*status\s*[*_`]*\s*:\s*[*_`]*\s*(.+?)\s*[*_`]*\s*$", re.I)
 SURFACE_RE = re.compile(r"(surface:\d+)(?: \(([^)\s]+)\))?")  # the UUID follows when cmux is asked for both
 WORKSPACE_REF_RE = re.compile(r"workspace:\d+\Z")
@@ -104,6 +106,15 @@ class PaneLimit(FleetError):
 # ---------- config ----------
 
 REPLACE_KEYS = {"models_allow"}  # a user's list replaces the shipped one instead of merging into it
+# Keys load_config knows besides DEFAULTS'. An unknown key only warns in this version; the next one refuses it.
+DEFAULTS_EXTRA_KEYS = ("scope_permissions", "review_transport")
+ADAPTER_FIELDS = (  # every adapter field the providers.toml header documents, plus bin, max, plugins and env
+    "enabled", "placeholder", "extends", "bin", "bin_aliases", "launch", "profiles", "session", "resume", "quit",
+    "login", "login_ok", "account_env", "env", "trust", "models", "model_config", "default_home", "model_note",
+    "models_allow", "model_families", "family_prefixes", "efforts", "family", "plugins", "max", "tiers",
+    "hooks", "headless", "review_transport")
+TIER_FIELDS = ("model", "effort", "family")
+PROFILE_FIELDS = ("args", "level")
 
 
 def deep_merge(base: dict, over: dict) -> dict:
@@ -116,13 +127,57 @@ def deep_merge(base: dict, over: dict) -> dict:
     return out
 
 
+def config_schema() -> dict:
+    """The keys each config section takes. A dict names its keys ("*" stands for any name, such as an adapter or
+    a tier); None is a value Fleet does not look inside: a scalar, a list or a free-form table (env, family_prefixes,
+    model_families, models_allow, hooks)."""
+    adapter = dict.fromkeys(ADAPTER_FIELDS)
+    adapter["tiers"] = {"*": dict.fromkeys(TIER_FIELDS)}
+    adapter["profiles"] = {p: dict.fromkeys(PROFILE_FIELDS) for p in PROFILES}
+    return {"defaults": dict.fromkeys([*DEFAULTS, *DEFAULTS_EXTRA_KEYS]),
+            "providers": {"*": adapter},
+            "lead_context": {host: {"warn_at": None, "dumb_at": None} for host in LEAD_HOSTS}}
+
+
+def toml_key(key: str) -> str:
+    return key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else json.dumps(key)
+
+
+def unknown_keys(data: dict, schema: dict, section: tuple[str, ...] = ()) -> list[tuple[str, str, str | None]]:
+    """(section, key, closest known key) for every key `schema` does not name, depth first."""
+    out = []
+    for key, value in data.items():
+        if key in schema:
+            sub = schema[key]
+        elif "*" in schema:
+            sub = schema["*"]
+        else:
+            close = difflib.get_close_matches(key, list(schema), n=1, cutoff=0.6)
+            out.append((".".join(map(toml_key, section)), key, close[0] if close else None))
+            continue
+        if isinstance(sub, dict) and isinstance(value, dict):
+            out += unknown_keys(value, sub, section + (key,))
+    return out
+
+
+def warn_unknown_keys(path: Path, data: dict) -> None:
+    for section, key, close in unknown_keys(data, config_schema()):
+        where = f"[{section}]" if section else "the top level"
+        hint = f" (did you mean {json.dumps(close)}?)" if close else ""
+        print(f"warning: {path} {where}: unknown key {json.dumps(key)}{hint}; Fleet ignores it for now, and it "
+              "becomes an error in the next version", file=sys.stderr)
+
+
 def load_config(user_path: Path | None = None) -> dict:
     user_path = user_path or USER_CONFIG
     with open(SKILL_DIR / "providers.toml", "rb") as fh:
         cfg = tomllib.load(fh)
+    warn_unknown_keys(SKILL_DIR / "providers.toml", cfg)
     if user_path.exists():
         with open(user_path, "rb") as fh:
-            cfg = deep_merge(cfg, tomllib.load(fh))
+            user = tomllib.load(fh)
+        warn_unknown_keys(user_path, user)
+        cfg = deep_merge(cfg, user)
     cfg["defaults"] = deep_merge(DEFAULTS, cfg.get("defaults", {}))
     cfg["providers"] = {name: resolve_extends(cfg["providers"], name) for name in cfg["providers"]}
     if not isinstance(cfg["defaults"]["max_parallel"], int) or cfg["defaults"]["max_parallel"] < 1:
@@ -141,6 +196,8 @@ def load_config(user_path: Path | None = None) -> dict:
             raise FleetError(f"defaults.{key} must be a whole number, or 0 for no cap")
     if not isinstance(cfg["defaults"]["auto_trust"], bool):
         raise FleetError("defaults.auto_trust must be true or false")
+    if cfg["defaults"]["check_policy"] not in CHECK_POLICIES:
+        raise FleetError('defaults.check_policy must be "refuse" (the default) or "warn"')
     if cfg["defaults"]["permission_ceiling"] not in PERMISSION_LEVELS:
         raise FleetError(f"defaults.permission_ceiling must be one of {', '.join(PERMISSION_LEVELS)} (narrowest first)")
     if cfg["defaults"]["backend"] not in ("auto", *BACKENDS):
@@ -1768,15 +1825,27 @@ def init_review_check(cfg: dict, options: dict, pool: dict | None) -> None:
           review_impossible(options["review"], options["routing"], writer, reasons), file=sys.stderr)
 
 
-CHECK_KEYS = {"run", "cwd", "timeout"}  # a future key (such as a manual marker) is refused until Fleet knows it
+CHECK_KEYS = {"run", "cwd", "timeout"}  # a future key is refused until Fleet knows it
 CHECK_TIMEOUT, CHECK_TIMEOUT_MAX = 300, 3600
+CHECK_FORMS = ('{"run": "<command>", "cwd": "<repo-relative dir>", "timeout": <seconds>} (cwd and timeout optional), '
+               'which fleet gate runs', '{"manual": "<one-line reason no command can check it>"}, which the lead '
+               'checks by hand')
 
 
 def check_command(repo: Path, i: str, raw: dict) -> dict:
-    """One runnable check, `{"run", "cwd", "timeout"}`, normalized for `fleet gate`."""
+    """One check object: a runnable `{"run", "cwd", "timeout"}`, normalized for `fleet gate`, or a manual
+    marker `{"manual": "<reason>"}` for what no command can check."""
+    if "manual" in raw:
+        reason = raw["manual"]
+        if set(raw) != {"manual"}:
+            raise FleetError(f"{i}: a manual check takes only \"manual\", its reason; give a command as its own item")
+        if not isinstance(reason, str) or not reason.strip() or "\n" in reason.strip() or "\r" in reason.strip():
+            raise FleetError(f"{i}: a manual check needs \"manual\": a nonempty one-line reason no command can check it")
+        return {"manual": reason.strip()}
     unknown = sorted(set(raw) - CHECK_KEYS)
     if unknown:
-        raise FleetError(f"{i}: unknown key {', '.join(unknown)} in a check; a command takes run, cwd and timeout")
+        raise FleetError(f"{i}: unknown key {', '.join(unknown)} in a check; a command takes run, cwd and timeout, "
+                         "a manual check only manual")
     run = raw.get("run")
     if not isinstance(run, str) or not run.strip():
         raise FleetError(f"{i}: a check command needs \"run\": the shell command to run")
@@ -1801,31 +1870,46 @@ def code_span(text: str) -> str:
 
 
 def check_line(c: dict) -> str:
+    if "manual" in c:
+        return f"Manual: {c['manual']}"
     where = "the repository root" if c["cwd"] == "." else c["cwd"] + "/"
     return f"{code_span(c['run'])} (from {where}; Fleet runs it with fleet gate)"
 
 
-def normalize_checks(repo: Path, i: str, value) -> tuple[str, list[dict]]:
-    """A ticket's `checks` as prompt text plus the commands `fleet gate` runs. Prose (a string, or a list of
-    strings) reads exactly as before and yields no commands; a list may mix prose with command objects."""
+def normalize_checks(repo: Path, i: str, value) -> tuple[str, list[dict], list[str]]:
+    """A ticket's `checks` as prompt text, the commands `fleet gate` runs and the manual checks' reasons. Prose (a
+    string, or a list of strings) reads exactly as before and yields neither; a list may mix prose with command
+    and manual objects. Whether prose alone may be saved is check_policy's call (unverifiable_checks)."""
     if isinstance(value, dict):
         value = [value]
     if isinstance(value, list) and value and all(isinstance(x, (str, dict)) for x in value):
-        lines, commands = [], []
+        lines, commands, manual = [], [], []
         for x in value:
             if isinstance(x, dict):
-                commands.append(check_command(repo, i, x))
-                lines.append(check_line(commands[-1]))
+                c = check_command(repo, i, x)
+                if "manual" in c:
+                    manual.append(c["manual"])
+                else:
+                    commands.append(c)
+                lines.append(check_line(c))
             elif x.strip():
                 lines.append(x.strip())
             else:
                 break
         else:
-            return "\n".join(f"- {x}" for x in lines), commands
+            return "\n".join(f"- {x}" for x in lines), commands, manual
     if not isinstance(value, str) or not value.strip():
-        raise FleetError(f"{i}: checks must be nonempty text or a list of nonempty strings and "
-                         "{\"run\": …} commands; omit it to fill the prompt by hand")
-    return value.strip(), []
+        raise FleetError(f"{i}: checks must be nonempty text or a list of nonempty strings, {{\"run\": …}} commands "
+                         "and {\"manual\": …} checks; omit it to fill the prompt by hand")
+    return value.strip(), [], []
+
+
+def unverifiable_checks(i: str, empty: bool) -> str:
+    """Why plan and add refuse (or, under check_policy = "warn", only warn about) ticket `i`'s checks."""
+    what = "are empty" if empty else "are prose only, with no runnable command and no manual marker"
+    return (f"{i}: its checks {what}, so nothing ties its criteria to a check. Give at least one of:\n"
+            + "\n".join(f"  {form}" for form in CHECK_FORMS)
+            + '\nFor example: "checks": ["Read the copy", {"run": "npm test"}, {"manual": "visual layout check"}]')
 
 
 def validate_ticket(repo: Path, d: Path, state: dict, cfg: dict, pool: dict | None,
@@ -1884,9 +1968,21 @@ def validate_ticket(repo: Path, d: Path, state: dict, cfg: dict, pool: dict | No
     if "commands" in t:
         raise FleetError(f"{i}: give runnable checks inside checks, as {{\"run\": …}} items, not as commands")
     if "checks" in t:
-        t["checks"], commands = normalize_checks(repo, i, t["checks"])
+        empty = t["checks"] in ("", [], {}) or isinstance(t["checks"], str) and not t["checks"].strip()
+        commands, manual = [], []
+        if not empty:
+            t["checks"], commands, manual = normalize_checks(repo, i, t["checks"])
+        if not commands and not manual:
+            message = unverifiable_checks(i, empty)
+            if cfg["defaults"].get("check_policy", "refuse") != "warn":
+                raise FleetError(message)
+            print(f"warning: {message}\nSaved anyway: [defaults] check_policy is \"warn\".", file=sys.stderr)
+            if empty:
+                del t["checks"]  # as if omitted: its prompt keeps a <!-- LEAD: … --> comment to fill by hand
         if commands:
             t["commands"] = commands
+        if manual:
+            t["manual"] = manual
     for key in ("context",):
         if key not in t:
             continue
@@ -3780,7 +3876,8 @@ def gate_scope(repo: Path, state: dict, i: str, now: dict,
             + "\n".join(f"- {code_span(p)} ({kind})" for p, kind, _ in changes), changes)
 
 
-def gate_evidence(run: str, i: str, results: list[dict], scope: str, summary: str) -> str:
+def gate_evidence(run: str, i: str, results: list[dict], scope: str, summary: str,
+                  manual: list[str] = ()) -> str:
     lines = [f"# Gate evidence: {i}", "",
              f"Run `{run}`, ticket `{i}`, {time.strftime('%Y-%m-%dT%H:%M:%S')}. Fleet ran each command with "
              "/bin/sh from its directory, without the lead's session variables or stdin.", "", "## Commands", ""]
@@ -3793,6 +3890,9 @@ def gate_evidence(run: str, i: str, results: list[dict], scope: str, summary: st
             tail = "\n".join(r["output"].rstrip().splitlines()[-GATE_TAIL_LINES:])
             lines += ["", f"### Output of {n}: {code_span(r['run'])} (last {GATE_TAIL_LINES} lines at most)", "",
                       fenced(tail) if tail.strip() else "No output."]
+    if manual:
+        lines += ["", "## Manual checks", "", "Skipped: no command checks these, so the lead checks them by hand "
+                  "and records the result in its own evidence.", ""] + [f"- {m}" for m in manual]
     lines += ["", "## Scope", "", scope, "", "## Result", "", summary]
     return "\n".join(lines) + "\n"
 
@@ -3824,8 +3924,9 @@ def cmd_gate(a, cfg):
     if t["status"] == "dropped":
         raise FleetError(f"{a.id} was dropped; there is nothing to gate")
     if not t.get("commands"):
-        raise FleetError(f"{a.id} has no runnable checks in the plan; run its checks by hand and write the evidence "
-                         "file yourself")
+        manual = " (its checks are manual)" if t.get("manual") else ""
+        raise FleetError(f"{a.id} has no runnable checks in the plan{manual}; run its checks by hand and write the "
+                         "evidence file yourself")
     d = run_dir(repo, a.run)
     out = Path(a.output) if a.output else gate_file(repo, a.run, a.id)
     if not out.parent.is_dir():
@@ -3860,8 +3961,10 @@ def run_gate(repo: Path, state: dict, cfg: dict, i: str, out: Path, loop: bool =
             "; a worker was running, so they still count (Fleet cannot tell them from its edits)." if not loop else
             "; a worker was running, so verify still counts them, but they did not fail this gate.")
     failed = [r for r in results if check_failed(r)]
-    summary = f"{len(results) - len(failed)}/{len(results)} passed, {scope_word}"
-    out.write_text(gate_evidence(state["run"], i, results, scope, summary))
+    manual = state["tickets"][i].get("manual", [])
+    summary = f"{len(results) - len(failed)}/{len(results)} passed, {scope_word}" + (
+        f", {len(manual)} manual check(s) skipped" if manual else "")
+    out.write_text(gate_evidence(state["run"], i, results, scope, summary, manual))
     return {"failed": failed, "unowned": unowned, "wrote": wrote, "excused": excused, "summary": summary,
             "after": after}
 
