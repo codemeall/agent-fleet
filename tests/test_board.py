@@ -4,6 +4,7 @@ mentions file with no keystrokes, and `fleet board`, resume and handoff show the
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import unittest
@@ -105,6 +106,24 @@ class Note(BoardCase):
             self.note("from the tree")
         self.assertTrue(self.board()[0].endswith(" 01: from the tree"))
         self.assertFalse((tree / ".fleet").exists())
+
+    def test_a_worker_tree_finds_the_owners_run_when_the_git_directory_lives_elsewhere(self):
+        self.setup_run()
+        self.launch()
+        store = Path(self.temp.name + "-store.git")                         # as `git init --separate-git-dir`
+        self.addCleanup(shutil.rmtree, store, True)
+        (self.repo / ".git").rename(store)
+        (self.repo / ".git").write_text(f"gitdir: {store}\n")
+        self.git("config", "core.worktree", str(self.repo))
+        tree = self.repo.parent / (self.repo.name + "-tree")
+        self.git("worktree", "add", "-q", "--detach", str(tree))
+        self.addCleanup(shutil.rmtree, tree, True)
+        with patch.object(fleet, "repo_root", return_value=tree.resolve()):
+            self.note("from the tree")
+            self.assertIn("1 entries", self.call("board", "demo"))
+        self.assertTrue(self.board()[0].endswith(" 01: from the tree"))
+        self.assertFalse((tree / ".fleet").exists())
+        self.assertIn(self.repo, fleet.main_checkouts(tree))
 
 
 class Mentions(BoardCase):

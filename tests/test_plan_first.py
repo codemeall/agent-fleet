@@ -7,6 +7,8 @@ import contextlib
 import io
 import json
 import sys
+import time
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -217,6 +219,38 @@ class Wake(PlanFirstCase):
         self.assertNotIn("SCOPE", out)
 
 
+    def test_an_unreadable_plan_still_wakes_and_loses_no_other_hand_back(self):
+        self.cfg["providers"]["writer"]["max"] = 2
+        self.launched([{"id": "01", "files": ["owned.txt"], "plan_first": True}, {"id": "02", "files": ["next.txt"]}])
+        self.write_plan()
+        self.write_report("02")
+        with patch.object(fleet, "plan_lines", side_effect=OSError("disk read failed")):
+            out = self.wait()  # the scan has marked both reports seen: neither may be lost
+        self.assertIn("PLAN 01: its plan was not read (disk read failed); read .fleet/runs/demo/reports/01.md", out)
+        self.assertIn("REPORT 02 [needs-verification]", out)
+        self.assertNotIn("REPORT 01", out)  # a plan is never gated or reviewed, even unread
+        gone = self.run_file("reports", "gone.md")
+        keep, lines = fleet.plan_pass(self.repo, self.state(), [("01", "plan-ready", gone)])
+        self.assertEqual(keep, [])
+        self.assertIn("PLAN 01: its plan was not read", lines["01"][0])  # a report gone since the scan
+
+    def test_a_plan_rewritten_while_wait_settles_wakes_once_as_it_stands(self):
+        self.launched()
+        self.write_plan()
+        real_sleep, rewritten = time.sleep, []
+
+        def sleep(seconds):
+            if not rewritten:  # the worker rewrites its plan inside the settle window
+                rewritten.append(True)
+                self.write_plan(prose="## Plan\n- Files: owned.txt, the revised greeting.\n")
+            real_sleep(min(seconds, 0.05))
+        with patch.object(fleet.time, "sleep", side_effect=sleep):
+            out = self.call("wait", "demo", "--timeout", "5", "--settle", "1", "--stall", "0")
+        self.assertTrue(rewritten)
+        self.assertEqual(len([x for x in out.splitlines() if x.startswith("PLAN 01")]), 1, out)
+        self.assertIn("> - Files: owned.txt, the revised greeting.", out)
+        self.assertNotIn("rewrite the greeting", out)  # the first version is not shown beside it
+
     def test_a_plan_from_a_ticket_that_is_not_plan_first_says_so_instead_of_asking_for_approve(self):
         self.launched([{"id": "01", "files": ["owned.txt"]}])
         self.write_plan()
@@ -360,6 +394,13 @@ class Approve(PlanFirstCase):
         self.assertTrue(self.run_file("plans", "01.md").exists())  # its prompt says to follow it
         self.assertEqual(fleet.unowned_for(self.repo, self.state(), "01"), [])
 
+    def test_a_plan_first_ticket_owns_its_files_from_approval(self):
+        self.launched()
+        self.assertEqual(fleet.owned_files(self.state(), "01"), [])
+        self.write_plan()
+        self.call("approve", "demo", "01")
+        self.assertEqual(fleet.owned_files(self.state(), "01"), ["owned.txt"])
+
     def test_resume_shows_the_plan_state(self):
         self.launched()
         self.assertIn("plan=pending", self.call("resume", "demo"))
@@ -430,6 +471,46 @@ class PlanReview(PlanFirstCase):
         self.assertIn("plan reviewer plan-review-01 may still be running", out)
         self.assertIn("may still be running", self.call("approve", "demo", "01", "--review", expected=1))
 
+    def test_send_changes_stops_finished_plan_reviewers_so_the_revised_plan_can_be_approved(self):
+        self.launched()
+        self.write_plan()
+        self.wait()
+        self.call("approve", "demo", "01", "--review")
+        self.write_report("plan-review-01", findings=[{"severity": "high", "file": "plan", "confidence": "confirmed"}],
+                          prose="## Findings\n- High, plan: no test for callers.\n")
+        self.wait()
+        self.call("send", "demo", "01", "--changes", "Add the callers test to the plan.")
+        state = self.state()
+        self.assertEqual(state["workers"]["plan-review-01"]["state"], "exited")  # stopped, as approve stops it
+        self.assertEqual(fleet.parse_status(self.run_file("reports", "plan-review-01.md").read_text()), "verified")
+        self.assertEqual(fleet.parse_status(self.run_file("reports", "01.md").read_text()), "changes-requested")
+        self.write_plan(prose="## Plan\n- Tests: a callers test.\n")
+        self.wait()
+        self.assertIn("APPROVED 01", self.call("approve", "demo", "01"))
+        self.assertEqual(self.ticket()["plan"]["status"], "approved")
+
+    def test_send_changes_waits_for_a_plan_reviewer_still_at_work(self):
+        self.launched()
+        self.write_plan()
+        self.call("approve", "demo", "01", "--review")
+        out = self.call("send", "demo", "01", "--changes", "Revise the plan.", expected=1)
+        self.assertIn("plan reviewer plan-review-01 may still be running", out)
+        self.assertEqual(fleet.parse_status(self.run_file("reports", "01.md").read_text()), "plan-ready")  # unparked
+        self.assertFalse(self.run_file("inbox", "01.md").exists())
+        self.assertEqual(self.state()["workers"]["plan-review-01"]["state"], "running")
+
+    def test_a_second_plan_review_starts_its_own_scope_window(self):
+        self.launched()
+        self.write_plan()
+        self.call("approve", "demo", "01", "--review")
+        (self.repo / "stray.txt").write_text("an edit while the first plan review ran\n")
+        self.assertEqual([c[:2] for c in fleet.unowned_for(self.repo, self.state(), "plan-review-01")],
+                         [("stray.txt", "created")])
+        self.write_report("plan-review-01")
+        self.wait()
+        self.call("approve", "demo", "01", "--review")  # a second review of the plan, under the same id
+        self.assertEqual(fleet.unowned_for(self.repo, self.state(), "plan-review-01"), [])  # its own launch's window
+
     def test_plan_review_needs_another_family_and_room(self):
         self.launched()
         self.write_plan()
@@ -467,6 +548,33 @@ class Hooks(PlanFirstCase):
         scope = json.loads(scope_file.read_text())
         self.assertEqual(scope["files"], ["owned.txt"])
         self.assertNotIn("plan", scope)
+
+    def guard(self, path) -> int:
+        """Run the worker's PreToolUse guard on an Edit of `path`, as Claude Code would."""
+        w = self.state()["workers"]["01"]
+        payload = json.dumps({"tool_name": "Edit", "tool_input": {"file_path": str(path)}, "cwd": str(self.repo)})
+        with patch.object(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(payload.encode()))), \
+                contextlib.redirect_stderr(io.StringIO()):
+            return fleet.run_hook(["pre-tool-use", w["hooks"]["scope"], w["hooks"]["events"], w["token"]])
+
+    def test_a_scoped_planner_has_its_file_rules_from_launch_and_its_guard_refuses_them_until_approval(self):
+        self.cfg["defaults"]["scope_permissions"] = True
+        self.launched()
+        settings = Path(self.state()["workers"]["01"]["hooks"]["settings"])
+        rule = fleet.edit_rule(str(self.repo / "owned.txt"))
+        self.assertIn(rule, json.loads(settings.read_text())["permissions"]["allow"])  # Claude reads it at start
+        self.assertEqual(self.guard(self.repo / "owned.txt"), 2)  # the guard runs first and refuses the edit
+        self.assertEqual(self.guard(self.run_file("reports", "01.md")), 0)  # its plan goes in its report
+        self.write_plan()
+        self.call("approve", "demo", "01")
+        self.assertEqual(self.guard(self.repo / "owned.txt"), 0)  # approved: the same rule now applies
+        allow = json.loads(settings.read_text())["permissions"]["allow"]
+        self.assertEqual(allow.count(rule), 1)
+
+    def test_an_unscoped_planner_may_write_only_its_report_unasked_as_before(self):
+        self.launched()
+        settings = json.loads(Path(self.state()["workers"]["01"]["hooks"]["settings"]).read_text())
+        self.assertEqual(settings["permissions"]["allow"], [fleet.edit_rule(str(self.run_file("reports", "01.md")))])
 
 
 class Worktree(WorktreeCase):

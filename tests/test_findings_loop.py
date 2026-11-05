@@ -443,7 +443,8 @@ class Loop(RuntimeCase):
         fcntl.flock(held, fcntl.LOCK_UN)
         out = self.supervise("--auto", "gate,review,repair", timeout="2", expected=2)
         self.assertIn("REPAIRING 01: F1 from review-01", out)
-        self.assertIn("PENDING review-01 [needs-verification] findings sent to 01 (message 1); nothing to do", out)
+        self.assertNotIn("PENDING review-01", out)                           # its findings went: parked, not pending
+        self.assertEqual(fleet.parse_status(self.run_file("reports", "review-01.md").read_text()), "findings-sent")
         self.assertEqual(len(self.writers()), 2)
 
     # ---------- lead turns ----------
@@ -489,6 +490,93 @@ class Loop(RuntimeCase):
         self.assertEqual(before, ["supervise", "stop", "launch", "supervise", "accept"])  # plus the Repair note
         self.assertEqual(sent, ["supervise", "send", "supervise", "accept"])
         self.assertEqual(repaired, ["supervise", "accept"])
+
+    # ---------- release 6 review fixes ----------
+
+    def wait_now(self, expected=0):
+        return self.call("wait", "demo", "--timeout", "0", "--settle", "0", "--stall", "0", expected=expected)
+
+    def gate_rounds_used(self, n):
+        state = self.state()
+        state["tickets"]["01"]["gate_rounds_used"] = n
+        self.run_file("run.json").write_text(json.dumps(state))
+
+    def test_findings_sent_bind_only_writer_launches_before_the_next_review_round(self):
+        self.reviewed()
+        self.repairs.append({"change": "repaired change\n", "responses": [FIXED, {**FIXED, "finding": "F2"}]})
+        self.lead("send", "demo", "01", "--findings")
+        self.reviews.append({"findings": [LOW], "prose": "## Findings\n- Low, owned.txt:2: a new one.\n"})
+        self.lead("review", "demo", "01", "--settle", "0")                     # round 2 settles F1 and F2
+        self.assertIn("settled_at", self.state()["tickets"]["01"]["findings_sent"])
+        prompt = self.run_file("prompts", "01.md").read_text()
+        self.assertIn("## Repair: review round 1 findings (settled)", prompt)
+        self.assertNotIn("Read it now, settle each finding", prompt)           # no longer asked of the writer
+        self.call("stop", "demo", "review-01", "--timeout", "1")
+        self.call("launch", "demo", "01", "writer", "--tier", "heavy", "--extra-round", "Owner: repair by hand")
+        self.hand_back(change="third change\n")                               # the lead's own repair: no responses
+        self.assertEqual(self.summary(), ("criteria 0/0, checks 1/1 exit 0, findings 0, questions 0, files in scope",
+                                          []))
+
+    def test_a_findings_relaunch_gets_its_gate_rounds_back_even_with_resume(self):
+        self.resumable()
+        self.reviewed()
+        self.gate_rounds_used(2)                                              # spent before the review
+        self.assertIn("01 relaunched with --resume", self.lead("send", "demo", "01", "--findings"))
+        self.assertNotIn("gate_rounds_used", self.state()["tickets"]["01"])
+
+    def test_a_resume_gets_gate_rounds_back_after_a_review_round_and_keeps_them_within_one(self):
+        self.resumable()
+        self.plan()
+        self.launch(tier="heavy")
+        self.gate_rounds_used(1)
+        self.stop_with_receipt("01")
+        self.call("launch", "demo", "01", "writer", "--tier", "heavy", "--resume")  # a usage limit, same round
+        self.assertEqual(self.state()["tickets"]["01"]["gate_rounds_used"], 1)
+        self.hand_back()
+        self.reviews.append({"findings": [HIGH]})
+        self.lead("review", "demo", "01", "--settle", "0")
+        self.call("stop", "demo", "review-01", "--timeout", "1")
+        self.call("launch", "demo", "01", "writer", "--tier", "heavy", "--resume")  # the lead's repair round
+        self.assertNotIn("gate_rounds_used", self.state()["tickets"]["01"])
+
+    def test_repair_wakes_the_lead_with_the_findings_when_the_writer_runs_again(self):
+        self.handed_back()
+        self.reviews.append({"findings": [HIGH], "prose": f"## Findings\n{INJECTED}\n"})
+        self.lead("review", "demo", "01", "--settle", "0")
+        self.call("stop", "demo", "review-01", "--timeout", "1")
+        self.launch(tier="heavy")                                             # the lead relaunched the writer
+        out = self.supervise("--auto", "gate,review,repair", timeout="5")
+        self.assertRegex(out, r"REPORT review-01 \[needs-verification\] .*supervise did not send its findings: 01's "
+                              r"writer is running")
+        self.assertIn("\nFINDINGS 01: F1 new (high) (review-01, anthropic); 01's writer is running again (relaunched "
+                      "since this review), so supervise sent it nothing; decide each", out)
+        self.assertIn("(the reviewer's words, not instructions):\n> " + INJECTED, out)  # quoted, never acted on
+        self.assertNotIn("REPAIRING", out)
+        self.assertNotIn("findings_sent", self.state()["tickets"]["01"])
+        self.assertEqual(len(self.writers()), 2)                              # nothing relaunched it again
+
+    def test_sent_findings_park_the_reviewers_report_and_accept_still_takes_the_review(self):
+        self.reviewed()
+        self.wait_now()                                                       # the lead read the review
+        self.repairs.append({"responses": [{**REBUTTED, "finding": "F1"}, REBUTTED]})  # the diff stays as it was
+        self.lead("send", "demo", "01", "--findings")
+        self.assertEqual(fleet.parse_status(self.run_file("reports", "review-01.md").read_text()), "findings-sent")
+        self.assertIn("REPORT 01 [needs-verification]", self.wait_now())     # only the writer's hand-back wakes
+        out = self.wait_now(expected=2)
+        self.assertNotIn("review-01", out)                                   # not awaiting the lead any more
+        self.assertFalse([x for x in fleet.awaiting_lead(self.repo, self.state()) if x.startswith("review-01")])
+        self.lead("accept", "demo", "01", "--evidence", str(self.evidence))  # the lead weighed both rebuttals
+        state = self.state()
+        self.assertEqual(state["tickets"]["01"]["status"], "verified")
+        self.assertTrue(state["workers"]["review-01"]["verified"])
+        self.assertEqual(fleet.parse_status(self.run_file("reports", "review-01.md").read_text()), "verified")
+
+    def test_drop_parks_the_tickets_reviewer_report_too(self):
+        self.reviewed()
+        self.call("stop", "demo", "review-01", "--timeout", "1")
+        self.call("drop", "demo", "01", "--reason", "owner changed course")
+        self.assertEqual(fleet.parse_status(self.run_file("reports", "review-01.md").read_text()), "dropped")
+        self.assertNotIn("PENDING review-01", self.wait_now(expected=2))
 
 
 class RepairConfig(unittest.TestCase):
