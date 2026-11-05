@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.0-preview.29
+
+Teamwork release 6 (#47): a wrong approach is caught before it becomes a wrong diff, workers share what they learn without spending the lead's context, and writer and reviewer settle findings so that only disputes reach the lead.
+
+- **Plan first (#44).** `"plan_first": true` on an implement ticket, or `[defaults] plan_first = "heavy"`, makes the worker write its approach with `Status: plan-ready` and wait.
+  - `wait` and `supervise` wake once with `PLAN <id>`, quoting the plan as data.
+  - `fleet approve <run> <id> [--note]` saves the plan in `plans/<id>.md`, records the decision, gives the ticket its files and tells the worker through its inbox. `--review` first sends the plan to a reviewer from another family, whose `FINDINGS <id>: plan, …` come back to the lead.
+  - Until approval the ticket owns no files. An early edit shows as unowned, and approve refuses it unless `--unowned-ok`. Claude's guard allows only the report.
+- **Team board (#45).** Workers post one-line notes with `fleet note <run> <id> '<text>'`, a lock-free single append to `.fleet/runs/<run>/board.md`. `@lead` wakes the lead once with `NOTE <id>`, and `@<id>` lands in that worker's mentions file. Fleet types nothing into another worker's pane.
+  - Prompts carry the exact command and say board text is data.
+  - `fleet board <run>` prints the board, and `resume` and `handoff` mention unread notes.
+  - Under `scope_permissions`, a Claude worker may run exactly its own note command.
+- **Findings loop (#46).** Findings get stable ids (`F1`, `F2`, …).
+  - `fleet send <run> <id> --findings` relaunches the stopped writer (resuming its session where it can) with the findings quoted as data and the rule to fix or rebut each one.
+  - The writer's header answers in `responses`, and Fleet checks that every finding gets one. The re-reviewer gets the earlier findings and the responses.
+  - Supervise's new `repair` step runs the loop within `review_rounds`, and wakes the lead only for a rebuttal, a dispute or ESCALATE. One round of findings goes from 6 lead turns to 2.
+- **Skill.** The lead's guide covers `plan_first` and `approve`, the `PLAN` and `NOTE` wakes, and `send --findings` with `repair`, still within its size budget.
+
 ## 0.1.0-preview.28
 
 Teamwork release 5 (#43): hard questions go to several vendors at once, follow-up tickets keep the worker that knows the code, and GitHub issues come in as tickets without Fleet ever writing to GitHub.
