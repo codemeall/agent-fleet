@@ -264,6 +264,13 @@ class Wait(unittest.TestCase):
         ns = self.report.stat().st_mtime_ns + 1_000_000  # distinct mtime even on fast filesystems
         os.utime(self.report, ns=(ns, ns))
 
+    def test_a_hand_back_an_earlier_fleet_already_showed_does_not_wake_again(self):
+        self.write("Status: needs-verification\n")
+        (self.seen / "07").write_text(f"needs-verification|{self.report.stat().st_mtime_ns}")  # status|mtime, as before
+        self.assertEqual(self.scan(), [])
+        self.write("Status: needs-verification\nnew content\n")
+        self.assertEqual(self.scan(), [("07", "needs-verification")])
+
     def test_verification_cycle_wakes_exactly_when_the_worker_hands_back(self):
         self.write("# R\n")                                               # half-written, no status
         self.assertEqual(self.scan(), [])

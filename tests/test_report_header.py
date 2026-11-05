@@ -199,3 +199,10 @@ class ReportHeader(RuntimeCase):
         self.assertTrue(summary.startswith("## Work or review performed"), summary)
         unclosed = "# R\nStatus: needs-verification\n```fleet\n{}\n- prose a broken fence must not swallow\n"
         self.assertIn("- prose a broken fence must not swallow", fleet.report_summary(unclosed))
+
+    def test_the_workers_own_report_in_files_changed_is_not_a_header_problem(self):
+        self.setup_checked()
+        line = self.wake(report(header(files_changed=["owned.txt", f"{RUN}/reports/01.md"])))
+        self.assertIn("files in scope", line)
+        self.assertNotIn("header:", line)
+

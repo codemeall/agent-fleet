@@ -314,6 +314,31 @@ class GateLoop(RuntimeCase):
         self.assertIn("nothing was stopped or verified", out)
 
 
+    # ---------- after the code review ----------
+
+    def test_a_repair_relaunch_gets_the_gate_loops_rounds_again(self):
+        self.gated(FAILING)
+        for _ in range(2):
+            self.wait("--gate", expected=2)
+            self.report()
+        self.assertIn("GATE-FAILED 01 after 2 rounds", self.wait("--gate"))
+        self.stop_with_receipt()
+        self.launch()                                                      # the lead's repair: a fresh worker
+        self.assertNotIn("gate_rounds_used", self.state()["tickets"]["01"])
+        self.report()
+        self.assertNotIn("GATE-FAILED", self.wait("--gate", expected=2))   # its failure goes back to it
+        self.assertIn("Fleet gate, round 1 of 2", self.inbox().read_text().split("## Message 3", 1)[-1])
+
+    def test_a_round_that_cannot_be_sent_leaves_the_report_for_the_lead_as_it_was(self):
+        self.gated(FAILING)
+        with patch.object(fleet, "inbox_append", side_effect=OSError("disk full")):
+            out = self.wait("--gate")
+        self.assertIn("REPORT 01 [needs-verification]", out)
+        self.assertIn("could not send it back to the worker (disk full)", out)
+        self.assertEqual(self.status(), "needs-verification")             # never parked for nothing
+        self.assertEqual(self.typed, [])
+
+
 class GateLoopConfig(unittest.TestCase):
     def load(self, text):
         with tempfile.TemporaryDirectory() as d:

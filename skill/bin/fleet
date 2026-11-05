@@ -118,14 +118,12 @@ def load_config(user_path: Path | None = None) -> dict:
         raise FleetError("defaults.max_parallel must be a positive integer")
     if cfg["defaults"]["review"] not in ("off", "cross-heavy", "cross-all"):
         raise FleetError("invalid defaults.review")
-    rounds = cfg["defaults"]["review_rounds"]
-    if isinstance(rounds, bool) or not isinstance(rounds, int) or not 1 <= rounds <= 5:
-        raise FleetError("defaults.review_rounds must be a whole number from 1 to 5")
+    for key in ("review_rounds", "gate_rounds"):
+        rounds = cfg["defaults"][key]
+        if isinstance(rounds, bool) or not isinstance(rounds, int) or not 1 <= rounds <= 5:
+            raise FleetError(f"defaults.{key} must be a whole number from 1 to 5")
     if not isinstance(cfg["defaults"]["gate"], bool):
         raise FleetError("defaults.gate must be true or false")
-    rounds = cfg["defaults"]["gate_rounds"]
-    if isinstance(rounds, bool) or not isinstance(rounds, int) or not 1 <= rounds <= 5:
-        raise FleetError("defaults.gate_rounds must be a whole number from 1 to 5")
     if not isinstance(cfg["defaults"]["auto_trust"], bool):
         raise FleetError("defaults.auto_trust must be true or false")
     if cfg["defaults"]["backend"] not in ("auto", *BACKENDS):
@@ -2159,7 +2157,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         t = state["tickets"][meta["review_of"]]
         if worker(state, meta["review_of"])["state"] in ACTIVE_STATES:
             raise FleetError("stop writer before review")
-        if check_rounds(repo, state, cfg, a, meta["review_of"], "review"):
+        if not a.resume and check_rounds(repo, state, cfg, a, meta["review_of"], "review"):  # --resume: same round
             grant_round(state, meta["review_of"], a.extra_round)
         model, effort = resolve_model(pcfg, "review", a.model, a.effort)
         check_allowed(pcfg, a.provider, model)
@@ -2194,8 +2192,10 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     command = build_launch(pcfg, model, effort, line, session, a.resume, prepare_trust(cfg, a.provider, pcfg, repo))
     exit_file = d / "exits" / f"{a.id}.{token}.json"
     wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_run", str(exit_file), token, command])
-    if meta["role"] != "implementation":  # a launch that reaches the terminal is a round, whatever happens next
-        t["review_rounds"] = review_rounds(state, meta["review_of"]) + 1
+    if meta["role"] != "implementation" and not a.resume:  # a launch that reaches the terminal is a round;
+        t["review_rounds"] = review_rounds(state, meta["review_of"]) + 1  # resuming its session is the same one
+    if meta["role"] == "implementation" and not a.resume:
+        t.pop("gate_rounds_used", None)  # each fresh worker gets the gate loop's rounds again
     # Persist before launch: an uncertain terminal result must not silently free capacity.
     state["workers"][a.id] = dict(meta, id=a.id, provider=a.provider, model=model, effort=effort,
         family=family, tier=a.tier, steered=steered, surface="unknown", state="launching", command=command,
@@ -2814,7 +2814,10 @@ def scan_reports(reports: Path, seen: Path, statuses: tuple[str, ...] | None) ->
     for f in sorted(reports.glob("*.md")):
         text = f.read_text()
         status = parse_status(text) or "no status line"
-        if mark_once(seen, f.stem, report_key(f, text)) and (statuses is None or status.lower() in statuses):
+        key, marker = report_key(f, text), seen / f.stem
+        if marker.exists() and marker.read_text() == key.rsplit("|", 1)[0]:  # an earlier Fleet's status|mtime key
+            marker.write_text(key)  # already shown to the lead: upgrade it rather than wake the lead again
+        if mark_once(seen, f.stem, key) and (statuses is None or status.lower() in statuses):
             fresh.append((f.stem, status, f))
     return fresh
 
@@ -2911,7 +2914,8 @@ def header_file_problems(repo: Path, t: dict, review: bool, files_changed: list[
         path = Path(p.strip())
         if path.is_absolute() and path.is_relative_to(repo):
             path = path.relative_to(repo)
-        files.append(path.as_posix())
+        if not path.as_posix().startswith(".fleet/"):  # its own report and other run files are Fleet's
+            files.append(path.as_posix())
     if t.get("kind", "implement") == "implement" and not review:
         return [f"{p} outside scope" for p in files if p not in t["files"]]
     if files:
@@ -3472,7 +3476,7 @@ def cmd_gate(a, cfg):
         raise FleetError(f"{a.id} has no runnable checks in the plan; run its checks by hand and write the evidence "
                          "file yourself")
     d = run_dir(repo, a.run)
-    out = Path(a.output) if a.output else contained(d, d / "evidence" / f"{a.id}.gate.md")
+    out = Path(a.output) if a.output else gate_file(repo, a.run, a.id)
     if not out.parent.is_dir():
         raise FleetError(f"no directory for --output: {out.parent}")
     note_lead_file(repo, state, a.output)  # in memory only: a rerun's scope check skips its own earlier output
@@ -3595,10 +3599,13 @@ def send_gate_round(repo: Path, run: str, i: str, key: str, g: dict, cap: int, s
         n = t.get("gate_rounds_used", 0) + 1
         if n > cap:
             return ("out", n - 1)
-        park_report(repo, run, i)
-        msg, path = inbox_append(repo, state, i, gate_message(f, g, n, cap), key=f"fleet-gate-{n}")
-        t["gate_rounds_used"] = n
-        save_run(repo, run, state)  # on record before typing, as send does
+        try:  # the message is on record before the report is parked, so a failure never parks it for nothing
+            msg, path = inbox_append(repo, state, i, gate_message(f, g, n, cap), key=f"fleet-gate-{n}")
+            t["gate_rounds_used"] = n
+            save_run(repo, run, state)  # on record before typing, as send does
+            park_report(repo, run, i)
+        except (FleetError, OSError) as e:
+            return ("unsent", str(e).strip()[:200])
         (seen / i).write_text(report_key(f, f.read_text()))  # the park is not news, even to wait --any-change
         try:
             terminal(state).send(w, [inbox_pointer(msg, path), "enter"])
@@ -3699,6 +3706,9 @@ class GateLoop:
         if result[0] == "out":
             return self.out_of_rounds(i, result[1], g, out)
         if result[0] == "gone":  # stopped meanwhile: the lead gets the hand-back with the gate's result
+            return True
+        if result[0] == "unsent":  # the gate ran and failed, but could not go back: the lead gets it as it stands
+            self.notes[i] = f"gate {g['summary']}; could not send it back to the worker ({result[1]})"
             return True
         self.notes.pop(i, None)  # sent, or stale: the changed report comes back on the next scan
         if result[0] == "untyped":

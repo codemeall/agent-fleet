@@ -154,6 +154,18 @@ class ReviewRounds(RuntimeCase):
         self.assertIn("drop --extra-round", out)
 
 
+    def test_resuming_a_reviewer_is_the_same_round(self):
+        reviewer = self.cfg["providers"]["reviewer"]
+        reviewer.update(launch="{bin} {session} --model {model} --effort {effort} {prompt}",
+                        session="--session-id {id}", resume="--resume {id}")
+        self.setup_run(review="cross-all")
+        self.repair("first change\n")
+        self.review()
+        self.stop_with_receipt("review-01")                               # a usage limit, say
+        self.call("launch", "demo", "review-01", "reviewer", "--tier", "review", "--resume")
+        self.assertEqual(self.rounds(), 1)
+
+
 class ReviewRoundsConfig(unittest.TestCase):
     def load(self, value):
         with tempfile.TemporaryDirectory() as d:

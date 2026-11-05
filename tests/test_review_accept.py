@@ -357,11 +357,6 @@ class ReviewAccept(RuntimeCase):
         self.assertIn("already verified", self.accept(expected=1))
         self.assertIn("already verified", self.review(expected=1))
 
-
-if __name__ == "__main__":
-    import unittest
-    unittest.main()
-
     def test_review_refuses_a_writer_that_has_not_handed_back_without_stopping_it(self):
         self.setup_run(review="cross-all")
         self.launch()
@@ -386,3 +381,7 @@ if __name__ == "__main__":
         self.assertFalse((runs / "inbox/review-01.md").exists())
         self.assertTrue(list((runs / "inbox").glob("review-01.*.previous")))
 
+
+if __name__ == "__main__":
+    import unittest
+    unittest.main()
