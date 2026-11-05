@@ -179,6 +179,12 @@ class RuntimeCase(unittest.TestCase):
 
 
 class Runtime(RuntimeCase):
+    def setUp(self):
+        super().setUp()
+        # Written before the quality bar: these tests cover verify and accept's mechanics with header-less
+        # reports, so their runs start under acceptance = "warn". tests/test_quality_bar.py covers "strict".
+        self.cfg["defaults"]["acceptance"] = "warn"
+
     def test_run_commands_tell_the_lead_its_zone_and_spot_a_compaction(self):
         self.setup_run()
         readings = iter([{"session": "lead-1", "tokens": 131_000, "zone": "dumb", "warn_at": 100_000, "dumb_at": 125_000},

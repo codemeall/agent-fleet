@@ -162,8 +162,8 @@ class Supervise(RuntimeCase):
         self.assertEqual(lines[1:], [
             f"REPORT review-01 [needs-verification] criteria 0/0, checks none, findings 0, questions 0, files none "
             f"{review}",
-            "READY 01: gate passed (1/1), review clean (anthropic, findings 0); fleet accept demo 01 --gate "
-            "--evidence <file>"])
+            "READY 01: gate passed (1/1), review clean (anthropic, findings 0), strict ok; fleet accept demo 01 "
+            "--gate --evidence <file>"])
         self.assertNotIn("REPORT 01 ", out)                                   # the hand-back cost no wake
         state = self.state()
         self.assertEqual(state["workers"]["01"]["state"], "exited")
@@ -197,8 +197,8 @@ class Supervise(RuntimeCase):
         report = self.run_file("reports", "01.md")
         self.assertEqual(out, f"REPORT 01 [needs-verification] criteria 0/0, checks 1/1 exit 0, findings 0, "
                               f"questions 0, files in scope; gate 1/1 passed, scope ok {report}\n"
-                              "READY 01: gate passed (1/1), no review required (review cross-heavy, standard); "
-                              "fleet accept demo 01 --gate --evidence <file>\n")
+                              "READY 01: gate passed (1/1), no review required (review cross-heavy, standard), "
+                              "strict ok; fleet accept demo 01 --gate --evidence <file>\n")
         self.assertEqual(self.reviewers(), [])
         self.assertEqual(self.state()["workers"]["01"]["state"], "running")  # supervise stops nothing for it
 

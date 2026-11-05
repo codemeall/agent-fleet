@@ -27,6 +27,9 @@ class WarmCase(RuntimeCase):
 
     def setUp(self):
         super().setUp()
+        # Written before the quality bar: these tests cover verify and accept's mechanics with header-less
+        # reports, so their runs start under acceptance = "warn". tests/test_quality_bar.py covers "strict".
+        self.cfg["defaults"]["acceptance"] = "warn"
         home = tempfile.TemporaryDirectory()  # outside the repo, so its logs are no change in any ticket's scope
         self.addCleanup(home.cleanup)
         self.claude_home = Path(home.name)

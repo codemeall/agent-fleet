@@ -11,6 +11,12 @@ from test_runtime import RuntimeCase, fleet  # noqa: E402
 
 
 class Gate(RuntimeCase):
+    def setUp(self):
+        super().setUp()
+        # Written before the quality bar: these tests cover verify and accept's mechanics with header-less
+        # reports, so their runs start under acceptance = "warn". tests/test_quality_bar.py covers "strict".
+        self.cfg["defaults"]["acceptance"] = "warn"
+
     def gate_run(self, checks, kind="implement"):
         files = [] if kind == "investigate" else ["owned.txt"]
         self.setup_run(tickets=[{"id": "01", "files": files, "kind": kind, "context": "Agreed scope.",

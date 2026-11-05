@@ -86,7 +86,15 @@ DEFAULTS = {
     # Plan first (a ticket's "plan_first"): "heavy" makes every heavy implement ticket write its plan for the lead to
     # approve (fleet approve) before it edits anything; "off" leaves it to each ticket. A run keeps its value.
     "plan_first": "off",
+    # The quality bar (fleet verify and accept): "strict" refuses a ticket below it, naming each item, and only the
+    # owner's words (--accept-anyway) accept it regardless; "warn" prints header problems as warnings, as before.
+    # A run keeps the value it started with; a run from before the quality bar reads as "warn".
+    "acceptance": "strict",
+    # Combined-tree checks fleet accept runs in the checkout, after a worktree ticket's merge and before anything is
+    # verified: commands in a ticket check's shape ({run, cwd, timeout}). A run keeps the list it started with.
+    "accept_checks": [],
 }
+ACCEPTANCE_MODES = ("strict", "warn")
 CHECK_POLICIES = ("refuse", "warn")
 WARM_KEYS = ("warm_max", "warm_context_tokens")
 WARM_TIERS = ("light", "standard")  # a heavy ticket starts fresh: a warm session already carries a full context
@@ -238,6 +246,9 @@ def load_config(user_path: Path | None = None) -> dict:
         raise FleetError("defaults.auto_trust must be true or false")
     if cfg["defaults"]["plan_first"] not in PLAN_FIRST_MODES:
         raise FleetError('defaults.plan_first must be "off" (the default) or "heavy"')
+    if cfg["defaults"]["acceptance"] not in ACCEPTANCE_MODES:
+        raise FleetError('defaults.acceptance must be "strict" (the default) or "warn"')
+    accept_checks_shape(cfg["defaults"]["accept_checks"])
     if cfg["defaults"]["check_policy"] not in CHECK_POLICIES:
         raise FleetError('defaults.check_policy must be "refuse" (the default) or "warn"')
     if not isinstance(cfg["defaults"]["scope_permissions"], bool):
@@ -2324,6 +2335,7 @@ def cmd_init(a, cfg):
     if reason := review_off_reason(a, cfg):
         options["review_off"] = f"Review off (config default: {cfg['defaults']['review']}), by the owner: {reason}"
     init_review_check(cfg, options, pool)
+    options["accept_checks"] = accept_check_list(repo, options["accept_checks"])  # refused before any state is made
     if getattr(a, "isolation", None) == "worktree":  # opt-in; a run without the option shares the checkout
         options.update(init_worktrees(repo, cfg, a.run))
     for sub in ("prompts", "reports", ".seen", "exits", "snapshots", "evidence"):
@@ -2418,6 +2430,37 @@ def check_command(repo: Path, i: str, raw: dict) -> dict:
     if type(timeout) is not int or not 1 <= timeout <= CHECK_TIMEOUT_MAX:
         raise FleetError(f"{i}: check timeout must be whole seconds from 1 to {CHECK_TIMEOUT_MAX}: {timeout!r}")
     return {"run": run.strip(), "cwd": path.as_posix(), "timeout": timeout}
+
+
+ACCEPT_CHECKS_FORM = '[{run = "npm test", cwd = ".", timeout = 900}] (cwd and timeout optional)'
+
+
+def accept_checks_shape(raw) -> None:
+    """[defaults] accept_checks as load_config can check it without a checkout: a list of commands in a ticket
+    check's shape. init checks each cwd against the repository and saves the normalized list (accept_check_list)."""
+    if not isinstance(raw, list) or not all(isinstance(c, dict) for c in raw):
+        raise FleetError(f"defaults.accept_checks must be a list of commands like {ACCEPT_CHECKS_FORM}")
+    for n, c in enumerate(raw, 1):
+        where = f"defaults.accept_checks item {n}"
+        if "manual" in c:
+            raise FleetError(f"{where}: accept_checks take commands only; a manual check is the lead's, in its evidence")
+        if unknown := sorted(set(c) - CHECK_KEYS):
+            raise FleetError(f"{where}: unknown key {', '.join(unknown)}; a command takes run, cwd and timeout")
+        if not isinstance(c.get("run"), str) or not c["run"].strip():
+            raise FleetError(f"{where} needs run: the shell command to run")
+        cwd = c.get("cwd", ".")
+        if not isinstance(cwd, str) or not cwd.strip() or Path(cwd).is_absolute() or ".." in Path(cwd).parts:
+            raise FleetError(f"{where}: cwd must be a repo-relative directory without ..: {cwd!r}")
+        timeout = c.get("timeout", CHECK_TIMEOUT)
+        if type(timeout) is not int or not 1 <= timeout <= CHECK_TIMEOUT_MAX:
+            raise FleetError(f"{where}: timeout must be whole seconds from 1 to {CHECK_TIMEOUT_MAX}: {timeout!r}")
+
+
+def accept_check_list(repo: Path, raw: list) -> list[dict]:
+    """The run's accept_checks, normalized as plan normalizes a ticket's commands; a cwd that is not a directory
+    in this repository refuses the run."""
+    accept_checks_shape(raw)
+    return [check_command(repo, f"defaults.accept_checks item {n}", c) for n, c in enumerate(raw, 1)]
 
 
 def code_span(text: str) -> str:
@@ -4890,8 +4933,8 @@ class Supervisor:
         n = len(t["commands"])
         if not t["review_required"]:
             self.lines[i] = [f"READY {i}: gate passed ({n}/{n}), no review required (review "
-                             f"{state['options']['review']}, {t['tier']}); fleet accept {self.run} {i} --gate "
-                             "--evidence <file>"]
+                             f"{state['options']['review']}, {t['tier']}){quality_note(self.repo, state, i)}; "
+                             f"fleet accept {self.run} {i} --gate --evidence <file>"]
             return True
         return self.review(i, f, g, header_summary(self.repo, state, i, text)[0])
 
@@ -4979,8 +5022,8 @@ class Supervisor:
         n = len(t.get("commands", []))
         gate = (f"gate passed ({n}/{n})" if reusable_gate(self.repo, state, self.cfg, i) else
                 f"gate to run again ({n} check(s) changed or the tree moved since)") if n else "no planned commands"
-        self.lines[rid] = [f"READY {i}: {gate}, review clean ({family}, findings 0); fleet accept {self.run} {i}"
-                           + (" --gate" if n else "") + " --evidence <file>"]
+        self.lines[rid] = [f"READY {i}: {gate}, review clean ({family}, findings 0){quality_note(self.repo, state, i)}; "
+                           f"fleet accept {self.run} {i}" + (" --gate" if n else "") + " --evidence <file>"]
 
     # ---------- repair ----------
 
@@ -5801,8 +5844,12 @@ def cmd_verify(a, cfg):
         if worktree_rec(state, a.id) and not merge_done(repo, state, a.id):
             raise FleetError(f"{a.id} ran in its own worktree and its diff is not in the checkout yet; apply it first "
                              f"with fleet merge {a.run} {a.id} (fleet accept does both)")
+        evidence += quality_check(repo, state, a, a.id)  # the strict bar: refuses below it, records an override
         t["status"], t["closed_at"] = "verified", time.time()
     else:
+        if getattr(a, "accept_anyway", None) is not None or getattr(a, "accept_finding", None):
+            raise FleetError(f"{a.id} is a reviewer; --accept-anyway and --accept-finding go with the ticket it "
+                             f"reviews: fleet verify {a.run} {w['review_of']} (or fleet accept)")
         sha = digest(scoped_diff(repo, state, w["review_of"]).encode())
         if sha != w["diff_sha"]:
             raise FleetError("review is stale; regenerate diff and review")
@@ -5923,8 +5970,9 @@ def check_rounds(repo: Path, state: dict, cfg: dict, a, i: str, what: str) -> bo
         "Take this to the owner and let them choose; do not repair or review again on your own.",
         f"ESCALATE {i}: {used} of {cap} review rounds used", *open_findings(repo, state, i),
         "The owner's ways out:",
-        f"- accept as is: fleet accept {a.run} {i} --evidence <file>, recording the open findings and the owner's "
-        "decision in the evidence",
+        f"- accept as is: fleet accept {a.run} {i} --evidence <file>"
+        + (" --accept-anyway \"<owner's words>\"" if acceptance_mode(state) == "strict" else "")
+        + ", recording the open findings and the owner's decision in the evidence",
         f"- drop the ticket: fleet drop {a.run} {i} --reason \"<owner's words>\"",
         f"- allow one more round: run this command again with --extra-round \"<owner's words>\""]))
 
@@ -6533,7 +6581,7 @@ def accept_problems(repo: Path, state: dict, a, review: dict | None, rid: str | 
         if unowned:
             out.append("files outside every ticket's scope changed since launch:\n"
                        f"{unowned_text(list(unowned.values()))}\n  {UNOWNED_WAYS_OUT}")
-    return out
+    return out + quality_problems(repo, state, a, a.id)  # the strict bar, in the same refusal
 
 
 def refuse_problems(a, problems: list[str], unchanged: str) -> None:
@@ -6585,13 +6633,15 @@ def cmd_accept(a, cfg):
     applied = ""
     if worktree_rec(state, a.id):  # its diff reaches the checkout's working tree before anything is verified
         applied = accept_merge(repo, state, a)
+    checked, overrode = combined_checks(repo, state, a, applied)  # accept_checks, on the merged checkout
+    evidence += checked
     if rid:
         try:
             cmd_verify(sub_args(a, id=rid, evidence=a.review_evidence or a.evidence, unowned_ok=None), cfg)
         except FleetError as e:
             raise FleetError(f"{rid}: {e}; nothing was verified{applied}") from None
     try:
-        cmd_verify(sub_args(a, id=a.id, evidence=evidence, unowned_ok=None), cfg)
+        cmd_verify(sub_args(a, id=a.id, evidence=evidence, unowned_ok=None, **quality_args(a, overrode)), cfg)
     except FleetError as e:
         if not rid:
             raise FleetError(f"{a.id}: {e}; nothing was verified{applied}") from None
@@ -6607,6 +6657,368 @@ def cmd_accept(a, cfg):
                                   pane=None, settle=None, resume=False, ready=True), cfg)
         except FleetError as e:
             raise FleetError(f"{a.id} is accepted, but launch --ready refused: {e}") from None
+
+
+# ---------- the quality bar (TW22) ----------
+# The owner's acceptance policy, [defaults] acceptance. Under "strict", verify and accept refuse a ticket below the
+# bar, naming each item and its way out, before anything is stopped, merged or verified where it can be seen in
+# advance. quality_bar is the one policy: verify, accept, fan-out accept and supervise's READY line all ask it, so the
+# four never disagree. Only the owner's words (--accept-anyway) accept a ticket below it, and they are recorded with
+# each item they overrode, in the run's decisions and the evidence. Under "warn", and in a run from before the bar,
+# nothing here refuses and header problems print as warnings, as before. Reports are workers' claims: the bar reads
+# their headers as data, quotes what it names, and never acts on what they say.
+
+BLOCKING_SEVERITIES = ("high", "medium")  # a review finding of these stays open until a re-review no longer lists it
+
+
+def acceptance_mode(state: dict) -> str:
+    """The run's acceptance policy, saved at init; a run from before the quality bar reads as warn."""
+    return (state.get("options") or {}).get("acceptance", "warn")
+
+
+def report_text(repo: Path, state: dict, wid: str) -> str | None:
+    f = run_dir(repo, state["run"]) / "reports" / f"{wid}.md"
+    return f.read_text() if f.exists() else None
+
+
+def send_back(run: str, wid: str) -> str:
+    return (f"send it back with fleet send {run} {wid} --changes \"<what to fix>\" (fleet launch relaunches it if "
+            "it has stopped)")
+
+
+def header_items(repo: Path, state: dict, i: str, wid: str, text: str) -> tuple[list[tuple], dict | None]:
+    """A worker's `fleet` header under the bar: an item for a missing or unreadable header and for each problem wait's
+    REPORT line names (a file out of scope, a planned command not reported or without an exit, a malformed field, a
+    criteria count unlike the ticket's checkboxes), and the header when its fields can be read."""
+    run = state["run"]
+    data, shape = parse_header(text)
+    if data is None:
+        what = (f"{wid}'s report has no fleet header" if shape == ["header missing"] else
+                f"{wid}'s fleet header cannot be read ({'; '.join(shape)})")
+        return [(what, send_back(run, wid) + "; the report template shows the block", False)], None
+    items = []
+    for p in header_summary(repo, state, wid, text)[1]:
+        way = send_back(run, wid)
+        if p.endswith(" outside scope"):
+            way = f"fleet grant {run} {i} <file> --reason \"<why>\" if it is the ticket's own work; else {way}"
+        items.append((f"{wid}'s header: {p}", way, False))
+    return items, (None if shape else data)
+
+
+def writer_items(repo: Path, state: dict, i: str, wid: str, text: str) -> list[tuple]:
+    """An implement ticket's writer under the bar: its header (header_items), each unmet criterion, each check at a
+    non-zero exit and each open question."""
+    run = state["run"]
+    items, data = header_items(repo, state, i, wid, text)
+    if data is None:
+        return items
+    for c in data["criteria"]:
+        if not c["met"]:
+            items.append((f"{wid}: criterion {json.dumps(one_line(c.get('id'), 40))} is unmet", send_back(run, wid),
+                          False))
+    for c in data["checks"]:
+        if type(c.get("exit")) is int and c["exit"] != 0:
+            items.append((f"{wid}: check {json.dumps(one_line(c['run'], 80))} reports exit {c['exit']}",
+                          send_back(run, wid), False))
+    for q in data["questions"]:
+        if q.strip():
+            items.append((f"{wid}: open question {json.dumps(one_line(q, 120))}",
+                          f"answer it with fleet send {run} {wid} \"<answer>\", and have it hand back without the "
+                          "question", False))
+    return items
+
+
+def review_items(repo: Path, state: dict, i: str, accepted) -> list[tuple]:
+    """Ticket `i`'s latest review under the bar. When the review mode requires one: missing, of an earlier diff, or
+    not handed back. Whenever it reviewed the current diff, required or not: a header whose findings cannot be
+    counted, and each high or medium finding it lists, unless the lead accepted the writer's rebuttal of it
+    (`accepted`). A finding is settled only when a re-review after send --findings no longer lists it. Items that
+    accept and verify refuse in every run are marked hard: the owner's words never override them."""
+    t, run = state["tickets"][i], state["run"]
+    review = latest_reviewer(state, i)
+    if review is None:
+        return [(f"{i} needs a cross-family review first", f"fleet review {run} {i}", True)] if t["review_required"] \
+            else []
+    rid = review["id"]
+    try:
+        stale = digest(scoped_diff(repo, state, i).encode()) != review.get("diff_sha")
+    except (FleetError, OSError, KeyError, ValueError, subprocess.TimeoutExpired):
+        stale = True
+    if stale:
+        return [(f"{rid} reviewed an earlier diff of {i}", f"run fleet review {run} {i} again", True)] \
+            if t["review_required"] else []
+    text = report_text(repo, state, rid)
+    status = parse_status(text) if text is not None else None
+    if (status or "").lower() not in ("needs-verification", "verified"):
+        return [(f"{rid}'s report says {'Status: ' + status if status else 'nothing yet'}",
+                 f"wait for {rid} to hand back with Status: needs-verification", True)]
+    data, shape = parse_header(text)
+    if data is None or shape:
+        why = "it has none" if shape == ["header missing"] else "; ".join(shape)
+        return [(f"{rid}'s fleet header cannot be read ({why}), so its findings cannot be counted",
+                 f"fleet review {run} {i} again", False)]
+    rebutted = {fid for fid, r in ((review.get("finding_history") or {}).get("responses") or {}).items()
+                if r.get("action") == "rebutted"}
+    items = []
+    for fid, f in numbered_findings(review, data):
+        if str(f.get("severity", "")).lower() not in BLOCKING_SEVERITIES or fid in accepted:
+            continue
+        way = (f"fleet send {run} {i} --findings returns it to the writer; it is settled once a re-review no longer "
+               "lists it")
+        if fid in rebutted:
+            way += f", or accept the writer's rebuttal with --accept-finding {fid} \"<why>\""
+        items.append((f"{rid}: finding {fid} ({finding_label(f)}) is open", way, False))
+    return items
+
+
+def quality_bar(repo: Path, state: dict, i: str, writer: str | None = None, accepted=()) -> list[tuple]:
+    """The acceptance policy for ticket `i`: every item that keeps it below the strict bar, as (what, way out, hard);
+    empty under warn. An implement ticket needs its writer's clean header (writer_items) and, under the review mode,
+    a clean review of its current diff (review_items). An investigate ticket, and each investigator and judge of a
+    fan-out ticket, needs a readable header with every criterion answered. `writer` names the worker whose work is
+    accepted: the ticket's own by default; a picked writer of a best-of-two passes its own ID, so it meets the same
+    bar. `accepted`: the finding IDs whose rebuttal the lead accepted (--accept-finding)."""
+    if acceptance_mode(state) != "strict":
+        return []
+    t = state["tickets"][i]
+    if t.get("fanout"):
+        workers = fanout_problems(repo, state, i, live_ok=True)[0]
+    elif t.get("kind", "implement") == "investigate":
+        workers = [writer or i]
+    else:
+        wid = writer or i
+        text = report_text(repo, state, wid)
+        if text is None:
+            return [(f"{wid} has no report yet", f"wait for {wid} to hand back", True)]
+        return writer_items(repo, state, i, wid, text) + review_items(repo, state, i, accepted)
+    items = []
+    for wid in workers:  # a missing report is verify's own refusal
+        if (text := report_text(repo, state, wid)) is not None:
+            items += header_items(repo, state, i, wid, text)[0]
+    return items
+
+
+def accepted_findings(a) -> dict[str, str]:
+    return {fid.strip(): why.strip() for fid, why in getattr(a, "accept_finding", None) or []}
+
+
+def finding_flag_problems(repo: Path, state: dict, i: str, pairs: list) -> list[str]:
+    """--accept-finding F<n> "<why>": only for a finding the latest review lists as open and the writer rebutted,
+    with the lead's reason, each once."""
+    run = state["run"]
+    if acceptance_mode(state) != "strict":
+        return [f"--accept-finding: run {run}'s acceptance is warn, so no finding refuses {i}; drop it"]
+    review = latest_reviewer(state, i)
+    text = report_text(repo, state, review["id"]) if review else None
+    data = parse_header(text)[0] if text is not None else None
+    open_ids = [fid for fid, _ in numbered_findings(review, data)] if review and isinstance(data, dict) else []
+    rebutted = {fid for fid, r in (((review or {}).get("finding_history") or {}).get("responses") or {}).items()
+                if r.get("action") == "rebutted"}
+    out, seen = [], set()
+    for fid, why in pairs:
+        fid = fid.strip()
+        if fid in seen:
+            out.append(f"--accept-finding {fid} is given twice")
+            continue
+        seen.add(fid)
+        if not why.strip():
+            out.append(f"--accept-finding {fid} needs your reason for accepting the writer's rebuttal")
+        elif fid not in open_ids:
+            out.append(f"--accept-finding {fid}: {review['id'] + ' lists' if review else 'no review of ' + i + ' lists'}"
+                       f" no open finding {fid}" + (f" (open: {', '.join(open_ids)})" if open_ids else ""))
+        elif fid not in rebutted:
+            out.append(f"--accept-finding {fid}: the writer did not rebut {fid}, so there is no rebuttal to accept; "
+                       f"fleet send {run} {i} --findings returns it to the writer")
+    return out
+
+
+def quality_flag_problems(repo: Path, state: dict, a, i: str, items: list, foreseen: bool) -> list[str]:
+    """What is wrong with --accept-anyway and --accept-finding. `foreseen`: whether an override with nothing to
+    override can be refused now (accept cannot tell before its combined checks have run)."""
+    out = []
+    words = getattr(a, "accept_anyway", None)
+    if words is not None and not words.strip():
+        out.append("--accept-anyway needs the owner's words: ask the owner, and never pass it without them")
+    elif words is not None and not items and foreseen:
+        warn = f" (run {state['run']}'s acceptance is warn)" if acceptance_mode(state) != "strict" else ""
+        out.append(f"--accept-anyway: {i} is not below the bar{warn}, so there is nothing to override; drop it")
+    if pairs := getattr(a, "accept_finding", None):
+        out += finding_flag_problems(repo, state, i, pairs)
+    return out
+
+
+def quality_lines(items: list) -> list[str]:
+    return [f"{what}. Way out: {way}" + (" (the owner's words cannot override this)" if hard else "")
+            for what, way, hard in items]
+
+
+OVERRIDE_HINT = "Only the owner may accept it regardless: --accept-anyway \"<owner's words>\", never without their words"
+
+
+def quality_problems(repo: Path, state: dict, a, i: str, writer: str | None = None) -> list[str]:
+    """accept's part of its one refusal, before anything is stopped: the flags' problems, and the items below the bar
+    unless the owner's words override them. A hard item is left to accept_problems, which names it in every run."""
+    items = quality_bar(repo, state, i, writer, accepted_findings(a))
+    out = quality_flag_problems(repo, state, a, i, items, foreseen=not accept_checks_for(state, i))
+    soft = [x for x in items if not x[2]]
+    if soft and not (getattr(a, "accept_anyway", None) or "").strip():
+        out.append("below the strict acceptance bar (acceptance strict):\n" +
+                   "\n".join(f"  - {x}" for x in quality_lines(soft)) + f"\n  {OVERRIDE_HINT}")
+    return out
+
+
+def quality_args(a, overrode=()) -> dict:
+    """The quality bar's flags for the verify that accept runs, with what accept's own steps overrode."""
+    return {"accept_anyway": getattr(a, "accept_anyway", None), "accept_finding": getattr(a, "accept_finding", None),
+            "overrode": list(overrode), "from_accept": True}
+
+
+def quality_check(repo: Path, state: dict, a, i: str, writer: str | None = None) -> str:
+    """verify's quality bar for ticket `i`: refuses below it, with nothing changed, unless the owner's words override
+    every item. Returns what goes into the evidence (accepted findings, the owner's override), which the run's
+    decisions get too; the caller saves state."""
+    accepted = accepted_findings(a)
+    items = quality_bar(repo, state, i, writer, accepted)
+    overrode = [what for what, _, _ in items] + list(getattr(a, "overrode", None) or [])
+    problems = quality_flag_problems(repo, state, a, i, overrode, foreseen=not getattr(a, "from_accept", False))
+    if problems:
+        raise FleetError(f"{i} not verified; nothing was changed:\n" + "\n".join(f"- {p}" for p in problems))
+    words = (getattr(a, "accept_anyway", None) or "").strip()
+    hard = [x for x in items if x[2]]
+    if hard or items and not words:
+        lines = quality_lines(hard or items)
+        raise FleetError(f"{i} is below the strict acceptance bar (acceptance strict), so it is not verified; nothing "
+                         "was changed:\n" + "\n".join(f"- {x}" for x in lines) + ("" if hard else f"\n{OVERRIDE_HINT}"))
+    now, who, text = time.strftime("%Y-%m-%dT%H:%M:%S"), writer or i, ""
+    if accepted:
+        for fid, why in accepted.items():
+            state["decisions"].append(f"Accepted {who}'s rebuttal of {fid} on {i}: {why} ({now})")
+        text += ("\n\n## Accepted findings\n\nThe lead accepted the writer's rebuttal of each finding below, which the "
+                 "latest review still lists:\n" + "\n".join(f"- {fid}: {why}" for fid, why in accepted.items()))
+    if words and overrode:
+        state["decisions"].append(f"Accepted {i} regardless of the quality bar, by the owner: {words}. It overrode: "
+                                  f"{'; '.join(overrode)} ({now})")
+        text += (f"\n\n## Accepted anyway\n\nThe owner's words: {words}\n\nThey overrode:\n"
+                 + "\n".join(f"- {x}" for x in overrode))
+        print(f"{i}: accepted regardless of the quality bar, by the owner's words; {len(overrode)} item(s) "
+              "overridden, recorded in decisions and the evidence", file=sys.stderr)
+    elif words:
+        print(f"NOTE {i} met the bar, so --accept-anyway overrode nothing and nothing was recorded", file=sys.stderr)
+    return text
+
+
+def quality_note(repo: Path, state: dict, i: str) -> str:
+    """supervise's READY line under strict: `, strict ok`, or what the bar would refuse, so the lead hears of it
+    before it calls accept. Nothing under warn."""
+    if acceptance_mode(state) != "strict":
+        return ""
+    try:
+        items = quality_bar(repo, state, i)
+    except (FleetError, OSError, ValueError, KeyError, TypeError) as e:
+        return f", strict not checked ({one_line(e, 120)})"
+    if not items:
+        return ", strict ok"
+    return (", strict would block: " + "; ".join(what for what, _, _ in items)
+            + " (fleet accept names the way out for each)")
+
+
+# ---------- combined checks at accept (accept_checks) ----------
+
+ACCEPT_CHECKS_RECORD = "accept-checks.json"  # the last passing run, which a later accept reuses while nothing changed
+
+
+def accept_checks_for(state: dict, i: str) -> list[dict] | None:
+    """The run's combined-tree checks for ticket `i`'s accept. None for a run from before accept_checks, and for a
+    ticket that changes no files (investigate, fan-out)."""
+    checks = (state.get("options") or {}).get("accept_checks")
+    if checks is None or state["tickets"][i].get("kind", "implement") != "implement":
+        return None
+    return checks
+
+
+def accept_checks_evidence(run: str, i: str, results: list[dict], summary: str, wrote: list[str],
+                           live: list[str]) -> str:
+    lines = [f"# Combined checks: {i}", "",
+             f"Run `{run}`, ticket `{i}`, {time.strftime('%Y-%m-%dT%H:%M:%S')}. Fleet ran each of the run's "
+             "accept_checks in the owner's checkout, after any merge and before anything was verified, with /bin/sh "
+             "from its directory, without the lead's session variables or stdin.", "", "## Commands", ""]
+    for n, r in enumerate(results, 1):
+        lines.append(f"{n}. {code_span(r['run'])}: {'FAILED' if check_failed(r) else 'passed'}, {check_outcome(r)}, "
+                     f"{r['seconds']:.1f}s, cwd `{r['cwd']}`")
+    for n, r in enumerate(results, 1):
+        if check_failed(r):
+            tail = "\n".join(r["output"].rstrip().splitlines()[-GATE_TAIL_LINES:])
+            lines += ["", f"### Output of {n}: {code_span(r['run'])} (last {GATE_TAIL_LINES} lines at most)", "",
+                      fenced(tail) if tail.strip() else "No output."]
+    if wrote:
+        lines += ["", "The checks wrote " + ", ".join(code_span(p) for p in wrote) + " outside every ticket's files."]
+    if live:
+        lines += ["", f"Workers still ran in this checkout ({', '.join(live)}): a half-done edit of theirs counts too."]
+    lines += ["", "## Result", "", summary]
+    return "\n".join(lines) + "\n"
+
+
+def reusable_accept_checks(repo: Path, state: dict, record: Path, checks: list[dict]) -> dict | None:
+    """The last passing run of these same checks, while HEAD and every changed or untracked file are as they were
+    when it finished; else None."""
+    try:
+        r = json.loads(record.read_text())
+    except (OSError, ValueError):
+        return None
+    if not r.get("passed") or r.get("commands") != checks:
+        return None
+    now = tree_state(repo, run_ignore(state))
+    return r if (now["head"], now["paths"]) == (r.get("head"), r.get("paths")) else None
+
+
+def combined_checks(repo: Path, state: dict, a, done: str = "") -> tuple[list[str], list[str]]:
+    """accept's combined-tree checks: the run's accept_checks, in the checkout after a worktree ticket's merge and
+    before the first verify. Returns the evidence file for the writer's verification and, when the owner's words
+    override a failure, the item they overrode. A failure without them refuses; `done` is what that refusal must
+    add, such as a merge already in the checkout. With none set, a one-line reminder that they are the lead's."""
+    i, run = a.id, a.run
+    checks = accept_checks_for(state, i)
+    if checks is None:
+        return [], []
+    if not checks:
+        print(f"NOTE {i}: no accept_checks are set for this run, so the combined-tree checks (full suite, typecheck, "
+              "build) are yours to run in the checkout")
+        return [], []
+    md = gate_file(repo, run, i, ".accept-checks.md")
+    record = contained(run_dir(repo, run), run_dir(repo, run) / "evidence" / ACCEPT_CHECKS_RECORD)
+    if r := reusable_accept_checks(repo, state, record, checks):
+        md.write_text(f"# Combined checks: {i}\n\nReused: the run's accept_checks passed at {r['at']} (accepting "
+                      f"{r['ticket']}), and HEAD and every changed or untracked file are unchanged since, so Fleet did "
+                      "not run them again. That run's evidence follows.\n\n" + r["evidence"])
+        print(f"ACCEPT-CHECKS {i} reused the passing run at {r['at']} (accepting {r['ticket']}): HEAD and the tree "
+              f"are unchanged since, so the checks were not run again; evidence {md}")
+        return [str(md)], []
+    before = tree_scan(repo, state)
+    results = [run_check(repo, c) for c in checks]
+    after = tree_scan(repo, state)
+    wrote = record_check_outputs(repo, state, f"{i}.accept-checks", before, after)
+    failed = [r for r in results if check_failed(r)]
+    live = [w["id"] for w in active(state)]
+    summary = f"{len(results) - len(failed)}/{len(results)} passed"
+    md.write_text(accept_checks_evidence(run, i, results, summary, wrote, live))
+    if not failed:
+        atomic_json(record, {"passed": True, "commands": checks, "head": after["head"], "paths": after["paths"],
+                             "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "ticket": i, "evidence": md.read_text()})
+        print(f"ACCEPT-CHECKS {i} {summary} in the checkout; evidence {md}")
+        return [str(md)], []
+    record.unlink(missing_ok=True)  # a failing run is never reused, and neither is an older pass
+    fails = gate_failures({"failed": failed})
+    print(f"ACCEPT-CHECKS {i} {summary} in the checkout ({fails}); evidence {md}")
+    item = f"the combined checks failed in the checkout ({fails}); evidence {md}"
+    if (getattr(a, "accept_anyway", None) or "").strip():
+        print(f"ACCEPT-CHECKS {i}: the owner's words (--accept-anyway) override the failure; recorded in decisions "
+              "and the evidence")
+        return [str(md)], [item]
+    shared = (f" Workers still run in this checkout ({', '.join(live)}), so a half-done edit of theirs may be the "
+              "cause." if live else "")
+    raise FleetError(f"{i} not accepted: the combined checks (accept_checks) failed in the checkout: {fails}. The "
+                     f"failing tail is in {md}.{shared} Nothing was verified{done}. Fix the combined tree, then run "
+                     f"fleet accept {run} {i} again. {OVERRIDE_HINT}")
 
 
 # ---------- plan first (P10) ----------
@@ -7698,6 +8110,7 @@ def verify_fanout(repo: Path, state: dict, a) -> None:
         note_lead_file(repo, state, f)
     for wid in ids:  # investigators and judges own no files: any change while they ran counts
         guard_unowned(repo, state, wid, a.unowned_ok)
+    evidence += quality_check(repo, state, a, i)  # the strict bar: a readable header from each worker
     now = time.strftime("%Y-%m-%dT%H:%M:%S")
     reports = run_dir(repo, a.run) / "reports"
     for wid in ids:
@@ -7730,10 +8143,11 @@ def accept_fanout(repo: Path, state: dict, a, cfg) -> None:
             read_evidence_files(files)
         except (FleetError, OSError) as e:
             problems.append(f"{flag}: {e}")
+    problems += quality_problems(repo, state, a, a.id)  # the strict bar, in the same refusal
     refuse_problems(a, problems, "nothing was stopped or verified")
     stop_live(a, cfg, state, fanout_members(state, a.id), "nothing was verified")
     state = load_run(repo, a.run)
-    verify_fanout(repo, state, sub_args(a, id=a.id, evidence=a.evidence, unowned_ok=a.unowned_ok))
+    verify_fanout(repo, state, sub_args(a, id=a.id, evidence=a.evidence, unowned_ok=a.unowned_ok, **quality_args(a)))
     ready = unblocked_by(load_run(repo, a.run), a.id)
     print(f"UNBLOCKED {' '.join(ready) or 'none'}")
     if a.launch_ready:
@@ -9553,6 +9967,16 @@ def watch_args(s) -> None:
                         "(at most 30, never past --timeout; 0 returns at once)")
 
 
+def quality_flags(s) -> None:
+    """verify's and accept's flags for the quality bar (acceptance strict)."""
+    s.add_argument("--accept-anyway", metavar="OWNER'S WORDS",
+                   help="the owner accepts the ticket below the strict bar; their words and each item they override go "
+                        "into the decisions and the evidence. Never without the owner's words")
+    s.add_argument("--accept-finding", nargs=2, action="append", metavar=("F<n>", "WHY"),
+                   help="accept the writer's rebuttal of an open finding the latest review still lists, with your "
+                        "reason (recorded); repeat for several")
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "_run":
@@ -9653,6 +10077,7 @@ def main(argv: list[str] | None = None) -> int:
                        help="a file describing the checks and results; repeat to record several, in order")
         if name == "verify":
             s.add_argument("--unowned-ok", metavar="REASON", help=unowned_help)
+            quality_flags(s)
         s.set_defaults(fn=fn)
 
     s = sub.add_parser("gate", help="run a ticket's planned check commands and the scope check, and write the "
@@ -9700,6 +10125,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="run fleet gate first; a failure verifies nothing, a pass adds its evidence file")
     s.add_argument("--unowned-ok", metavar="REASON", help=unowned_help)
     s.add_argument("--launch-ready", action="store_true", help="then launch every ticket that can start (launch --ready)")
+    quality_flags(s)
     s.set_defaults(fn=cmd_accept)
 
     s = sub.add_parser("approve", help="approve a plan-first ticket's plan through its inbox, saving it and a "

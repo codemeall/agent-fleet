@@ -7,8 +7,9 @@ the real CLI is launched with, nothing else, each flag at most once (Codex's `-c
 place the adapter puts it. Anything else fails loudly: a `FAKE <cli>: ...` line on screen and exit status 2.
 The values the test expects (model, effort, session mode, trust override, account directory) come from the JSON
 file named by $FAKE_CLI_EXPECT. On a good command line it records its argv in $FAKE_CLI_LOG/<cli>.jsonl, finds the
-Fleet prompt file named in the prompt argument, writes a needs-verification report, and then reads its terminal
-until it gets its own quit command (/exit or /quit). The other CLI's quit command is refused, not obeyed.
+Fleet prompt file named in the prompt argument, writes a needs-verification report with its `fleet` header (the
+files it wrote, and each command Fleet runs with its real exit code), and then reads its terminal until it gets
+its own quit command (/exit or /quit). The other CLI's quit command is refused, not obeyed.
 
 Claude's `--settings <file>` must name a file that parses to a settings object; the fake then runs its hooks as
 Claude Code would: PreToolUse (Write) before each file it writes, refusing to write when a hook exits 2, and Stop
@@ -243,13 +244,29 @@ def prompt_file(prompt: str) -> tuple[str, Path, bool, str | None]:
     return ticket, path, resume, after
 
 
-def smoke_edit(ticket: str, text: str) -> None:
-    """A writer's `fleet smoke` ticket: write the line its grep check looks for. Reviewers edit nothing."""
+def smoke_edit(ticket: str, text: str) -> list[str]:
+    """A writer's `fleet smoke` ticket: write the line its grep check looks for, and return what it wrote.
+    Reviewers edit nothing."""
     if ticket.startswith("review-"):
-        return
+        return []
+    wrote = []
     for line, path in re.findall(r"grep -qx '([^']*)' (smoke/[\w.-]+\.txt)", text):
         Path(path).parent.mkdir(exist_ok=True)
         fake_write(Path(path), line + "\n")
+        wrote.append(path)
+    return wrote
+
+
+def header(ticket: str, text: str, wrote: list[str]) -> str:
+    """The report template's `fleet` block, as a CLI that follows it writes it: the files it wrote and, for a
+    writer, each command its prompt says Fleet runs, run here from the repository root with its real exit code."""
+    checks = []
+    if not ticket.startswith("review-"):
+        for command in re.findall(r"`([^`]+)` \(from the repository root; Fleet runs it with fleet gate\)", text):
+            run = subprocess.run(command, shell=True, capture_output=True, timeout=60)
+            checks.append({"run": command, "exit": run.returncode})
+    data = {"files_changed": wrote, "checks": checks, "criteria": [], "findings": [], "questions": []}
+    return "```fleet\n" + json.dumps(data) + "\n```\n\n"
 
 
 def main() -> int:
@@ -289,10 +306,12 @@ def main() -> int:
     if cli in os.environ.get("FAKE_CLI_STALL", "").split(","):
         print(f"fake {cli} is waiting at a sign-in prompt", flush=True)
     else:
-        smoke_edit(ticket, text)
+        wrote = smoke_edit(ticket, text)
         how = " (resumed)" if resume else f" (warm, after {after})" if after else ""
-        if not fake_write(report, f"# Report {ticket}\n\nStatus: needs-verification\n\n## Work or review performed\n"
-                                  f"- Smoke run of the {cli} launch line{how}; no files changed.\n"):
+        changed = ", ".join(wrote) or "no files"
+        if not fake_write(report, f"# Report {ticket}\n\nStatus: needs-verification\n\n{header(ticket, text, wrote)}"
+                                  f"## Work or review performed\n- Smoke run of the {cli} launch line{how}; "
+                                  f"{changed} changed.\n"):
             print(f"FAKE {cli}: a PreToolUse hook refused my own report", flush=True)
         run_hooks("Stop", {"session_id": "fake", "hook_event_name": "Stop", "stop_hook_active": False,
                            "last_assistant_message": f"Report written for {ticket}.", "background_tasks": [],
