@@ -50,6 +50,19 @@ The review sequence is in the skill's step 5. Review-only is a prompt contract i
 
 Each entry must resolve to a different known family, inside the run's routing and within `permission_ceiling`; plan refuses otherwise, as it refuses a review no provider could give. Two models of one mixed adapter count as two families only when their families are known and differ. When the reports differ, read them first; `fleet judge` adds a judge from a family none of the investigators ran on, or the lead's own when none is left, and says so.
 
+## Plan first
+
+`"plan_first": true` has an implement ticket's worker write its approach (files, interfaces, test plan, risks) and wait for your approval before it edits anything ([plan first](commands.md#plan-first)). Reading a 40-line plan costs far less than reviewing a wrong diff and a repair round.
+
+Use it for:
+
+- heavy tickets, where a wrong approach wastes a whole implementation and its review;
+- uncertain tickets: a design choice the ticket leaves open, an interface other tickets depend on, or code the worker has not seen.
+
+Skip it for light and routine standard tickets: the wait for approval costs a lead turn and the worker's idle time. `plan_first = "heavy"` under `[defaults]` turns it on for every heavy implement ticket; a ticket opts out with `"plan_first": false`.
+
+Approve a sound plan yourself with `fleet approve`. Add `--review` when the plan itself is the risk: a reviewer from another family reads it while the writer waits, so it needs a free slot beside the writer. Fleet never approves a plan on its own, and supervise only wakes you with `PLAN`.
+
 ## Steering
 
 When a provider is failing, rate-limited or a poor fit mid-run, steer future implementation launches instead of rewriting the plan:
