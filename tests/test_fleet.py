@@ -277,6 +277,35 @@ class Wait(unittest.TestCase):
         self.write("Status: verified\n\n## Lead verification\n")         # lead closes it
         self.assertEqual(self.scan(), [])
 
+    def write_in_one_tick(self, text, ns=1_700_000_000_000_000_000):
+        """A coarse-mtime filesystem (HFS+, some CI disks): every rewrite lands in the same mtime tick."""
+        self.report.write_text(text)
+        os.utime(self.report, ns=(ns, ns))
+
+    def test_hand_back_in_the_same_mtime_tick_wakes_again(self):
+        self.write_in_one_tick("Status: needs-verification\n")
+        self.assertEqual(self.scan(), [("07", "needs-verification")])
+        self.write_in_one_tick("Status: changes-requested\n\n## Lead notes\n")
+        self.assertEqual(self.scan(), [])
+        self.write_in_one_tick("Status: needs-verification\n\n## Fixes\n")
+        self.assertEqual(self.scan(), [("07", "needs-verification")])
+        self.assertEqual(self.scan(), [])
+
+    def test_identical_hand_back_in_the_same_mtime_tick_wakes_again(self):
+        for _ in range(2):
+            self.write_in_one_tick("Status: needs-verification\n")
+            self.assertEqual(self.scan(), [("07", "needs-verification")])
+            self.assertEqual(self.scan(), [])
+            self.write_in_one_tick("Status: changes-requested\n")
+            self.assertEqual(self.scan(), [])
+
+    def test_unseen_park_with_new_content_in_the_same_tick_wakes(self):
+        self.write_in_one_tick("Status: needs-verification\n")
+        self.assertEqual(self.scan(), [("07", "needs-verification")])
+        self.write_in_one_tick("Status: changes-requested\n")         # parked and handed back between scans
+        self.write_in_one_tick("Status: needs-verification\n\n## Fixes\n")
+        self.assertEqual(self.scan(), [("07", "needs-verification")])
+
     def test_blocked_wakes(self):
         self.write("**Status:** blocked\n")
         self.assertEqual(self.scan(), [("07", "blocked")])

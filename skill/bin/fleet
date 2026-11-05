@@ -2735,16 +2735,17 @@ def scan_reports(reports: Path, seen: Path, statuses: tuple[str, ...] | None) ->
 
     The lead parks a report by rewriting its Status (verified, changes-requested); a worker
     flipping it back to needs-verification wakes the lead again.
+
+    The marker also records parked statuses: on a coarse-mtime filesystem (HFS+, some CI disks) a park and
+    hand-back can land in the tick of the first hand-back, and the content can be identical, so only having
+    seen the report leave a wake status makes its return a new event. The digest covers an unseen park.
     """
     fresh = []
     for f in sorted(reports.glob("*.md")):
-        status = parse_status(f.read_text()) or "no status line"
-        if statuses is not None and status.lower() not in statuses:
-            continue
-        key = f"{status}|{f.stat().st_mtime_ns}"
-        marker = seen / f.stem
-        if not marker.exists() or marker.read_text() != key:
-            marker.write_text(key)
+        text = f.read_text()
+        status = parse_status(text) or "no status line"
+        key = f"{status}|{f.stat().st_mtime_ns}|{digest(text.encode())[:16]}"
+        if mark_once(seen, f.stem, key) and (statuses is None or status.lower() in statuses):
             fresh.append((f.stem, status, f))
     return fresh
 
