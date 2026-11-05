@@ -46,15 +46,15 @@ Show a compact table: wave, ticket, tier, provider/model/effort, exact files. Pe
 {
   "tickets": [
     {"id":"copy","ticket":".scratch/feature/issues/copy.md","files":["docs/copy.md"],"blockers":[],"provider":"codex","tier":"light",
-     "context":"Spec: .scratch/feature/spec.md. Terms from GLOSSARY.md.","checks":["Manual prose review against the ticket criteria"]},
+     "context":"Spec: .scratch/feature/spec.md. Terms from GLOSSARY.md.","checks":[{"manual":"Prose review against the ticket criteria"}]},
     {"id":"guide","ticket":".scratch/feature/issues/guide.md","files":["docs/guide.md"],"blockers":["copy"],"provider":"claude","tier":"standard",
-     "context":"Spec: .scratch/feature/spec.md. Link to docs/copy.md; do not edit it.","checks":["Manual review of the links",{"run":"npm run lint:docs","timeout":120}]}
+     "context":"Spec: .scratch/feature/spec.md. Link to docs/copy.md; do not edit it.","checks":[{"manual":"Review of the links"},{"run":"npm run lint:docs","timeout":120}]}
   ],
   "decisions": ["Docs-only feature; lint plus manual review is the agreed verification."]
 }
 ```
 
-Give each ticket `context` (agreed spec and testing decisions, actual glossary/ADR paths, existing edits to preserve) and `checks` (exact bounded commands, working directory and success criteria; or say manual review suffices) so its prompt is complete; either may be text or a list, and a `checks` list may hold commands, `{"run":…,"cwd":…,"timeout":…}`, that `fleet gate` runs. Optional per-ticket `model`, `effort` and `family` pin routing. The CLI validates dependencies, cycles, scope and assignments. Use exact files, not directories or globs. Record decisions and agreed routing before the first launch; the plan is immutable once workers have launched. Use one active run per checkout. Serialize CLI mutations through this lead; concurrent leads must not edit the same run.
+Give each ticket `context` (agreed spec and testing decisions, actual glossary/ADR paths, existing edits to preserve) and `checks` (exact bounded commands with working directory and success criteria) so its prompt is complete; `context` may be text or a list. `checks` needs at least one `{"run":…,"cwd":…,"timeout":…}` command, which `fleet gate` runs, or a `{"manual":"<one-line reason>"}` for what no command can check; prose may accompany them, and plan and add refuse prose-only checks. Optional per-ticket `model`, `effort` and `family` pin routing. The CLI validates dependencies, cycles, scope and assignments. Use exact files, not directories or globs. Record decisions and agreed routing before the first launch; the plan is immutable once workers have launched. Use one active run per checkout. Serialize CLI mutations through this lead; concurrent leads must not edit the same run.
 
 ## 3. Generate prompts and launch ready tickets
 
