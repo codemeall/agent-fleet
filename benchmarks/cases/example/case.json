@@ -1,0 +1,71 @@
+{
+  "size": "small",
+  "repo": "https://github.com/codemeall/agent-fleet.git",
+  "commit": "fa818eaf7b964815f538cf259ac40151b58b51ab",
+  "model": {
+    "cli": "claude",
+    "model": "opus",
+    "effort": "high"
+  },
+  "ticket": "Add a script `tools/list_commands.py` that prints the name of every command documented in `skill/references/commands.md`, one per line, in file order. A command is a `### <name>` heading; headings that are not commands, such as `### Review rounds` and `### The scope check`, are left out. Add `tests/test_list_commands.py`, a unittest that runs the script and checks that `version`, `doctor` and `launch` are listed in that order. Change nothing else.",
+  "criteria": [
+    {
+      "id": "lists",
+      "text": "The script prints the documented commands, one per line, in file order",
+      "checks": [
+        "lists"
+      ]
+    },
+    {
+      "id": "test",
+      "text": "A unit test runs the script and checks version, doctor and launch in order",
+      "checks": [
+        "unit"
+      ]
+    },
+    {
+      "id": "excludes",
+      "text": "Headings that are not commands are left out"
+    }
+  ],
+  "checks": [
+    {
+      "id": "lists",
+      "run": "python3 tools/list_commands.py | grep -qx doctor",
+      "timeout": 60
+    },
+    {
+      "id": "unit",
+      "run": "python3 -m unittest tests.test_list_commands",
+      "timeout": 120
+    }
+  ],
+  "fake": {
+    "edits": {
+      "tools/list_commands.py": "\"\"\"Print every command documented in skill/references/commands.md, one per line, in file order.\"\"\"\nimport re\nfrom pathlib import Path\n\nDOC = Path(__file__).resolve().parent.parent / \"skill\" / \"references\" / \"commands.md\"\n\n\ndef commands(text: str) -> list[str]:\n    \"\"\"Each `### <name>` heading that names a command: one or two lowercase words, not \"the ...\".\"\"\"\n    out = []\n    for line in text.splitlines():\n        m = re.fullmatch(r\"### ([a-z][a-z-]*(?: [a-z][a-z-]*)?)\", line.strip())\n        if m and not m.group(1).startswith(\"the \"):\n            out.append(m.group(1))\n    return out\n\n\nif __name__ == \"__main__\":\n    print(\"\\n\".join(commands(DOC.read_text())))\n",
+      "tests/test_list_commands.py": "import subprocess\nimport sys\nimport unittest\nfrom pathlib import Path\n\nROOT = Path(__file__).resolve().parent.parent\n\n\nclass ListCommands(unittest.TestCase):\n    def test_it_lists_documented_commands_in_order(self):\n        out = subprocess.run([sys.executable, str(ROOT / \"tools\" / \"list_commands.py\")], capture_output=True,\n                             text=True, check=True).stdout.splitlines()\n        for name in (\"version\", \"doctor\", \"launch\"):\n            self.assertIn(name, out)\n        self.assertLess(out.index(\"version\"), out.index(\"doctor\"))\n        self.assertLess(out.index(\"doctor\"), out.index(\"launch\"))\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n"
+    },
+    "usage": {
+      "input_tokens": 12000,
+      "output_tokens": 3000,
+      "cache_read_input_tokens": 40000
+    },
+    "lead_usage": {
+      "input_tokens": 9000,
+      "output_tokens": 2500,
+      "cache_read_input_tokens": 30000
+    },
+    "worker_usage": {
+      "input_tokens": 8000,
+      "output_tokens": 2000
+    },
+    "review_findings": [
+      {
+        "severity": "low",
+        "file": "tools/list_commands.py",
+        "confidence": "suspected",
+        "text": "A two-word heading that is not a command would still be listed."
+      }
+    ]
+  }
+}
