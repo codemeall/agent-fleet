@@ -95,7 +95,7 @@ UNBLOCKED settings-ui
 
 Add `--launch-ready` to launch them at once, and `--gate` to run the ticket's planned commands first (a failing check verifies nothing). Then update the source ticket.
 
-**Findings to fix:** repair the writer within its assignment (example 6); when it reports `needs-verification` again, check it and run `fleet review settings api-client` again. That round's diff still runs from the writer's first launch, so it covers both rounds; until then, `accept` refuses the first review as stale. Then accept as above.
+**Findings to fix:** `fleet send settings api-client --findings` sends them to the writer, numbered, to fix or rebut, and relaunches it ([settling findings](commands.md#settling-findings)); or repair the writer within its assignment yourself (example 6). When it reports `needs-verification` again, check it and run `fleet review settings api-client` again. That round's diff still runs from the writer's first launch, so it covers both rounds; until then, `accept` refuses the first review as stale. Then accept as above.
 
 **Out of rounds:** after `review_rounds` reviews (default 2), the next repair or review is refused with an `ESCALATE` block: the rounds used, the last reviewer's open findings and the owner's ways out ([review rounds](commands.md#review-rounds)). Stop and ask the owner. To accept as is, record the open findings and their decision in the evidence and `fleet accept`; to give up, `fleet drop settings api-client --reason "<owner's words>"`; to try once more, add their words to the refused command:
 
