@@ -338,6 +338,18 @@ class Supervise(RuntimeCase):
         self.write_report("review-01")
         self.assertIn("READY 01: gate passed (1/1), review clean", self.supervise("--auto", "gate,review"))
 
+    def test_pending_says_reviewed_once_the_running_reviewer_has_handed_back(self):
+        """Final review, 6: a reviewer that handed back keeps running until the lead acts, so PENDING no longer
+        says the writer is in review."""
+        self.handed_back()
+        self.reviewer_report = {}
+        self.assertIn("READY 01: gate passed (1/1), review clean", self.supervise("--auto", "gate,review"))
+        self.assertEqual(self.state()["workers"]["review-01"]["state"], "running")
+        out = self.supervise("--auto", "gate,review", timeout="1", expected=2)
+        self.assertIn("PENDING 01 [needs-verification] reviewed; see review-01's line\n", out)
+        self.assertIn("PENDING review-01 [needs-verification]\n", out)
+        self.assertNotIn("in review", out)
+
     def test_a_review_the_lead_starts_while_supervise_waits_for_the_lock_is_never_doubled(self):
         self.handed_back()
         real, raced = fleet.try_lock, []

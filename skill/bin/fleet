@@ -5407,8 +5407,13 @@ class Supervisor:
 
     def pending_note(self, state: dict, i: str) -> str:
         review = next((w for w in active(state) if w.get("review_of") == i), None)
-        if review:
-            return f" in review ({review['id']} is running)"
+        if review:  # a reviewer that handed back runs on until the lead acts on its review
+            f = run_dir(self.repo, self.run) / "reports" / f"{review['id']}.md"
+            try:
+                back = usage_status(f) in REVIEWED_STATUSES and f.stat().st_mtime >= review.get("launched_at", 0)
+            except OSError:
+                back = False
+            return f" reviewed; see {review['id']}'s line" if back else f" in review ({review['id']} is running)"
         meta = state["workers"].get(i) or {}
         sent = (state["tickets"].get(meta.get("review_of")) or {}).get("findings_sent")
         if meta.get("role") == "review" and sent and sent.get("reviewer_at") == meta.get("launched_at"):
