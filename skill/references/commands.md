@@ -23,7 +23,7 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`launch`](#launch) | Starts a worker in a cmux pane or a headless tmux window | A ticket is ready and its prompt is written |
 | [`peek`](#peek) | Shows the bottom of a worker's screen | After `STALLED`, or when the launch screen shows a prompt |
 | [`send`](#send) | Saves a message in the ticket's inbox and points the worker to it | Answering a blocked worker or requesting changes |
-| [`wait`](#wait) | Blocks until something needs the lead | Between actions, while workers run |
+| [`wait`](#wait) | Blocks until something needs the lead; with `--gate`, sends failing checks back to the worker first | Between actions, while workers run |
 | [`status`](#status) | Lists workers and report statuses | You need a snapshot after `EXITED` or a recovery |
 | [`review`](#review) | Stops the writer, saves its diff and launches a reviewer from another family | A writer hands back on a ticket that needs review |
 | [`accept`](#accept) | Stops the ticket's workers, verifies the reviewer then the writer, and lists what that unblocks | Your checks and any review are done and the evidence is written |
@@ -273,7 +273,7 @@ So a message can span lines and still arrive as one input, and every message sta
 
 ```text
 fleet wait <run> --timeout <seconds> [--stall <seconds>] [--interval <seconds>] [--any-change]
-           [--settle <seconds>]
+           [--settle <seconds>] [--gate | --no-gate]
 ```
 
 Blocks until something needs the lead, then prints it and exits 0. On timeout it prints `TIMEOUT` and exits 2.
@@ -289,6 +289,7 @@ Blocks until something needs the lead, then prints it and exits 0. On timeout it
 | `TIMEOUT` | Nothing new | Handle `PENDING` lines, otherwise wait again |
 | `PENDING <id> [status]` | A report is still waiting on the lead | Handle it |
 | `SCOPE <path> (<kind>) …` | A file outside every ticket changed while workers ran; it never wakes the lead on its own | Find out who changed it ([the scope check](#the-scope-check)) |
+| `GATE-FAILED <id> after N rounds: <summary>; evidence <path>` | With `--gate`: the ticket's checks still fail after its gate rounds | Read the evidence, then decide ([the gate loop](#the-gate-loop)) |
 
 A `REPORT` line ends with the report's path and, for a report with an `## Appendix`, the lines above it: `(read lines 1-34 of 180; appendix below)`. Read those lines; the appendix holds supporting detail for a line you doubt.
 
@@ -303,6 +304,19 @@ REPORT api [needs-verification] criteria 5/5, checks 2/2 exit 0, findings 0, que
 `--timeout` is at most 600; use the longest your host allows (540 in Claude Code), or run it in the background. `--interval` (default 10) sets how often it polls. `--any-change` wakes on any report change. `--settle` (default 5, at most 30) keeps gathering events for that long after the first, never past `--timeout`, so workers finishing together cost one wake; 0 returns at once.
 
 **Use:** whenever workers are running and you have nothing else to do. Run one wait at a time: a wait consumes the events it prints. End a background wait before `handoff`.
+
+#### The gate loop
+
+`--gate` (or `gate = true` under `[defaults]` in the owner's config; off by default; `--no-gate` turns it off for one wait) runs [`gate`](#gate) for you on each hand-back that can still be fixed, before you hear of it, so a failing check goes straight back to the worker. It is the cross-vendor form of Claude Code's `TaskCompleted` hook and Codex's `SubagentStop` block. It acts when an `implement` ticket with planned commands reports `needs-verification` while its writer is still running; every other report wakes you exactly as without `--gate`. The checks run as `fleet gate` runs them (from the repository, the same environment rules, each `timeout`) and write the same evidence file, `.fleet/runs/<run>/evidence/<id>.gate.md`. Then:
+
+- **Pass:** one wake, the `REPORT` line with the gate's result after the header summary: `REPORT api [needs-verification] criteria 5/5, …, files in scope; gate 2/2 passed, scope ok <path>`. [`accept --gate`](#accept) can reuse this gate.
+- **A check fails, with rounds left:** no wake. Fleet appends an inbox message to the worker with each failing command, its exit code (or timeout) and the last 40 lines of its output, quoted as data, telling it to fix the cause in its own files and set `Status: needs-verification` again (or `blocked`, when the failure comes from a file it does not own). It parks the report as `changes-requested`, as `send --changes` does, types the inbox pointer and keeps waiting. A ticket gets `gate_rounds` of these messages (under `[defaults]`, a whole number from 1 to 5, default 2; counted per ticket in run state).
+- **Rounds used up:** `GATE-FAILED api after 2 rounds: 1/2 passed, scope ok (npm test: exit 1); evidence <path>`. The report stays at `needs-verification`, and each later failing hand-back of the ticket wakes you the same way. Repair it yourself with `send --changes`, or take it to the owner.
+- **Scope:** a file outside every ticket's scope that changed since the writer launched is never sent to the worker, whatever the checks did. You get the `REPORT` line with the gate's result and a `SCOPE` line per file; find out who changed it ([the scope check](#the-scope-check)). Files the loop's own commands wrote during this gate (Fleet compares the tree before and after them) never fail it and never show as `SCOPE` lines; the `REPORT` line says `checks wrote N file(s) outside every ticket`. A worker was running, so they are not recorded as check output either: `diff`, `verify` and `accept` still name them.
+
+`wait` still holds no lock and saves nothing while checks run. Sending a round needs the run's lock for a moment (to save the message, park the report and count the round, with run state reloaded inside the lock). Fleet tries it without waiting: if one of your commands holds it, that ticket is skipped for now and retried on the next poll from the same result, without running the checks again. A wait that times out first prints the report as `PENDING`, and the next wait gates it again; so does the next wait after one that was ended mid-gate. A gate that cannot run at all (a Git error, say) wakes you with `gate not run (<reason>)` on the `REPORT` line, so a hand-back is never lost. If typing the pointer fails, the message is still saved and the report parked; you get `UNREACHABLE <id>: gate round N is saved …` (don't resend it).
+
+Other tickets' events are picked up as soon as a gate finishes, and wake you together with it. A check is never cut short by `--timeout`: a gate that runs past it finishes first, so `wait` then returns late, by up to the ticket's check timeouts; give long checks a background wait. Run state keeps `gate` and `gate_rounds` from when the run started, like `review_rounds`.
 
 ### status
 
@@ -385,7 +399,7 @@ fleet accept <run> <id> --evidence <file> [--evidence <file> ...] [--review-evid
 Accepts a ticket, and its review, in one call:
 
 1. Stops the ticket's latest reviewer and its writer if either is still running, confirming each exit.
-2. With `--gate`, runs [`gate`](#gate). A failure verifies nothing; a pass puts its evidence file first in the writer's evidence. Unlike `gate` alone, this holds the run's lock while the checks run, so other Fleet commands wait; for long checks, run `fleet gate` first and pass its evidence file with `--evidence`.
+2. With `--gate`, runs [`gate`](#gate). A failure verifies nothing; a pass puts its evidence file first in the writer's evidence. Unlike `gate` alone, this holds the run's lock while the checks run, so other Fleet commands wait; for long checks, run `fleet gate` first and pass its evidence file with `--evidence`. When [`wait --gate`](#the-gate-loop) last gated the ticket and it passed, and nothing has changed since (the same HEAD, the same fingerprint for every changed or untracked file, the same evidence file), it reuses that gate instead and prints `GATE <id> reused the passing gate wait --gate ran at <time>: …`. Any change runs the checks again, so keep your own notes under `.fleet/` or a `scope_ignore` folder such as `.scratch/` (outside the tree it compares) to keep the reuse.
 3. Verifies the latest reviewer, unless it is verified already, with `--review-evidence` (default: the `--evidence` files).
 4. Verifies the writer with the `--evidence` files.
 5. Prints `UNBLOCKED <ids>`: tickets never launched that wait on this one and whose blockers are now all verified, or `UNBLOCKED none`. With `--launch-ready` it then runs `launch --ready` and prints its lines.
@@ -396,7 +410,7 @@ Before stopping anything, and again before the first verify, it checks what `ver
 
 Header problems in either report print as `verify` warnings on stderr and never refuse.
 
-It holds the run's lock throughout, gate included. To send a failing check back to a writer that is still running, run `gate` on its own first: after `accept --gate` fails, the writer is stopped and needs a relaunch to fix it.
+It holds the run's lock throughout, gate included. To send a failing check back to a writer that is still running, use [`wait --gate`](#the-gate-loop) or run `gate` on its own first: after `accept --gate` fails, the writer is stopped and needs a relaunch to fix it.
 
 **Use:** once the reviewer's report is in (or the writer's, when no review is required) and your evidence is written. Only then update the source ticket.
 
@@ -425,7 +439,7 @@ FAIL npm test -- src/api.test.ts: exit 1
 
 It exits 1 when a command fails or times out, or a file outside every ticket's scope changed; otherwise 0. The scope reads `scope not checked (not launched yet)` before launch, and `(no whole-tree snapshot)` for a worker launched by an earlier Fleet. It works for `implement` and `investigate` tickets, whether or not the worker is still running; a ticket with only prose checks is refused (run those by hand), and so is a reviewer's ID. It changes no run state and takes no lock, so other commands keep working during long checks. Prose checks are not run: record them in your own evidence file.
 
-**Use:** after a worker hands back, instead of retyping its checks. Read the evidence, then pass it to `verify` with your own notes: `fleet verify <run> <id> --evidence <gate-file> --evidence <your-notes>`. The combined-tree checks (full suite, typecheck, build) stay your batch step.
+**Use:** after a worker hands back, instead of retyping its checks. Read the evidence, then pass it to `verify` with your own notes: `fleet verify <run> <id> --evidence <gate-file> --evidence <your-notes>`. The combined-tree checks (full suite, typecheck, build) stay your batch step. With [`wait --gate`](#the-gate-loop), wait runs it on each hand-back of a running writer and writes the same file, so you need not run it again.
 
 ### diff
 
@@ -474,7 +488,7 @@ A worker's diff covers only its own files, so Fleet also compares the whole chec
 - a ticket owns its files from its first launch until it is verified or dropped, so work running alongside is never blamed on this worker;
 - never counted: `.fleet/`, gitignored files, the run's ticket files, files the lead handed Fleet (`plan`/`add --file`, `diff --output`, `--evidence` and `--review-evidence`, `prompt --diff`; a `gate --output` inside the checkout counts once `verify` takes it as `--evidence`), files `fleet gate`'s own commands wrote while no worker was running (until they change again), and the owner's `scope_ignore` list under `[defaults]` (default `[".scratch/", "node_modules/"]` plus the `__pycache__/`, `.pytest_cache/`, `.mypy_cache/` and `.ruff_cache/` caches; `name/` is a directory at any depth, `a/b/` is anchored at the root, anything else an exact path; your list replaces the default).
 
-Reviewers and investigators own no files, so any change during their run counts. The refusal lists each file as `changed`, `created`, `deleted` or `mode changed`. Ways out, each recorded in the run's decisions: the owner reverts the file; when it is the ticket's own work, [`fleet grant`](#grant) adds it to the ticket, so it enters the ticket's diff against its launch content, and its review; `fleet drop` retires the ticket; or, for the owner's own edits only, `--unowned-ok "<owner's words>"` on `diff`, `verify`, `review` or `accept` accepts that exact content (a later change to the file counts again). `stop` lists such files as soon as a worker exits, and `wait` adds a `SCOPE` line to a wake it is already making. Workers launched by an earlier Fleet have no snapshot; their check is skipped with a note.
+Reviewers and investigators own no files, so any change during their run counts. The refusal lists each file as `changed`, `created`, `deleted` or `mode changed`. Ways out, each recorded in the run's decisions: the owner reverts the file; when it is the ticket's own work, [`fleet grant`](#grant) adds it to the ticket, so it enters the ticket's diff against its launch content, and its review; `fleet drop` retires the ticket; or, for the owner's own edits only, `--unowned-ok "<owner's words>"` on `diff`, `verify`, `review` or `accept` accepts that exact content (a later change to the file counts again). `stop` lists such files as soon as a worker exits, and `wait` adds a `SCOPE` line to a wake it is already making. With [`wait --gate`](#the-gate-loop), files the loop's own commands wrote never wake you and are never sent to the worker, but they still count here, since a worker was running. Workers launched by an earlier Fleet have no snapshot; their check is skipped with a note.
 
 ## Continuity
 
