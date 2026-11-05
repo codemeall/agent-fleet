@@ -173,7 +173,7 @@ class Supervise(RuntimeCase):
 
         with patch.object(fleet, "run_check", side_effect=AssertionError("the gate ran again")):
             out = self.accept("--gate")
-        self.assertIn("GATE 01 reused the passing gate wait --gate ran at ", out)
+        self.assertIn("GATE 01 reused the passing gate the gate loop ran at ", out)
         self.assertIn("review-01: verified", out)
         self.assertIn("01: verified", out)
 
@@ -368,6 +368,14 @@ class Supervise(RuntimeCase):
         self.assertEqual(self.state()["workers"]["02"]["state"], "running")
         self.assertNotIn("LAUNCHED", self.supervise("--auto", "gate,dispatch", timeout="1", expected=2))
         self.assertEqual(sum(e["ticket"] == "02" for e in self.state()["ledger"]), 1)
+
+    def test_dispatch_never_starts_a_ticket_the_lead_held_back(self):
+        self.dispatch_plan([{"id": "03", "files": ["third.txt"]}], parallel=3)  # 03 has no blockers; the lead waits
+        self.accept_01()
+        out = self.supervise("--auto", "gate,dispatch", timeout="1", expected=2)
+        self.assertIn("LAUNCHED 02", out)
+        self.assertNotIn("LAUNCHED 03", out)
+        self.assertNotIn("03", self.state()["workers"])
 
     def test_dispatch_launches_nothing_the_lead_already_launched(self):
         self.dispatch_plan()

@@ -8,12 +8,13 @@ Teamwork release 4 (#39): workers can run in their own git worktrees, a supervis
   - Workers may build and test in their own tree, and tickets with overlapping files may run together.
   - Diff, the scope check, gate, the review snapshot and the Claude hooks guard all read the tree.
   - `fleet merge`, which `accept` runs first, applies the ticket to the checkout with plain `git apply`. It changes the working tree only, never HEAD, the index or refs. It refuses with `CONFLICT <id>: <files>` and applies nothing when the checkout's copy moved or the patch does not apply. The lead then re-adds the work, or merges by hand and runs `merge --resolved`.
-  - Repairs and `--resume` reuse the ticket's tree. `accept` and `drop` remove it (`drop` keeps its changes as a patch), and `fleet check` lists trees and `--clean-worktrees` removes orphans.
+  - Repairs and `--resume` reuse the ticket's tree. A ticket repaired after a merge merges only what changed since. `accept` and `drop` remove the tree (`drop` keeps its changes as a patch, and says when merged changes stay in the checkout). A launch that fails removes the tree it made. `fleet check` lists trees, and `--clean-worktrees` removes orphans.
+  - `worktree_setup` runs while `launch` holds the checkout's lock, so keep it short.
   - Claude and Codex trust a worktree through its main checkout. Both get the run folder with `--add-dir`.
   - Fleet's own `git status` calls no longer refresh the index (`--no-optional-locks`), in shared runs too.
 - **`fleet supervise` (#37).** It runs in place of `wait --gate`, with the same options and lines. It takes the steps the owner opted into (`[defaults] supervise` or `--auto gate,review,dispatch`; the default `["gate"]` is exactly `wait --gate`):
   - it starts the required cross-family review on a clean hand-back;
-  - it launches tickets a verification unblocked;
+  - it launches only tickets a verification unblocked, never one the lead held back;
   - it wakes the lead with `READY <id>` or `FINDINGS <id>`, or for any judgment call.
   
   It never answers a prompt, verifies or accepts, and it takes the run lock only briefly, without waiting for it. For one reviewed ticket the lead goes from 4 turns to 2.

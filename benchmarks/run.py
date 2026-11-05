@@ -368,6 +368,9 @@ class Arm:
                 self.stop_agent()
         result["wall_s"] = round(time.monotonic() - start, 1)
         self.say(f"agent exited {result['exit']} after {result['wall_s']}s")
+        if self.name == "fleet":  # before cost and checks: a worker the lead left running must not keep editing
+            if self.stop_workers() and result.get("timed_out"):
+                self.notes.append("Fleet's workers were still running at the budget and were stopped before the checks")
         parsed = fleet.headless_output(out_path.read_text(errors="replace"))
         agent_tokens = fleet.usage_totals(parsed["usage"]) if parsed["usage"] else None
         result["agent"] = {"tokens": agent_tokens, "message": (parsed["message"] or "")[-2000:],
@@ -483,12 +486,25 @@ class Arm:
             self.say(f"check {c['id']}: {'pass' if code == 0 else 'FAIL'}")
         return out
 
+    def stop_workers(self) -> bool:
+        """Stop every Fleet worker of this arm's runs; True when one was still running."""
+        if not (self.skill / "bin" / "fleet").is_file():
+            return False
+        live = False
+        for run in self.fleet_runs():
+            try:
+                workers = json.loads((self.repo / ".fleet" / "runs" / run / "run.json").read_text()).get("workers", {})
+            except (OSError, ValueError):
+                workers = {}
+            live |= any(w.get("state") in ("launching", "running", "unknown", "stop-failed") for w in workers.values())
+            self.fleet_cmd("stop", run, "--all", "--timeout", "10", timeout=300)
+        return live
+
     def cleanup(self) -> None:
         """Stop the agent, every Fleet worker and the private tmux server, then delete the clone unless --keep."""
         self.stop_agent()
-        if self.name == "fleet" and (self.skill / "bin" / "fleet").is_file():
-            for run in self.fleet_runs():
-                self.fleet_cmd("stop", run, "--all", "--timeout", "10", timeout=300)
+        if self.name == "fleet":
+            self.stop_workers()
         if self.tmux_started or self.name == "fleet":
             subprocess.run(["tmux", "-L", self.socket, "kill-server"], capture_output=True, timeout=30)
         if self.a.keep:

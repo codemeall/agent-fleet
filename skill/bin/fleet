@@ -1334,12 +1334,17 @@ def reported_usage(repo: Path, state: dict, w: dict) -> None:
         pass  # counts in a shape Fleet cannot read stay unknown, never zero
 
 
+def separate_trees(state: dict, i: str | None, j: str) -> bool:
+    """True when tickets `i` and `j` never edit the same copy of a file: a worktree run gives each its own tree."""
+    return bool(i) and isolated(state) and i != j
+
+
 def assert_scope_idle(state: dict, files: list[str], ticket: str | None = None) -> None:
     """Refuse while a live worker may change these files. In a worktree run, only `ticket`'s own workers can:
     every other ticket works in its own tree."""
     for w in active(state):
         owner = w.get("review_of") or w["id"]
-        if ticket and isolated(state) and owner != ticket:
+        if separate_trees(state, ticket, owner):
             continue
         if scopes_overlap(files, state["tickets"][owner]["files"]):
             raise FleetError("scope overlaps a worker whose exit is unconfirmed")
@@ -2672,7 +2677,10 @@ def cmd_drop(a, cfg):
         for line in retire_trees(repo, state, a.id, keep_patch=True):
             print(line)
         save_run(repo, a.run, state)
-        print(f"{a.id}: dropped; its files are free, and nothing it did reached the checkout")
+        merged = sorted((t.get("merged") or {}).get("files", {}))
+        print(f"{a.id}: dropped; its files are free, and " + (
+            f"its merged changes to {', '.join(merged)} stay in the checkout's working tree for the owner to review"
+            if merged else "nothing it did reached the checkout"))
         return
     print(f"{a.id}: dropped; its files are free, and any edits it made stay in the checkout for the owner to review")
 
@@ -3146,7 +3154,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
             raise FleetError("launch family must match saved plan")
         for other in running:
             owner = other.get("review_of") or other["id"]
-            if isolated(state) and owner != a.id:
+            if separate_trees(state, a.id, owner):
                 continue  # in a worktree run another ticket's worker edits its own tree, never this one's
             if scopes_overlap(t["files"], state["tickets"][owner]["files"]):
                 raise FleetError("files overlap an active implementation/review; wait for its exit")
@@ -3174,56 +3182,62 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     term = terminal(state)
     place = term.place(state, a.pane)
     d = run_dir(repo, a.run)
+    known = set(state.get("worktrees", {}))
     work = launch_tree(repo, state, cfg, a.id, meta, a.resume)  # the worker's cwd: the checkout, or its own worktree
-    baseline = d / "snapshots" / f"{a.id}.json"
-    if meta["role"] == "implementation" and not baseline.exists():
-        atomic_json(baseline, capture_files(work, t["files"]))
-    tree = d / "snapshots" / f"{a.id}.tree.json"
-    if not tree.exists():  # the first launch's, like the scoped baseline, so repair rounds stay in one window
-        atomic_json(tree, tree_state(work, run_ignore(state, cfg)))
-    if meta["role"] == "implementation":
-        t.setdefault("launched_at", time.time())  # from here until verified or dropped, it owns its files
-    report = d / "reports" / f"{a.id}.md"
-    if report.exists():
-        report.replace(d / "reports" / f"{a.id}.{uuid.uuid4().hex}.previous")
-    token = uuid.uuid4().hex
-    line = (resume_prompt_line(prompt_path, a.id, report, inbox_path(repo, a.run, a.id)) if a.resume
-            else worker_prompt_line(prompt_path, a.id))
-    hooks = None
-    if hooks_on(pcfg, profile):  # a worker writes its own files; a reviewer or investigator only its report
-        worker_role = profile == "worker"
-        hooks = write_hooks(work, d, a.id, t["files"] if worker_role else [], token,
-                            worker_role and bool(cfg["defaults"].get("scope_permissions")),
-                            t.get("commands", []) if worker_role else [])
-    trust = prepare_trust(cfg, a.provider, pcfg, repo, () if work == repo else (work,))
-    trust = " ".join(x for x in (trust, tree_launch_args(repo, state, cfg, a.provider, pcfg, profile, work)) if x)
-    command = build_launch(pcfg, model, effort, line, session, a.resume, trust, profile, hooks and hooks["settings"])
-    exit_file = d / "exits" / f"{a.id}.{token}.json"
-    headless = {}
-    if profile == HEADLESS:  # its runner writes the report, usage and receipt; reconcile records the usage
-        usage_file = d / "usage" / f"{a.id}.{token}.json"
-        usage_file.parent.mkdir(exist_ok=True)
-        headless = {"transport": HEADLESS, "usage_file": str(usage_file)}
-        limit = state["options"].get("headless_timeout_minutes", cfg["defaults"]["headless_timeout_minutes"])
-        wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_headless", str(exit_file), token,
-                              str(report), str(usage_file), command, str(int(limit) * 60)])
-    else:
-        wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_run", str(exit_file), token, command])
-    if meta["role"] != "implementation" and not a.resume:  # a launch that reaches the terminal is a round;
-        t["review_rounds"] = review_rounds(state, meta["review_of"]) + 1  # resuming its session is the same one
-    if meta["role"] == "implementation" and not a.resume:
-        t.pop("gate_rounds_used", None)  # each fresh worker gets the gate loop's rounds again
-    # Persist before launch: an uncertain terminal result must not silently free capacity.
-    state["workers"][a.id] = dict(meta, id=a.id, provider=a.provider, model=model, effort=effort,
-        family=family, tier=a.tier, steered=steered, surface="unknown", state="launching", command=command,
-        token=token, exit_file=str(exit_file), launched=time.strftime("%Y-%m-%dT%H:%M:%S"),
-        launched_at=time.time(),
-        **({"session": session} if session else {}), **headless, **({"hooks": hooks} if hooks else {}))
-    # Counted before the terminal opens: a failed open is an uncertain launch that may be running, so it holds a
-    # launch and wall time, as it holds capacity, until the lead stops or recovers it.
-    state.setdefault("ledger", []).append(ledger_entry(state, a.id, state["workers"][a.id], a.resume,
-                                                       usage_home(pcfg) if session else None))
-    save_run(repo, a.run, state)
+    made = [x for x in (d / "snapshots" / f"{a.id}.json", d / "snapshots" / f"{a.id}.tree.json") if not x.exists()]
+    try:  # until the run is saved, a tree made for this launch is on disk only: a failure removes it again
+        baseline = d / "snapshots" / f"{a.id}.json"
+        if meta["role"] == "implementation" and not baseline.exists():
+            atomic_json(baseline, capture_files(work, t["files"]))
+        tree = d / "snapshots" / f"{a.id}.tree.json"
+        if not tree.exists():  # the first launch's, like the scoped baseline, so repair rounds stay in one window
+            atomic_json(tree, tree_state(work, run_ignore(state, cfg)))
+        if meta["role"] == "implementation":
+            t.setdefault("launched_at", time.time())  # from here until verified or dropped, it owns its files
+        report = d / "reports" / f"{a.id}.md"
+        if report.exists():
+            report.replace(d / "reports" / f"{a.id}.{uuid.uuid4().hex}.previous")
+        token = uuid.uuid4().hex
+        line = (resume_prompt_line(prompt_path, a.id, report, inbox_path(repo, a.run, a.id)) if a.resume
+                else worker_prompt_line(prompt_path, a.id))
+        hooks = None
+        if hooks_on(pcfg, profile):  # a worker writes its own files; a reviewer or investigator only its report
+            worker_role = profile == "worker"
+            hooks = write_hooks(work, d, a.id, t["files"] if worker_role else [], token,
+                                worker_role and bool(cfg["defaults"].get("scope_permissions")),
+                                t.get("commands", []) if worker_role else [])
+        trust = prepare_trust(cfg, a.provider, pcfg, repo, () if work == repo else (work,))
+        trust = " ".join(x for x in (trust, tree_launch_args(repo, state, cfg, a.provider, pcfg, profile, work)) if x)
+        command = build_launch(pcfg, model, effort, line, session, a.resume, trust, profile, hooks and hooks["settings"])
+        exit_file = d / "exits" / f"{a.id}.{token}.json"
+        headless = {}
+        if profile == HEADLESS:  # its runner writes the report, usage and receipt; reconcile records the usage
+            usage_file = d / "usage" / f"{a.id}.{token}.json"
+            usage_file.parent.mkdir(exist_ok=True)
+            headless = {"transport": HEADLESS, "usage_file": str(usage_file)}
+            limit = state["options"].get("headless_timeout_minutes", cfg["defaults"]["headless_timeout_minutes"])
+            wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_headless", str(exit_file), token,
+                                  str(report), str(usage_file), command, str(int(limit) * 60)])
+        else:
+            wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_run", str(exit_file), token, command])
+        if meta["role"] != "implementation" and not a.resume:  # a launch that reaches the terminal is a round;
+            t["review_rounds"] = review_rounds(state, meta["review_of"]) + 1  # resuming its session is the same one
+        if meta["role"] == "implementation" and not a.resume:
+            t.pop("gate_rounds_used", None)  # each fresh worker gets the gate loop's rounds again
+        # Persist before launch: an uncertain terminal result must not silently free capacity.
+        state["workers"][a.id] = dict(meta, id=a.id, provider=a.provider, model=model, effort=effort,
+            family=family, tier=a.tier, steered=steered, surface="unknown", state="launching", command=command,
+            token=token, exit_file=str(exit_file), launched=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            launched_at=time.time(),
+            **({"session": session} if session else {}), **headless, **({"hooks": hooks} if hooks else {}))
+        # Counted before the terminal opens: a failed open is an uncertain launch that may be running, so it holds a
+        # launch and wall time, as it holds capacity, until the lead stops or recovers it.
+        state.setdefault("ledger", []).append(ledger_entry(state, a.id, state["workers"][a.id], a.resume,
+                                                           usage_home(pcfg) if session else None))
+        save_run(repo, a.run, state)
+    except BaseException:
+        forget_new_tree(repo, state, a.id, known, made)
+        raise
     label = f"{a.id} · {a.provider}:{model}" + (f"@{effort}" if effort else "")
     surface, sid, why = term.open(state, place, work, wrapped, label)
     w = state["workers"][a.id]
@@ -3247,7 +3261,8 @@ READY_EXCLUSIVE = {"id": "<id>", "provider": "<provider>", "tier": "--tier", "mo
                    "effort": "--effort", "family": "--family", "settle": "--settle", "extra_round": "--extra-round"}
 
 
-def ready_tickets(state: dict, live: dict, cfg: dict, prompts: Path) -> tuple[list[str], dict[str, str]]:
+def ready_tickets(state: dict, live: dict, cfg: dict, prompts: Path,
+                  only: set[str] | None = None) -> tuple[list[str], dict[str, str]]:
     """What `launch --ready` starts now: never-launched pending tickets with verified blockers, files clear of
     running and already-picked work, a complete (or writable) prompt, and room under max_parallel and the
     provider's max, counted on the steered provider when a steer is active. Heaviest first, then plan order.
@@ -3264,7 +3279,8 @@ def ready_tickets(state: dict, live: dict, cfg: dict, prompts: Path) -> tuple[li
         load[w["provider"]] = load.get(w["provider"], 0) + 1
     picked, why = [], {}
     # A ticket that already had a worker is the lead's to repair or relaunch, never --ready's.
-    waiting = [i for i, t in tickets.items() if t["status"] == "pending" and i not in state["workers"]]
+    waiting = [i for i, t in tickets.items() if t["status"] == "pending" and i not in state["workers"]
+               and (only is None or i in only)]  # supervise's dispatch: only what a verification unblocked
     for i in sorted(waiting, key=lambda i: TIER_ORDER.index(tickets[i]["tier"])):
         t = tickets[i]
         name = live.get("provider") or t["provider"]
@@ -3309,7 +3325,8 @@ def launch_ready(a, cfg):
     reconcile(repo, state)
     save_run(repo, a.run, state)
     check_caps(state)
-    picked, why = ready_tickets(state, load_live_state(repo, a.run), cfg, run_dir(repo, a.run) / "prompts")
+    picked, why = ready_tickets(state, load_live_state(repo, a.run), cfg, run_dir(repo, a.run) / "prompts",
+                                getattr(a, "only", None))
     launched = 0
     for i in picked:
         t = state["tickets"][i]
@@ -3937,13 +3954,16 @@ def ticket_checkboxes(t: dict) -> int:
         return 0
 
 
-def header_file_problems(repo: Path, t: dict, review: bool, files_changed: list[str]) -> list[str]:
-    """An implement ticket's files must sit in its scope; a reviewer or an investigator changes none."""
+def header_file_problems(repo: Path, t: dict, review: bool, files_changed: list[str],
+                         tree: Path | None = None) -> list[str]:
+    """An implement ticket's files must sit in its scope; a reviewer or an investigator changes none. An absolute
+    path counts from the checkout, or from the worker's own worktree."""
     files = []
     for p in files_changed:
         path = Path(p.strip())
-        if path.is_absolute() and path.is_relative_to(repo):
-            path = path.relative_to(repo)
+        root = next((r for r in (repo, tree) if r and path.is_absolute() and path.is_relative_to(r)), None)
+        if root:
+            path = path.relative_to(root)
         if not path.as_posix().startswith(".fleet/"):  # its own report and other run files are Fleet's
             files.append(path.as_posix())
     if t.get("kind", "implement") == "implement" and not review:
@@ -3985,7 +4005,8 @@ def header_summary(repo: Path, state: dict, wid: str, text: str) -> tuple[str | 
         return (None if problems == ["header missing"] else header_text(problems)), problems
     meta = state["workers"].get(wid) or state["prompts"].get(wid) or {}
     t, review = state["tickets"].get(meta.get("review_of") or wid), meta.get("role") == "review"
-    files = header_file_problems(repo, t, review, data["files_changed"]) if t else []
+    tree = (state.get("worktrees") or {}).get(wid, {}).get("path")
+    files = header_file_problems(repo, t, review, data["files_changed"], Path(tree) if tree else None) if t else []
     problems = files + (header_check_problems(t, review, data) if t else [])
     criteria, checks, findings = data["criteria"], data["checks"], data["findings"]
     severity = [str(f["severity"]).lower() for f in findings]
@@ -4503,8 +4524,8 @@ class Supervisor:
         if load_hold(self.repo):
             return
         picked, _ = ready_tickets(state, load_live_state(self.repo, self.run), self.cfg,
-                                  run_dir(self.repo, self.run) / "prompts")
-        if not set(picked) & set(wanted):
+                                  run_dir(self.repo, self.run) / "prompts", set(wanted))
+        if not picked:
             return
         with try_lock(self.repo) as held:
             if not held:
@@ -4515,7 +4536,7 @@ class Supervisor:
                 return
             args = argparse.Namespace(cmd="launch", run=self.run, ready=True, resume=False, pane=None, id=None,
                                       provider=None, tier=None, model=None, effort=None, family=None, settle=None,
-                                      extra_round=None)
+                                      extra_round=None, only=set(wanted))  # never a ticket the lead held back
             lines, error = captured(launch_ready, args, self.cfg)
             verified, still = self.unblocked(load_run(self.repo, self.run), before)
             if error or not still:  # a refusal wakes the lead once; the lead decides what comes next
@@ -5657,7 +5678,7 @@ def cmd_accept(a, cfg):
     if a.gate:
         gate_md = gate_file(repo, a.run, a.id)
         if at := reusable_gate(repo, state, cfg, a.id):
-            print(f"GATE {a.id} reused the passing gate wait --gate ran at {at}: HEAD and the tree are unchanged "
+            print(f"GATE {a.id} reused the passing gate the gate loop ran at {at}: HEAD and the tree are unchanged "
                   f"since, so the checks were not run again; evidence {gate_md}")
         elif cmd_gate(sub_args(a, id=a.id, output=None), cfg):
             raise FleetError(f"{a.id}'s gate failed (above), so nothing was verified; its evidence is in {gate_md}. "
@@ -5666,18 +5687,19 @@ def cmd_accept(a, cfg):
         evidence.insert(0, str(gate_md))
     state = load_run(repo, a.run)
     refuse_problems(a, accept_problems(repo, state, a, review, rid), "its workers are stopped; nothing was verified")
+    applied = ""
     if worktree_rec(state, a.id):  # its diff reaches the checkout's working tree before anything is verified
-        accept_merge(repo, state, a)
+        applied = accept_merge(repo, state, a)
     if rid:
         try:
             cmd_verify(sub_args(a, id=rid, evidence=a.review_evidence or a.evidence, unowned_ok=None), cfg)
         except FleetError as e:
-            raise FleetError(f"{rid}: {e}; nothing was verified") from None
+            raise FleetError(f"{rid}: {e}; nothing was verified{applied}") from None
     try:
         cmd_verify(sub_args(a, id=a.id, evidence=evidence, unowned_ok=None), cfg)
     except FleetError as e:
         if not rid:
-            raise FleetError(f"{a.id}: {e}; nothing was verified") from None
+            raise FleetError(f"{a.id}: {e}; nothing was verified{applied}") from None
         raise FleetError(f"{rid} is verified and recorded, but {a.id} is not: {e}. Resolve that, then run fleet "
                          f"accept {a.run} {a.id} again with the same evidence; it skips the verified reviewer, "
                          "unless the writer's files changed, which needs a new review") from None
@@ -5825,7 +5847,7 @@ def tree_git(cwd: Path, *args: str, env: dict | None = None, data: bytes | None 
 def tree_excludes(state: dict) -> list[str]:
     """Pathspecs for what a tree's snapshot leaves as its base had it: .fleet/ and the run's scope_ignore list."""
     def glob(text: str) -> str:
-        return re.sub(r"([*?\[\]\\])", r"\\\1", text)
+        return GITIGNORE_SPECIAL_RE.sub(r"\\\1", text)
     out = [":(exclude,glob).fleet/**"]
     for entry in run_ignore(state):
         name = entry.strip("/")
@@ -5948,6 +5970,20 @@ def remove_tree(repo: Path, state: dict, rec: dict) -> None:
     if os.path.lexists(path):  # never registered, or Git could not remove it
         shutil.rmtree(path, ignore_errors=True)
     tree_git(repo, "worktree", "prune", check=False)
+
+
+def forget_new_tree(repo: Path, state: dict, wid: str, known: set[str], made: list[Path]) -> None:
+    """A launch that failed before saving the run: remove the tree it made for `wid`, and the snapshots it took
+    from that tree, so the next launch starts clean instead of meeting a tree no record knows."""
+    if wid in known or wid not in state.get("worktrees", {}):
+        return
+    try:
+        remove_tree(repo, state, state["worktrees"].pop(wid))
+    except (FleetError, OSError, subprocess.TimeoutExpired) as e:
+        print(f"{wid}: could not remove the worktree this launch made ({str(e).strip()[:200]}); fleet check "
+              f"{state['run']} --clean-worktrees removes it", file=sys.stderr)
+    for path in made:
+        path.unlink(missing_ok=True)
 
 
 def launch_tree(repo: Path, state: dict, cfg: dict, wid: str, meta: dict, resume: bool) -> Path:
@@ -6080,45 +6116,62 @@ def merge_ticket(repo: Path, state: dict, i: str, resolved: str | None = None) -
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
     if merge_done(repo, state, i, view):
         return f"MERGED {i}: already in the checkout ({', '.join(names) or 'no changes'})"
+    prior = t.get("merged") or {}
     if resolved is not None:
         if not resolved.strip():
             raise FleetError("--resolved needs what you did, in a few words; it is saved with the run's decisions")
-        t["merged"] = {"patch": view["sha"], "files": {f: now.get(f) for f in names}, "at": stamp, "by_hand": True}
+        t["merged"] = {"patch": view["sha"], "result": view["result"], "files": {f: now.get(f) for f in names},
+                       "at": stamp, "by_hand": True}
         state["decisions"].append(f"Merged {i} by hand: {', '.join(names)} ({resolved.strip()}) ({stamp})")
         return f"MERGED {i} by hand: recorded the checkout's {', '.join(names) or 'files'} as its merge"
-    if not names:
-        t["merged"] = {"patch": view["sha"], "files": {}, "at": stamp}
+    if prior.get("result"):  # merged before and repaired since: apply only what its tree changed after that merge
+        since = prior["result"]
+        touched = tree_diff(repo, since, view["result"], t["files"], names=True)
+        patch = tree_diff(repo, since, view["result"], t["files"]) if touched else b""
+        expect = dict(head_fingerprints(repo, since, touched), **{f: fp for f, fp in prior["files"].items()
+                                                                  if f in touched})
+        moved = "changed in the checkout since Fleet last merged this ticket"
+    else:
+        since, touched, patch = rec["base_tree"], names, view["patch"]
+        expect = head_fingerprints(repo, since, names)
+        moved = "changed in the checkout since the worktree was made"
+    if not touched:
+        t["merged"] = {"patch": view["sha"], "result": view["result"], "files": {f: now.get(f) for f in names},
+                       "at": stamp}
         return f"MERGED {i}: no changes to apply"
-    base = head_fingerprints(repo, rec["base_tree"], names)
-    why = {f: "changed in the checkout since the worktree was made" for f in names
-           if now.get(f, "not a file") != base.get(f)}
+    now = disk_fingerprints(repo, touched)
+    why = {f: moved for f in touched if now.get(f, "not a file") != expect.get(f)}
     if not why:
-        check = tree_git(repo, "apply", "--check", "--whitespace=nowarn", "-", data=view["patch"], check=False, raw=True)
+        check = tree_git(repo, "apply", "--check", "--whitespace=nowarn", "-", data=patch, check=False, raw=True)
         if check.returncode:
             err = check.stderr.decode(errors="replace")
-            why = {f: "the patch does not apply: " + one_line(err, 160) for f in names if f in err} or \
-                  {f: "the patch does not apply: " + one_line(err, 160) for f in names}
+            why = {f: "the patch does not apply: " + one_line(err, 160) for f in touched if f in err} or \
+                  {f: "the patch does not apply: " + one_line(err, 160) for f in touched}
     if why:
-        raise merge_conflict(repo, state, i, rec, why)
-    tree_git(repo, "apply", "--whitespace=nowarn", "-", data=view["patch"])  # the working tree only
+        raise merge_conflict(repo, state, i, rec, why, since)
+    tree_git(repo, "apply", "--whitespace=nowarn", "-", data=patch)  # the working tree only
+    names = sorted(set(names) | set(touched))
     after = disk_fingerprints(repo, names)
-    t["merged"] = {"patch": view["sha"], "files": {f: after.get(f) for f in names}, "at": stamp}
+    t["merged"] = {"patch": view["sha"], "result": view["result"], "files": {f: after.get(f) for f in names},
+                   "at": stamp}
     off = [f for f, fp in head_fingerprints(repo, view["result"], names).items() if after.get(f) != fp]
     if off:
         print(f"warning: after git apply, {', '.join(off)} in the checkout differ from {i}'s worktree (a filter or "
               "line-ending setting?); compare them before accepting", file=sys.stderr)
-    return (f"MERGED {i}: applied {len(names)} file(s) to the checkout's working tree ({', '.join(names)}); "
-            "the index is untouched")
+    return (f"MERGED {i}: applied {len(touched)} file(s) to the checkout's working tree ({', '.join(touched)}); "
+            "the index is untouched" + ("; only what changed since its last merge" if prior.get("result") else ""))
 
 
-def merge_conflict(repo: Path, state: dict, i: str, rec: dict, why: dict[str, str]) -> FleetError:
-    """Print the CONFLICT line and return the refusal, with each file's base copy saved for a merge by hand."""
+def merge_conflict(repo: Path, state: dict, i: str, rec: dict, why: dict[str, str],
+                   since: str | None = None) -> FleetError:
+    """Print the CONFLICT line and return the refusal, with each file's base copy saved for a merge by hand: the
+    tree's launch contents, or `since`, the tree as Fleet last merged it."""
     print(f"CONFLICT {i}: {', '.join(why)}")
     saved = run_dir(repo, state["run"]) / "merge" / i
     tree = Path(rec["path"])
     lines = []
     for f, reason in why.items():
-        base = head_fingerprints(repo, rec["base_tree"], [f]).get(f, "absent")
+        base = head_fingerprints(repo, since or rec["base_tree"], [f]).get(f, "absent")
         copy = saved / f"{f}.base"
         if base != "absent" and (blob := git_blob(repo, base.split(":")[1])) is not None:
             copy.parent.mkdir(parents=True, exist_ok=True)
@@ -6167,13 +6220,16 @@ def retire_trees(repo: Path, state: dict, i: str, keep_patch: bool = False) -> l
     return out
 
 
-def accept_merge(repo: Path, state: dict, a) -> None:
-    """accept's merge step: apply the ticket's diff before anything is verified, or refuse with CONFLICT."""
+def accept_merge(repo: Path, state: dict, a) -> str:
+    """accept's merge step: apply the ticket's diff before anything is verified, or refuse with CONFLICT. Returns
+    what a later refusal must add, since the checkout already holds the diff then."""
     try:
         print(merge_ticket(repo, state, a.id))
     except FleetError as e:
         raise FleetError(f"{e}\n{a.id} not accepted; its workers are stopped; nothing was applied or verified") from None
     save_run(repo, a.run, state)
+    return (f"; its diff is already in the checkout's working tree (MERGED above), and the next accept does not "
+            "apply it again")
 
 
 def accept_cleanup(repo: Path, a) -> None:

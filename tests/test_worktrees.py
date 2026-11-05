@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from unittest.mock import patch
 
@@ -201,6 +202,79 @@ class Isolation(WorktreeCase):
         self.assertIn("already in the checkout", self.call("merge", "demo", "a"))  # a second merge changes nothing
         self.accept("a")
         self.assertEqual(self.owner_git(), before)
+
+    def test_a_ticket_repaired_after_its_merge_merges_again_without_conflict(self):
+        self.start([{"id": "a", "files": ["a.txt", "b.txt"]}])
+        self.launch("a")
+        self.work("a", {"a.txt": "first\n"})
+        self.stop_with_receipt("a")
+        self.assertIn("MERGED a: applied 1 file(s)", self.call("merge", "demo", "a"))
+        self.launch("a")                                         # a repair round in the same tree
+        self.work("a", {"a.txt": "first\nsecond\n", "b.txt": "b\n"})
+        self.stop_with_receipt("a")
+        out = self.call("merge", "demo", "a")
+        self.assertIn("MERGED a: applied 2 file(s)", out)
+        self.assertIn("only what changed since its last merge", out)
+        self.assertEqual((self.repo / "a.txt").read_text(), "first\nsecond\n")
+        self.assertEqual((self.repo / "b.txt").read_text(), "b\n")
+        self.assertIn("already in the checkout", self.call("merge", "demo", "a"))
+        self.accept("a")
+
+    def test_a_repaired_ticket_still_conflicts_when_the_owner_edited_its_merged_file(self):
+        self.start([{"id": "a", "files": ["a.txt"]}])
+        self.launch("a")
+        self.work("a", {"a.txt": "first\n"})
+        self.stop_with_receipt("a")
+        self.call("merge", "demo", "a")
+        (self.repo / "a.txt").write_text("the owner's own change\n")
+        self.launch("a")
+        self.work("a", {"a.txt": "first\nsecond\n"})
+        self.stop_with_receipt("a")
+        out = self.call("merge", "demo", "a", expected=1)
+        self.assertIn("CONFLICT a: a.txt", out)
+        self.assertIn("changed in the checkout since Fleet last merged this ticket", out)
+        self.assertEqual((self.repo / "a.txt").read_text(), "the owner's own change\n")
+
+    def test_accept_says_the_diff_is_applied_when_verify_then_refuses(self):
+        self.start([{"id": "a", "files": ["a.txt"]}])
+        self.launch("a")
+        self.work("a", {"a.txt": "a\n"})
+        self.stop_with_receipt("a")
+        with mock.patch.object(fleet, "cmd_verify", side_effect=fleet.FleetError("forced refusal")):
+            out = self.accept("a", expected=1)
+        self.assertIn("MERGED a: applied 1 file(s)", out)
+        self.assertIn("forced refusal; nothing was verified; its diff is already in the checkout's working tree", out)
+        self.assertIn("already in the checkout", self.accept("a"))   # not applied twice
+        self.assertEqual((self.repo / "a.txt").read_text(), "a\n")
+
+    def test_drop_after_a_merge_says_the_merged_changes_stay(self):
+        self.start([{"id": "a", "files": ["a.txt"]}])
+        self.launch("a")
+        self.work("a", {"a.txt": "a\n"})
+        self.stop_with_receipt("a")
+        self.call("merge", "demo", "a")
+        out = self.call("drop", "demo", "a", "--reason", "owner changed course")
+        self.assertIn("its merged changes to a.txt stay in the checkout's working tree", out)
+        self.assertNotIn("nothing it did reached the checkout", out)
+
+    def test_a_failed_launch_removes_the_tree_it_made(self):
+        self.start([{"id": "a", "files": ["a.txt"]}])
+        with mock.patch.object(fleet, "build_launch", side_effect=fleet.FleetError("boom")):
+            self.assertIn("boom", self.call("launch", "demo", "a", "writer", "--tier", "standard", expected=1))
+        self.assertNotIn("a", self.state().get("worktrees", {}))
+        self.assertEqual(self.registered(), [])
+        self.assertFalse((self.repo / ".fleet/runs/demo/snapshots/a.json").exists())
+        self.launch("a")                                         # the next launch gets a fresh tree
+        self.assertTrue(self.tree("a").is_dir())
+
+    def test_absolute_paths_in_a_worktree_header_count_from_the_tree(self):
+        self.start([{"id": "a", "files": ["a.txt"]}])
+        self.launch("a")
+        tree = self.tree("a")
+        t = self.state()["tickets"]["a"]
+        self.assertEqual(fleet.header_file_problems(self.repo, t, False, [str(tree / "a.txt")], tree), [])
+        self.assertEqual(fleet.header_file_problems(self.repo, t, False, [str(tree / "b.txt")], tree),
+                         ["b.txt outside scope"])
 
     def test_verify_refuses_an_unmerged_worktree_ticket(self):
         self.start([{"id": "a", "files": ["a.txt"]}])

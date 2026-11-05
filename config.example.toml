@@ -56,7 +56,8 @@ review = "cross-heavy"
 # Runs started with `fleet init <run> --isolation worktree` give each implement ticket its own Git worktree outside
 # this checkout. worktree_root replaces the default folder ($XDG_CACHE_HOME, else ~/.cache, then
 # agent-fleet/worktrees); it must be outside the checkout. worktree_setup runs in each new tree before its worker
-# starts, for example to install dependencies; a failure launches nothing. A run keeps the values it was started with.
+# starts, for example to install dependencies; a failure launches nothing. It runs while launch holds the checkout's lock,
+# so keep it short. A run keeps the values it was started with.
 # worktree_root = "~/.cache/agent-fleet/worktrees"
 # worktree_setup = "npm ci --prefer-offline"
 # Set only when you intentionally target a validated cmux workspace:

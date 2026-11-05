@@ -410,6 +410,33 @@ class FakeRuns(BenchCase):
         self.assertIn("tmux -L fleet-bench-", self.interrupt("fleet"))
 
 
+class StopWorkers(unittest.TestCase):
+    def test_the_fleet_arm_stops_workers_the_lead_left_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            arm = object.__new__(bench.Arm)
+            arm.repo = Path(tmp) / "repo"
+            arm.skill = Path(tmp) / "skill"
+            (arm.skill / "bin").mkdir(parents=True)
+            (arm.skill / "bin" / "fleet").write_text("")
+            for run, state in (("live", "running"), ("done", "exited")):
+                d = arm.repo / ".fleet" / "runs" / run
+                d.mkdir(parents=True)
+                (d / "run.json").write_text(json.dumps({"workers": {"01": {"state": state}}}))
+            calls = []
+            arm.fleet_cmd = lambda *args, **kw: calls.append(args) or (0, "")
+            self.assertTrue(arm.stop_workers())
+            self.assertEqual(sorted(calls), [("stop", "done", "--all", "--timeout", "10"),
+                                             ("stop", "live", "--all", "--timeout", "10")])
+            (arm.repo / ".fleet/runs/live/run.json").write_text(json.dumps({"workers": {"01": {"state": "exited"}}}))
+            self.assertFalse(arm.stop_workers())
+
+    def test_workers_are_stopped_before_cost_and_checks(self):
+        source = RUNNER.read_text()
+        run = source[source.index("    def run(self) -> dict:"):source.index("    def stop_agent(self)")]
+        self.assertLess(run.index("self.stop_workers()"), run.index("self.fleet_cost(r)"))
+        self.assertLess(run.index("self.stop_workers()"), run.index("self.run_checks()"))
+
+
 class Packaging(unittest.TestCase):
     def test_the_kit_is_not_shipped_in_the_npm_package(self):
         files = json.loads((ROOT / "package.json").read_text())["files"]
