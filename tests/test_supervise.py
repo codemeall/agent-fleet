@@ -474,6 +474,37 @@ class Supervise(RuntimeCase):
         self.assertNotIn("02", self.state()["workers"])
         self.assertIn("TIMEOUT", self.supervise("--auto", "dispatch", timeout="1", expected=2))
 
+    def test_a_launch_that_fails_wakes_the_lead_once_per_error_and_lists_one_skipped_line(self):
+        """Final review, 7: a launch error that is not a wait for room (here, the provider was turned off) only
+        printed SKIPPED, was retried on every pass, never woke the lead, and piled one SKIPPED line per pass."""
+        self.dispatch_plan()
+        self.accept_01()
+        self.cfg["providers"]["writer"]["enabled"] = False                  # the owner turned it off since
+        out = self.supervise("--auto", "dispatch", timeout="3")
+        self.assertIn("DISPATCH-REFUSED 02: its launch failed: provider 'writer' is turned off in config; ", out)
+        self.assertIn("supervise tries it again on each pass and wakes you only for a new error", out)
+        self.assertNotIn("SKIPPED 02", out)                                 # the wake line says it
+        out = self.supervise("--auto", "dispatch", timeout="3", expected=2)  # several passes, the same error
+        self.assertIn("TIMEOUT", out)
+        self.assertNotIn("DISPATCH-REFUSED", out)
+        self.assertEqual(out.count("SKIPPED 02: provider 'writer' is turned off in config"), 1)
+        self.cfg["providers"]["writer"]["enabled"] = True
+        self.assertIn("LAUNCHED 02", self.supervise("--auto", "dispatch", timeout="1", expected=2))
+
+    def test_a_dispatch_failure_outside_the_launch_wakes_the_lead_once(self):
+        """Final review, 9: an error outside launch --ready (a ticket's provider gone from the config) woke every
+        supervise at once, again and again."""
+        self.dispatch_plan()
+        self.accept_01()
+        writer = self.cfg["providers"].pop("writer")
+        out = self.supervise("--auto", "dispatch", timeout="2")
+        self.assertIn("DISPATCH-FAILED: unknown provider 'writer'", out)
+        out = self.supervise("--auto", "dispatch", timeout="2", expected=2)
+        self.assertIn("TIMEOUT", out)
+        self.assertNotIn("DISPATCH-FAILED", out)
+        self.cfg["providers"]["writer"] = writer
+        self.assertIn("LAUNCHED 02", self.supervise("--auto", "dispatch", timeout="1", expected=2))
+
     def test_dispatch_skips_a_pass_while_the_lead_holds_the_lock(self):
         self.dispatch_plan()
         self.accept_01()

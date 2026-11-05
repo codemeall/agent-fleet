@@ -4071,6 +4071,8 @@ def launch_ready(a, cfg):
                 raise FleetError(f"{i}: {str(e).strip()[:300]}; inspect it before launching more") from None
             why[i] = ("pane limit (every pane has a live worker; stop a worker or close a pane)"
                       if isinstance(e, PaneLimit) else str(e).strip()[:300])
+            if isinstance(getattr(a, "failed", None), dict):  # supervise's dispatch: a failure, not a wait for room
+                a.failed[i] = why[i]
             continue
         launched += 1
         effort = f"@{w['effort']}" if w.get("effort") else ""
@@ -5382,8 +5384,12 @@ class Supervisor:
             try:
                 self.dispatch(state)
             except (FleetError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as e:
-                self.lines["(dispatch)"] = [f"DISPATCH-FAILED: {one_line(e, 300)}; run fleet launch {self.run} "
-                                            "--ready yourself when it is resolved"]
+                why = one_line(e, 300)  # the same failure on every pass wakes the lead once
+                if mark_once(self.seen, "dispatch.failed", digest(why.encode())[:16]):
+                    self.lines["(dispatch)"] = [f"DISPATCH-FAILED: {why}; run fleet launch {self.run} --ready "
+                                                "yourself when it is resolved"]
+            else:
+                (self.seen / "dispatch.failed").unlink(missing_ok=True)  # resolved: a later failure is news
         if not self.gates:
             return fresh
         for i, _, _ in fresh:
@@ -5671,7 +5677,9 @@ class Supervisor:
         the lead. A lockless look first: the lock is taken, without waiting, only when launch --ready would start
         one of them now. Under a hold, a busy lock, or no room yet, it looks again on a later pass. Inside the lock
         run state is re-read, so a ticket the lead launched meanwhile is never launched again. The verified
-        tickets it is done with are kept in .seen, across supervise runs."""
+        tickets it is done with are kept in .seen, across supervise runs. A launch that fails (a provider turned off,
+        a model not allowed, a ceiling, a pane limit) is tried again on each pass, and wakes the lead as
+        DISPATCH-REFUSED once per distinct error; a ticket waiting for room is listed as SKIPPED, its latest line."""
         marker = self.seen / "supervise.verified"
         try:
             before = set(json.loads(marker.read_text()))
@@ -5697,19 +5705,27 @@ class Supervisor:
                 return
             args = argparse.Namespace(cmd="launch", run=self.run, ready=True, resume=False, pane=None, id=None,
                                       provider=None, tier=None, model=None, effort=None, family=None, settle=None,
-                                      extra_round=None, only=set(wanted))  # never a ticket the lead held back
+                                      extra_round=None, only=set(wanted), failed={})  # never one the lead held back
             lines, error = captured(launch_ready, args, self.cfg)
             verified, still = self.unblocked(load_run(self.repo, self.run), before)
             if error or not still:  # a refusal wakes the lead once; the lead decides what comes next
                 marker.write_text(json.dumps(verified))
         self.actions += [x for x in lines if x.startswith("LAUNCHED ")]
-        skipped = [x for x in lines if x.startswith("SKIPPED ")]
-        live = load_run(self.repo, self.run)
-        self.actions += [x for x in skipped if (fanout_of(live, x.split()[1].rstrip(":")) or x.split()[1].rstrip(":"))
-                         in wanted]  # a fan-out investigator's line names its own ID
+        live, wakes = load_run(self.repo, self.run), []
+        for j, why in args.failed.items():  # a launch that failed, not a ticket waiting for room: retried each pass
+            if mark_once(self.seen, f"{j}.dispatch", digest(why.encode())[:16]):  # and woken once per distinct error
+                wakes.append(j)
+                self.lines.setdefault("(dispatch)", []).append(
+                    f"DISPATCH-REFUSED {j}: its launch failed: {one_line(why, 300)}; supervise tries it again on each "
+                    "pass and wakes you only for a new error")
+        for x in lines:
+            j = x.split()[1].rstrip(":") if x.startswith("SKIPPED ") else None
+            if j and (fanout_of(live, j) or j) in wanted:  # a fan-out investigator's line names its own ID
+                self.actions = [y for y in self.actions if not y.startswith(f"SKIPPED {j}: ")]  # the latest only
+                self.actions += [] if j in wakes else [x]  # a DISPATCH-REFUSED line says it already
         if error:
-            self.lines["(dispatch)"] = [f"DISPATCH-REFUSED {', '.join(wanted)}: launch --ready refused: "
-                                        f"{one_line(error, 400)}"]
+            self.lines.setdefault("(dispatch)", []).append(f"DISPATCH-REFUSED {', '.join(wanted)}: launch --ready "
+                                                           f"refused: {one_line(error, 400)}")
 
 
 def quit_keys(cfg: dict, w: dict) -> list[str]:
