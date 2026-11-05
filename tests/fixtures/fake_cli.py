@@ -9,6 +9,10 @@ The values the test expects (model, effort, session mode, trust override, accoun
 file named by $FAKE_CLI_EXPECT. On a good command line it records its argv in $FAKE_CLI_LOG/<cli>.jsonl, finds the
 Fleet prompt file named in the prompt argument, writes a needs-verification report, and then reads its terminal
 until it gets its own quit command (/exit or /quit). The other CLI's quit command is refused, not obeyed.
+
+For tests/test_smoke.py: $FAKE_CLI_EXPECT may hold one expectation per CLI under "by_cli"; a writer whose prompt
+carries a `fleet smoke` check (`grep -qx '<line>' smoke/<name>.txt`) writes that file first; and a CLI named in
+$FAKE_CLI_STALL (comma-separated) never writes its report, like a CLI stuck at a login or trust prompt.
 """
 import json
 import os
@@ -150,9 +154,19 @@ def prompt_file(prompt: str) -> tuple[str, Path, bool]:
     return ticket, path, resume
 
 
+def smoke_edit(ticket: str, text: str) -> None:
+    """A writer's `fleet smoke` ticket: write the line its grep check looks for. Reviewers edit nothing."""
+    if ticket.startswith("review-"):
+        return
+    for line, path in re.findall(r"grep -qx '([^']*)' (smoke/[\w.-]+\.txt)", text):
+        Path(path).parent.mkdir(exist_ok=True)
+        Path(path).write_text(line + "\n")
+
+
 def main() -> int:
     cli, argv = sys.argv[1], sys.argv[2:]
     want = json.loads(Path(os.environ["FAKE_CLI_EXPECT"]).read_text())
+    want = want.get("by_cli", {}).get(cli, want)
     log = Path(os.environ["FAKE_CLI_LOG"])
     try:
         if cli not in GRAMMAR:
@@ -174,9 +188,13 @@ def main() -> int:
     report = Path(found.group(1)) if found else path.parent.parent / "reports" / f"{ticket}.md"
     with (log / f"{cli}.jsonl").open("a") as fh:
         fh.write(json.dumps({"argv": argv, "ticket": ticket, "resume": resume, "id": uuid.uuid4().hex}) + "\n")
-    report.write_text(f"# Report {ticket}\n\nStatus: needs-verification\n\n## Work or review performed\n"
-                      f"- Smoke run of the {cli} launch line{' (resumed)' if resume else ''}; no files changed.\n")
-    print(f"fake {cli} working on {ticket}", flush=True)
+    if cli in os.environ.get("FAKE_CLI_STALL", "").split(","):
+        print(f"fake {cli} is waiting at a sign-in prompt", flush=True)
+    else:
+        smoke_edit(ticket, text)
+        report.write_text(f"# Report {ticket}\n\nStatus: needs-verification\n\n## Work or review performed\n"
+                          f"- Smoke run of the {cli} launch line{' (resumed)' if resume else ''}; no files changed.\n")
+        print(f"fake {cli} working on {ticket}", flush=True)
     quit_word = GRAMMAR[cli]["quit"]
     for line in sys.stdin:
         line = line.strip()
