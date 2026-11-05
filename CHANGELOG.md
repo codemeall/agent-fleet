@@ -21,6 +21,12 @@ Teamwork release 7 (#51): Codex workers signal their turns, Fleet reports how ea
   - `fleet judge` freezes both diffs and launches a read-only judge from a third family, whose `pick` wakes the lead as `VERDICT`.
   - `fleet accept <run> <id> --pick <writer-id>` merges that writer's tree, verifies it and the judge, and saves the other writer's change as a patch. The judge is the kept diff's cross-family review when its family differs and its frozen diff still matches. Plain `accept`, `verify` and `review` are refused, naming the writers, and so is `grant` once a writer has launched.
   - The `FANOUT` wake comes even when a busy lock deferred a writer's gate.
+  - **With release 6's rules:**
+    - A writer relaunched after a judge gets its gate rounds back, as after a review round.
+    - Each new judge starts its own scope window.
+    - An earlier judge's report is set to `superseded` once a later one is verified, and the writer set aside no longer waits on the lead.
+    - `@<ticket>` on the board reaches both writers.
+    - `send` to the ticket's own ID is refused, naming the writers and judges, and so is `send --findings`, since the judge is the ticket's review.
 - **Strict acceptance (#53).** `[defaults] acceptance = "strict"` is the default for new runs. A run keeps its value, and a run from before this release reads as `"warn"` and behaves as before. `verify`, `accept`, fan-out accept, `accept --pick` and supervise's `READY` ask one policy.
   - **What it refuses:** a missing or faulty `fleet` header, an unmet criterion, a failing check or an open question. Also a missing, stale or unreadable review, or one that lists an open high or medium finding. For best of two, so does a judge that has not handed back, recommends neither writer or picked the other one. Each refusal names every item and its way out, before anything is stopped, merged or verified.
   - **`--accept-finding F<n> "<why>"`** accepts the writer's rebuttal of one finding the latest review lists. That includes a rebuttal in the writer's hand-back after `send --findings`, before any re-review.

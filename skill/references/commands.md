@@ -230,11 +230,11 @@ In a [worktree run](#worktree-isolation), `fanout` on an implement ticket runs t
 
 - **Entries and IDs:** as for [fan-out](#fan-out): exactly two entries, in two known families, and writer IDs `<id>--<provider>` (`retry--claude`, `retry--codex`). Each writer has its own prompt, report, inbox, tree and ledger entry. Its prompt says another family works on the same ticket and that the lead keeps one diff.
 - **Refusals:** plan and add refuse best-of-two in a shared run, two entries in one family, one entry or three, `plan_first`, and an entry whose `worker` profile is above `permission_ceiling`. `plan_first = "heavy"` skips these tickets. When the review mode requires review, each writer's family must be reviewable, as for any ticket.
-- **Per writer:** `diff`, `gate`, [the scope check](#the-scope-check) and the [gate loop](#the-gate-loop) each work on one writer ID, in that writer's own tree, against the ticket's files. Each writer gets its own gate rounds. `fleet gate <run> <id>` on the ticket itself is refused: name a writer.
+- **Per writer:** `diff`, `gate`, [the scope check](#the-scope-check) and the [gate loop](#the-gate-loop) each work on one writer ID, in that writer's own tree, against the ticket's files. Each writer gets its own gate rounds, and gets them back when relaunched after a judge, resumed or fresh, as a writer does after a review round. `fleet gate <run> <id>` on the ticket itself is refused: name a writer.
 - **The wake:** once both have handed back and been gated, `wait` and `supervise` wake once with [`FANOUT`](#fan-out-wakes).
 - **Then:** [`judge`](#judge) compares the two diffs; [`accept --pick <writer-id>`](#accept) keeps one. `verify`, plain `accept` and `review` are refused, naming the writers. `drop` saves both trees' changes as patches. `grant` is refused once a writer has launched.
 
-**Review.** The judge is the kept diff's cross-family review; `fleet review` refuses these tickets. The judge reads both diffs as frozen snapshots and records each one's SHA. When the run's review mode requires review, `accept --pick` needs the latest judge's report at `Status: needs-verification`, from a family other than the kept writer's, on a frozen diff that still matches that writer's diff. It then verifies the judge with the writer. That is the rule every required review meets: verified, and bound to the current diff. If the judge shares the kept writer's family, keep the other writer or judge again with `--provider` from another family. If the writer changed since, judge again.
+**Review.** The judge is the kept diff's cross-family review; `fleet review` refuses these tickets. The judge reads both diffs as frozen snapshots and records each one's SHA. When the run's review mode requires review, `accept --pick` needs the latest judge's report at `Status: needs-verification`, from a family other than the kept writer's, on a frozen diff that still matches that writer's diff. It then verifies the judge with the writer; an earlier judge's report still awaiting the lead is set to `Status: superseded`. Each new judge starts its own scope window. That is the rule every required review meets: verified, and bound to the current diff. If the judge shares the kept writer's family, keep the other writer or judge again with `--provider` from another family. If the writer changed since, judge again.
 
 ### Plan first
 
@@ -406,6 +406,8 @@ Appends the message as `## Message N (<time>)` to the ticket's inbox, `.fleet/ru
 Lead message 2: read "## Message 2" in /repo/.fleet/runs/settings/inbox/api-client.md, then continue.
 ```
 
+A [fan-out](#fan-out) or [best-of-two](#best-of-two) ticket's own ID has no worker to read its inbox, so send refuses it and names the IDs that do: its investigators or writers, and its judges. `--findings` on a best-of-two ticket is refused too, since its judge is its review.
+
 So a message can span lines and still arrive as one input, and every message stays on record. Numbers continue across relaunches of the same ticket. Every worker, investigator and reviewer prompt, and the `launch --resume` line, names the inbox and tells the worker to read it when it starts. `wait` then expects a response, so a silent worker shows as `STALLED`.
 
 - `--file` reads the message from a file, or from stdin with `-`. Give text or `--file`, not both.
@@ -431,7 +433,7 @@ A worker runs it, never the lead. It appends one line, `- <time> <id>: <text>`, 
 
 - It refuses an `<id>` that is not a live worker of the run, text over 500 characters, and text that spans lines. Other control characters become spaces.
 - `@lead` in the text wakes the lead's next `wait` or `supervise`, once, with a `NOTE` line.
-- `@<id>` appends a pointer, with the note's text, to `.fleet/runs/<run>/inbox/<id>.mentions.md`, which that worker's prompt names. Fleet types nothing into its pane. The numbered inbox stays the lead's: it needs the run lock to count messages, and a note never takes it. An id the run doesn't know is named in the output and skipped.
+- `@<id>` appends a pointer, with the note's text, to `.fleet/runs/<run>/inbox/<id>.mentions.md`, which that worker's prompt names. A fan-out or best-of-two ticket's ID points each of its investigators or writers there instead, since the ticket has no worker of its own. Fleet types nothing into its pane. The numbered inbox stays the lead's: it needs the run lock to count messages, and a note never takes it. An id the run doesn't know is named in the output and skipped.
 - Fleet can't tell which process ran the command, so the `<id>` is a claim, not proof, like everything a worker writes.
 - A worker in its own [worktree](#worktree-isolation) runs it there; it finds the run in the owner's checkout.
 - With `scope_permissions` on, a Claude worker's settings allow exactly its own command, `Bash(fleet note <run> <id> *)` ([Claude hooks](#claude-hooks)). Without it, the command asks like any other. When `fleet` on PATH isn't this runtime, the prompt and the rule name the interpreter and file instead.

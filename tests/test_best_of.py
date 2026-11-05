@@ -656,6 +656,75 @@ class BestOfCost(BestOfCase):
         self.assertRegex(by, r"\n  reviewer +1 ticket \(1 verified\); first pass 1 of 1 verified \(100%\)")
 
 
+class BestOfMeetsRelease6(BestOfCase):
+    """Release 6's rules where best of two meets them: the review round, the scope window, the lead's queue, the
+    board and the inbox."""
+
+    def fanned(self):
+        self.launched()
+        self.both_back()
+        self.assertIn("FANOUT api:", self.wait("--gate"))
+
+    def judge_as(self, jid, pick="api--writer"):
+        self.call("judge", "demo", "api", "--settle", "0", "--as", jid)
+        self.write_report(jid, pick=pick, why="smaller")
+
+    def test_a_writer_resumed_after_a_judge_gets_its_gate_rounds_back(self):
+        for name in ("writer", "reviewer"):
+            self.cfg["providers"][name].update(launch="{bin} {session} --model {model} --effort {effort} {prompt}",
+                                               session="--session-id {id}", resume="--resume {id}")
+        self.launched()
+        self.hand_back("api--writer", "not yet\n")
+        self.hand_back("api--reviewer", "ok from reviewer\n")
+        self.wait("--gate", expected=2)  # api--writer's gate fails and goes back to it: one round used
+        self.assertEqual(self.state()["tickets"]["api"]["writer_gate_rounds"], {"api--writer": 1})
+        self.hand_back("api--writer", "ok from writer\n")
+        self.assertIn("FANOUT api:", self.wait("--gate"))
+        self.judged(pick="api--reviewer", why="cleaner")
+        self.call("launch", "demo", "api--writer", "writer", "--tier", "heavy", "--resume")  # a repair round
+        self.assertNotIn("api--writer", self.state()["tickets"]["api"].get("writer_gate_rounds", {}))
+
+    def test_a_second_judge_starts_its_own_scope_window(self):
+        self.fanned()
+        self.judged(pick="api--writer", why="smaller")
+        self.call("stop", "demo", "judge-api", "--timeout", "1")
+        (self.repo / "owner-notes.txt").write_text("the owner's own file, made between the judges\n")
+        self.judged(pick="api--writer", why="still smaller")  # judge again, under the same ID
+        self.accept("--pick", "api--writer")
+        self.assertEqual(self.state()["tickets"]["api"]["status"], "verified")
+
+    def test_the_writer_set_aside_and_an_earlier_judge_no_longer_await_the_lead(self):
+        self.fanned()
+        self.judge_as("judge-a")
+        self.call("stop", "demo", "judge-a", "--timeout", "1")
+        self.judge_as("judge-b")
+        self.accept("--pick", "api--writer")
+        self.assertEqual(self.status("api--reviewer"), "not-picked")
+        self.assertEqual(self.status("judge-a"), "superseded")
+        self.assertEqual(self.status("judge-b"), "verified")
+        self.assertEqual(fleet.awaiting_lead(self.repo, self.state()), [])
+        self.assertNotIn("PENDING", self.wait(expected=2))
+
+    def test_a_mention_of_the_ticket_reaches_both_writers(self):
+        self.launched()
+        out = self.call("note", "demo", "api--writer", "@api the parser lives in api.txt now")
+        box = self.run_file("inbox", "api--reviewer.mentions.md")
+        self.assertIn(f"pointed api--reviewer ({box})", out)
+        self.assertIn("the parser lives in api.txt now", box.read_text())
+        self.assertFalse(self.run_file("inbox", "api.mentions.md").exists())
+        self.assertFalse(self.run_file("inbox", "api--writer.mentions.md").exists())  # never the writer itself
+
+    def test_send_to_the_ticket_names_its_writers_and_findings_are_refused(self):
+        self.launched()
+        out = self.call("send", "demo", "api", "use the helper", expected=1)
+        self.assertIn("api is a best-of-two ticket, and no worker reads its own inbox; send to one of its workers by "
+                      "ID: fleet send demo <api--writer or api--reviewer>", out)
+        self.assertFalse(self.run_file("inbox", "api.md").exists())
+        out = self.call("send", "demo", "api", "--findings", expected=1)
+        self.assertIn("api is best-of-two: its judge is its review, so --findings has no reviewer's findings to send",
+                      out)
+
+
 class BestOfTemplates(unittest.TestCase):
     def test_the_pick_judge_template_marks_every_input_as_data(self):
         text = (fleet.SKILL_DIR / "templates" / "judge-pick-prompt.md").read_text()
