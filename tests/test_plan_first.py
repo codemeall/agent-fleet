@@ -394,6 +394,37 @@ class Approve(PlanFirstCase):
         self.assertTrue(self.run_file("plans", "01.md").exists())  # its prompt says to follow it
         self.assertEqual(fleet.unowned_for(self.repo, self.state(), "01"), [])
 
+    def two_tickets(self, gate_cmd="true"):
+        self.cfg["providers"]["writer"]["max"] = 2
+        self.launched([{"id": "P", "files": ["p.txt"], "plan_first": True},
+                       {"id": "A", "files": ["owned.txt"], "checks": [{"run": gate_cmd}]}])
+        self.write_plan("P")  # P waits for approval, owning nothing yet
+        (self.repo / "owned.txt").write_text("A's change\n")
+        self.write_report("A", files_changed=["owned.txt"], checks=[{"run": gate_cmd, "exit": 0}],
+                          criteria=[{"id": 1, "met": True}])
+
+    def test_accept_checks_writing_a_waiting_plans_file_are_named_and_never_blamed_on_the_accepted_ticket(self):
+        """Final review, 7: P owns nothing while its plan waits, so what the checks write there is theirs for A,
+        whose workers were stopped; P's worker ran meanwhile, so it still counts for P."""
+        self.cfg["defaults"]["accept_checks"] = [{"run": "echo formatted > p.txt"}]
+        self.two_tickets()
+        out = self.call("accept", "demo", "A", "--evidence", str(self.evidence))
+        self.assertIn("A: verified", out)
+        md = self.run_file("evidence", "A.accept-checks.md").read_text()
+        self.assertIn("The checks wrote `p.txt` outside every ticket's files.", md)
+        self.assertIn("P ran in this checkout meanwhile", md)
+        refused = self.call("approve", "demo", "P", expected=1)
+        self.assertIn("p.txt (created; accept_checks wrote it while P ran", refused)
+
+    def test_gate_commands_writing_a_waiting_plans_file_while_no_worker_runs_are_theirs(self):
+        self.two_tickets(gate_cmd="echo formatted > p.txt")
+        self.call("stop", "demo", "P", "A", "--timeout", "1")
+        out = self.call("gate", "demo", "A")
+        self.assertIn("GATE A 1/1 passed, scope ok", out)
+        self.assertIn("The checks themselves wrote `p.txt`; they are not blamed on a worker.",
+                      self.run_file("evidence", "A.gate.md").read_text())
+        self.assertEqual(fleet.plan_edits(self.repo, self.state(), "P"), [])  # approve would not refuse it
+
     def test_a_plan_first_ticket_owns_its_files_from_approval(self):
         self.launched()
         self.assertEqual(fleet.owned_files(self.state(), "01"), [])
@@ -516,6 +547,10 @@ class PlanReview(PlanFirstCase):
         self.write_plan()
         out = self.call("approve", "demo", "01", "--review", "--provider", "writer", expected=1)
         self.assertIn("same family as the writer (openai)", out)
+        # Final review, 5: --family cannot relabel the writer's own family as another one.
+        out = self.call("approve", "demo", "01", "--review", "--provider", "writer", "--family", "anthropic", expected=1)
+        self.assertIn("family anthropic contradicts the config, which puts writer-model in family openai", out)
+        self.assertNotIn("plan-review-01", self.state()["workers"])
         self.cfg["defaults"]["max_parallel"] = 1
         state = self.state()
         state["options"]["max_parallel"] = 1

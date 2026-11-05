@@ -1386,13 +1386,16 @@ def known_family(pcfg: dict, model: str, tier: str | None = None) -> str | None:
 
 
 def model_family(pcfg: dict, tier: str, model: str, explicit: str | None = None) -> str | None:
-    if explicit:
-        return explicit
-    known = known_family(pcfg, model, tier)
-    if known:
-        return known
+    """A model's family: what the config knows (known_family, else a single-family adapter's family), else
+    `explicit`. An explicit family names one only where the config knows none: one that contradicts the config is
+    refused, so a writer's own family can never pass as another one for the cross-family rule."""
     family = pcfg.get("family")
-    return family if family and family not in ("mixed", "unknown") else None
+    known = known_family(pcfg, model, tier) or (family if family and family not in ("mixed", "unknown") else None)
+    if explicit and known and explicit != known:
+        raise FleetError(f"family {explicit} contradicts the config, which puts {model} in family {known}; drop it, "
+                         "since a family is given only for a model the config puts in none. If the config is wrong, "
+                         "the owner corrects it (the provider's model_families)")
+    return known or explicit or None
 
 
 def digest(data: bytes) -> str:
@@ -1645,15 +1648,18 @@ def tree_baseline(repo: Path, state: dict, worker_id: str) -> dict | None:
 
 
 def unowned_since(repo: Path, state: dict, base: dict, own: str | None, now: dict | None = None,
-                  cfg: dict | None = None) -> list[tuple[str, str, str]]:
-    """Changes since `base` that no ticket owns: (path, kind, fingerprint now). A ticket owns its files while
-    its window overlaps the one since `base`; `own` names the worker's own ticket, which always does."""
+                  cfg: dict | None = None, wid: str | None = None) -> list[tuple[str, str, str]]:
+    """Changes since `base` that no ticket owns: (path, kind, fingerprint now). `own` names the worker's own
+    ticket, which always owns its files. Another ticket owns a change to one of its files only while it owned the
+    file, from its first launch until it was verified or dropped (owners_cover). `wid` names the worker checked:
+    what accept_checks wrote while it ran is never excused for it, and with no worker (fleet check) never at all."""
     now = now or tree_state(repo, run_ignore(state, cfg))
-    owned = set()
-    for i, t in state["tickets"].items():
-        window = ticket_window(state, i)
-        if i == own or window and window[0] <= now["at"] and (window[1] is None or window[1] >= base["at"]):
-            owned.update(owned_files(state, i))  # none while a plan waits: an edit before approval is nobody's
+    owned = set(owned_files(state, own)) if own in state["tickets"] else set()
+    owners: dict[str, list[str]] = {}
+    for i in state["tickets"]:
+        if i != own and ticket_window(state, i):
+            for f in owned_files(state, i):  # none while a plan waits: an edit before approval is nobody's
+                owners.setdefault(f, []).append(i)
     for t in state["tickets"].values():  # the lead ticks a source ticket's boxes once it is verified
         source = Path(t["ticket"])
         if source.is_relative_to(repo):
@@ -1661,20 +1667,83 @@ def unowned_since(repo: Path, state: dict, base: dict, own: str | None, now: dic
     owned.update(state.get("lead_files", []))
     ignore = run_ignore(state, cfg)
     accepted = state.get("accepted_changes", {})
-    wrote = check_outputs(repo, state["run"])
-    return [(p, change_kind(old, new), new) for p, (old, new) in tree_changes(repo, base, now).items()
-            if p not in owned and not scope_ignored(p, ignore) and accepted.get(p) != new
-            and new not in wrote.get(p, ())]
+    wrote, withheld = check_outputs(repo, state["run"], wid)
+    out, snaps = [], {}
+    for p, (old, new) in tree_changes(repo, base, now).items():
+        if p in owned or scope_ignored(p, ignore) or accepted.get(p) == new or new in wrote.get(p, ()):
+            continue
+        if p in owners and owners_cover(repo, state, p, owners[p], base, now, old, new, snaps):
+            continue
+        kind = change_kind(old, new)
+        if live := withheld.get(p, {}).get(new):
+            kind += (f"; accept_checks wrote it while {', '.join(live)} ran, so Fleet cannot tell it from "
+                     f"{'their' if len(live) > 1 else 'its'} edit")
+        out.append((p, kind, new))
+    return out
 
 
-def check_outputs(repo: Path, run: str) -> dict[str, set[str]]:
-    """What fleet gate's own commands wrote outside every ticket (caches, reports), by path and fingerprint: a
-    worker is not blamed for them, but a later change to such a file counts again."""
+def launch_fingerprint(repo: Path, state: dict, i: str, p: str, snaps: dict) -> str | None:
+    """`p` as ticket `i`'s first launch found it, from its whole-tree snapshot; None when Fleet kept none."""
+    if i not in snaps:
+        snaps[i] = tree_baseline(repo, state, i)
+    snap = snaps[i]
+    if snap is None:
+        return None
+    return snap["paths"].get(p) or head_fingerprints(repo, snap["head"], [p]).get(p)
+
+
+def owners_cover(repo: Path, state: dict, p: str, owners: list[str], base: dict, now: dict, old: str, new: str,
+                 snaps: dict) -> bool:
+    """Whether tickets `owners`, each owning `p`, account for its whole change from `old` (snapshot `base`) to `new`
+    (`now`). Their windows, joined, may leave gaps in that span, before one launched or after one closed; across
+    each gap `p` must have stayed as it was, by the owner's launch snapshot and the fingerprints recorded when it
+    closed. An edit made before an owner launched, or after it was verified, is nobody's. A ticket launched or
+    closed by an earlier Fleet, which kept neither, is trusted for its whole window, as that Fleet did."""
+    spans = sorted((w[0], w[1], j) for j in owners if (w := ticket_window(state, j))
+                   and w[0] <= now["at"] and (w[1] is None or w[1] >= base["at"]))
+    at, fp, n = base["at"], old, 0
+    while n < len(spans):
+        start, end, first = spans[n]
+        last, n = first, n + 1
+        while n < len(spans) and end is not None and spans[n][0] <= end:  # overlapping windows: one stretch
+            if spans[n][1] is None or spans[n][1] > end:
+                end, last = spans[n][1], spans[n][2]
+            n += 1
+        if start > at and fp is not None:  # nobody owned it from `at` until `first` launched
+            launched = launch_fingerprint(repo, state, first, p, snaps)
+            if launched is not None and launched != fp:
+                return False
+        if end is None or end >= now["at"]:
+            return True
+        at, fp = end, (state["tickets"][last].get("closed_files") or {}).get(p)
+    return bool(spans) and (fp is None or fp == new)
+
+
+def close_ticket(repo: Path, state: dict, i: str, status: str) -> None:
+    """Close ticket `i` as verified or dropped (the caller saves). Its files' fingerprints in the checkout are kept
+    with it, so the scope check can tell a later edit to them from the ticket's own work."""
+    t = state["tickets"][i]
+    t["status"], t["closed_at"] = status, time.time()
+    t["closed_files"] = disk_fingerprints(repo, list(t.get("files", [])))
+
+
+def check_outputs(repo: Path, run: str, wid: str | None = None) -> tuple[dict[str, set[str]], dict]:
+    """What fleet gate's own commands, and accept_checks, wrote outside every ticket (caches, reports), by path and
+    fingerprint: a worker is not blamed for them, but a later change to such a file counts again. Returns what is
+    excused for worker `wid`, and what is withheld from it, path -> fingerprint -> the workers that ran then: what
+    accept_checks wrote while other workers ran in the checkout is never excused for those workers, since Fleet
+    cannot tell their edit from the checks' output, and never in fleet check (no `wid`)."""
     out: dict[str, set[str]] = {}
+    withheld: dict[str, dict[str, list[str]]] = {}
     for f in (run_dir(repo, run) / "check-outputs").glob("*.json"):
         for path, fp in json.loads(f.read_text()).items():
-            out.setdefault(path, set()).add(fp)
-    return out
+            if isinstance(fp, str):
+                out.setdefault(path, set()).add(fp)
+            elif wid is not None and wid not in fp["live"]:
+                out.setdefault(path, set()).add(fp["fp"])
+            else:
+                withheld.setdefault(path, {})[fp["fp"]] = fp["live"]
+    return out, withheld
 
 
 def unowned_for(repo: Path, state: dict, worker_id: str, now: dict | None = None) -> list[tuple[str, str, str]] | None:
@@ -1686,7 +1755,7 @@ def unowned_for(repo: Path, state: dict, worker_id: str, now: dict | None = None
         return None
     w = state["workers"].get(worker_id, {})
     own = worker_id if w.get("role") == "implementation" else None  # reviewers own nothing
-    return unowned_since(repo, state, base, own, now)
+    return unowned_since(repo, state, base, own, now, wid=worker_id)
 
 
 def unowned_text(changes: list[tuple[str, str, str]]) -> str:
@@ -1695,6 +1764,18 @@ def unowned_text(changes: list[tuple[str, str, str]]) -> str:
 
 UNOWNED_WAYS_OUT = ("Resolve before accepting: the owner reverts the files, fleet grant adds them to this ticket, "
                     "fleet drop retires it, or --unowned-ok \"<owner's words>\" accepts the owner's own edits.")
+
+
+def unowned_ways_out(state: dict, ids: list[str | None]) -> str:
+    """UNOWNED_WAYS_OUT for the workers `ids` (None skipped), without the grant when grant refuses every one of
+    their tickets: an investigation owns no files, and a best-of-two ticket takes none once its writers launched."""
+    tickets = [state["tickets"].get(ticket_of(state["workers"].get(w) or {"id": w})) for w in filter(None, ids)]
+    if tickets and all(t and (t.get("kind") == "investigate" or best_of_two(t)) for t in tickets):
+        why = ("an investigation owns no files" if all(t.get("kind") == "investigate" for t in tickets) else
+               "grant refuses a best-of-two ticket once its writers have launched")
+        return ("Resolve before accepting: the owner reverts the files, fleet drop retires the ticket, or "
+                f"--unowned-ok \"<owner's words>\" accepts the owner's own edits. Fleet grant cannot add them: {why}.")
+    return UNOWNED_WAYS_OUT
 
 
 def guard_unowned(repo: Path, state: dict, worker_id: str, accept: str | None) -> None:
@@ -1709,7 +1790,7 @@ def guard_unowned(repo: Path, state: dict, worker_id: str, accept: str | None) -
         return
     if accept is None:
         raise FleetError(f"{worker_id}: files outside every ticket's scope changed since it launched:\n"
-                         f"{unowned_text(changes)}\n{UNOWNED_WAYS_OUT}")
+                         f"{unowned_text(changes)}\n{unowned_ways_out(state, [worker_id])}")
     if not accept.strip():
         raise FleetError("--unowned-ok needs the owner's reason")
     accepted = state.setdefault("accepted_changes", {})
@@ -2919,7 +3000,10 @@ def validate_ticket(repo: Path, d: Path, state: dict, cfg: dict, pool: dict | No
     t["model"], t["effort"] = resolve_model(pcfg, t["tier"], t.get("model"), t.get("effort"))
     check_allowed(pcfg, t["provider"], t["model"])
     check_effort(pcfg, t["provider"], t["effort"])
-    t["family"] = model_family(pcfg, t["tier"], t["model"], t.get("family"))
+    try:
+        t["family"] = model_family(pcfg, t["tier"], t["model"], t.get("family"))
+    except FleetError as e:
+        raise FleetError(f"{i}: {e}") from None
     task = t.pop("task", None)
     if (task is None) == ("ticket" not in t):
         raise FleetError(f"{i}: give exactly one of ticket (a local file) or task (inline text)")
@@ -3123,7 +3207,8 @@ def cmd_drop(a, cfg):
     if not reason:
         raise FleetError("say why with --reason; it is saved with the run's decisions")
     now = time.strftime("%Y-%m-%dT%H:%M:%S")
-    t["status"], t["dropped_at"], t["closed_at"] = "dropped", now, time.time()
+    t["dropped_at"] = now
+    close_ticket(repo, state, a.id, "dropped")
     state["decisions"].append(f"Dropped {a.id}: {reason} ({now})")
     report = run_dir(repo, a.run) / "reports" / f"{a.id}.md"
     set_report_status(report, "dropped")  # a handed-back report would otherwise keep waking the lead as PENDING
@@ -3168,18 +3253,22 @@ def blob_mode(repo: Path, f: str, fp: str) -> int:
     return 0o755 if executable else 0o644
 
 
-def owned_alongside(state: dict, i: str, f: str) -> str | None:
-    """Another ticket that owned `f` while ticket `i` was running. The scope check credits it with any edit to
-    `f` in that time, so the grant must not hand those edits to `i`'s diff. In a worktree run nobody else edits
-    `i`'s tree."""
+def owned_alongside(repo: Path, state: dict, i: str, f: str, tree: dict | None, old: str | None,
+                    new: str | None) -> str | None:
+    """Other tickets that owned `f` while ticket `i` was running and, by the scope check's rule (owners_cover), made
+    every change to it since `i` launched (`old` in launch snapshot `tree`, `new` now). Those edits are theirs, so
+    the grant must not hand them to `i`'s diff. In a worktree run nobody else edits `i`'s tree."""
     if isolated(state) and worktree_rec(state, i):
         return None
     mine = ticket_window(state, i)
-    for j, o in state["tickets"].items():
-        window = ticket_window(state, j)
-        if j != i and mine and window and f in o["files"] and (window[1] is None or window[1] >= mine[0]):
-            return j
-    return None
+    owners = [j for j in state["tickets"] if j != i and mine and f in owned_files(state, j)
+              and (w := ticket_window(state, j)) and (w[1] is None or w[1] >= mine[0])]
+    if not owners:
+        return None
+    if tree is not None and old is not None and new is not None and old != new and not owners_cover(
+            repo, state, f, owners, tree, {"at": time.time()}, old, new, {}):
+        return None  # an edit before they launched or after they closed is nobody's: it belongs in `i`'s diff
+    return " and ".join(owners)
 
 
 def launch_unknown(repo: Path, tree: dict | None, f: str, fp: str | None) -> str | None:
@@ -3206,7 +3295,8 @@ def grant_baseline(repo: Path, state: dict, i: str, files: list[str], accept_cur
         **head_fingerprints(where, tree["head"], [f for f in files if f not in tree["paths"]]), **tree["paths"]}
     entries, current, notes, unknown = {}, [], [], []
     for f in files:
-        fp, other = launch.get(f), owned_alongside(state, i, f)
+        fp = launch.get(f)
+        other = owned_alongside(repo, state, i, f, tree, fp, disk.get(f))
         why = launch_unknown(where, tree, f, fp)
         if other:
             entries[f] = now[f]
@@ -6012,33 +6102,45 @@ def gate_evidence(run: str, i: str, results: list[dict], scope: str, summary: st
     return "\n".join(lines) + "\n"
 
 
-def record_check_outputs(repo: Path, state: dict, i: str, before: dict, after: dict,
-                         live_ok: bool = False, unrecorded: list | None = None) -> list[str]:
-    """Files the gate's commands changed outside every ticket's files. Recorded (in their own file, since gate
-    saves no run state) only while no worker runs: otherwise a worker's stray edit could pass as a cache. With
-    `live_ok` (accept_checks, whose own ticket's workers are stopped) they are recorded while other workers run too,
-    each provided it was unchanged before the commands ran (or held only a recorded output then), so an edit made
-    before them is never excused. Returns every such file, recorded or not; `unrecorded` gets those not recorded."""
-    changed = {p: new for p, (_, new) in tree_changes(repo, before, after).items()}
-    owned = {f for t in state["tickets"].values() for f in t["files"]} | set(state.get("lead_files", []))
-    changed = {p: fp for p, fp in changed.items() if p not in owned}
-    keep = changed if not active(state) else check_outputs_clean_before(repo, state, before, changed) if live_ok \
-        else {}
+def owned_now(state: dict) -> set[str]:
+    """The files tickets own now, as the scope check counts them: each launched, open ticket's owned_files. A
+    ticket not launched yet, one whose plan waits, or one verified or dropped owns none."""
+    return {f for i in state["tickets"] if (w := ticket_window(state, i)) and w[1] is None
+            for f in owned_files(state, i)}
+
+
+def record_check_outputs(repo: Path, state: dict, i: str, before: dict, after: dict, live_ok: bool = False,
+                         unrecorded: list | None = None, skip=()) -> list[str]:
+    """Files the gate's commands changed outside every file a ticket owns now (owned_now), which the scope check
+    would otherwise count. Recorded (in their own file, since gate saves no run state) only while no worker runs:
+    otherwise a worker's stray edit could pass as a cache. With `live_ok` (accept_checks, whose own ticket's workers
+    are stopped) they are recorded while other workers run too, each provided it was unchanged before the commands
+    ran (clean, or holding only a recorded output then), so an edit made before them is never excused; and with the
+    IDs of the workers live in the checkout then, since Fleet cannot tell their edit from the checks' output: it is
+    never excused for them, nor in fleet check. A file that held an output recorded so keeps those IDs too. `skip`:
+    files the caller names as the checks' doing instead. Returns every such file, recorded or not; `unrecorded`
+    gets those not recorded."""
+    owned = owned_now(state) | set(state.get("lead_files", [])) | set(skip)
+    changed = {p: new for p, (_, new) in tree_changes(repo, before, after).items() if p not in owned}
+    prior, held = check_outputs(repo, state["run"])
+    here = [w["id"] for w in active(state) if not worktree_rec(state, w["id"])]  # those that could write here
+    keep = {}
+    for p, fp in changed.items():
+        was = before["paths"].get(p)
+        clean = was is None or was in prior.get(p, ())  # clean against HEAD, or only an output then
+        earlier = held.get(p, {}).get(was, []) if was is not None else []  # may hold those workers' edit
+        if not active(state):
+            keep[p] = (fp, earlier)
+        elif live_ok and (clean or was in held.get(p, {})):
+            keep[p] = (fp, sorted(set(here) | set(earlier)))
     if unrecorded is not None:
         unrecorded += sorted(set(changed) - set(keep))
     if keep:
         f = contained(run_dir(repo, state["run"]), run_dir(repo, state["run"]) / "check-outputs" / f"{i}.json")
         f.parent.mkdir(exist_ok=True)
+        keep = {p: {"fp": fp, "live": live} if live else fp for p, (fp, live) in keep.items()}
         atomic_json(f, {**(json.loads(f.read_text()) if f.exists() else {}), **keep})
     return sorted(changed)
-
-
-def check_outputs_clean_before(repo: Path, state: dict, before: dict, changed: dict[str, str]) -> dict[str, str]:
-    """Those of `changed` that were unchanged when `before` was taken: clean against HEAD then, or holding only what
-    an earlier check recorded as its own output."""
-    prior = check_outputs(repo, state["run"])
-    return {p: fp for p, fp in changed.items()
-            if p not in before["paths"] or before["paths"][p] in prior.get(p, ())}
 
 
 def cmd_gate(a, cfg):
@@ -6399,7 +6501,7 @@ def cmd_verify(a, cfg):
                              f"with fleet merge {a.run} {a.id} (fleet accept does both)")
         q = quality_check(repo, state, a, a.id)  # the strict bar: refuses below it; recorded below, once nothing can
         evidence += q["text"]
-        t["status"], t["closed_at"] = "verified", time.time()
+        close_ticket(repo, state, a.id, "verified")
     else:
         if getattr(a, "accept_anyway", None) is not None or getattr(a, "accept_finding", None):
             raise FleetError(f"{a.id} is a reviewer; --accept-anyway and --accept-finding go with the ticket it "
@@ -6951,9 +7053,9 @@ def review_fit(cfg: dict, routing: str, pool: dict | None, name: str, writer_fam
         check_effort(pcfg, name, effort)
         check_pool(pool, name, model, "reviewer")
         check_ceiling(cfg, name, pcfg, role_profiles(cfg, pcfg)[1])  # headless where launch would run it so
+        family = model_family(pcfg, "review", model, family)
     except FleetError as e:
         return str(e), {}
-    family = model_family(pcfg, "review", model, family)
     route = {"provider": name, "model": model, "effort": effort}
     if not family:
         return f"{model} has no known family ({name}.model_families or family_prefixes)", route
@@ -7233,7 +7335,7 @@ def accept_unowned_problems(repo: Path, state: dict, a, ids: list[str | None]) -
     if not unowned:
         return []
     return ["files outside every ticket's scope changed since launch:\n"
-            f"{unowned_text(list(unowned.values()))}\n  {UNOWNED_WAYS_OUT}"]
+            f"{unowned_text(list(unowned.values()))}\n  {unowned_ways_out(state, ids)}"]
 
 
 def refuse_problems(a, problems: list[str], unchanged: str) -> None:
@@ -7699,7 +7801,8 @@ def accept_checks_for(state: dict, i: str) -> list[dict] | None:
 
 
 def accept_checks_evidence(run: str, i: str, results: list[dict], summary: str, wrote: list[str],
-                           live: list[str], counted: list[str] = (), touched: list[str] = ()) -> str:
+                           live: list[str], counted: list[str] = (), touched: list[str] = (),
+                           here: list[str] = ()) -> str:
     lines = commands_evidence(f"# Combined checks: {i}", run, i, "each of the run's accept_checks in the owner's "
                               "checkout, after any merge and before anything was verified,", results)
     if wrote:
@@ -7707,6 +7810,10 @@ def accept_checks_evidence(run: str, i: str, results: list[dict], summary: str, 
         if counted:
             lines += ["", ", ".join(code_span(p) for p in counted) + " had changed before the checks ran, so the "
                       "scope check still counts them."]
+        if here and (kept := [p for p in wrote if p not in counted]):
+            lines += ["", f"{', '.join(here)} ran in this checkout meanwhile, and Fleet cannot tell their edits from "
+                      "what the checks wrote, so the scope check still counts " + ", ".join(code_span(p) for p in kept)
+                      + " for them, and fleet check lists them; not for the workers stopped then."]
     if touched:
         lines += ["", "The checks changed " + ", ".join(code_span(p) for p in touched) + ", which tickets own: a check "
                   "must not modify the code it checks, so Fleet verified nothing on this run. The worker is not "
@@ -7764,14 +7871,17 @@ def combined_checks(repo: Path, state: dict, a, done: str = "") -> tuple[list[st
     results = [run_check(repo, c) for c in checks]
     after = tree_scan(repo, state)
     # What the checks wrote outside every ticket is theirs, as the gate's outputs are: recorded even while other
-    # workers run, so the verify after them never refuses it, unless the file had changed before they ran.
+    # workers run, so the verify after them never refuses it, unless the file had changed before they ran. While
+    # other workers ran here it is recorded with their IDs, and never excused for them: theirs or the checks'?
     counted: list[str] = []  # what they wrote that had changed before they ran: the scope check still counts it
-    wrote = record_check_outputs(repo, state, f"{i}.accept-checks", before, after, live_ok=True, unrecorded=counted)
     touched = checks_touched(repo, state, before, after)
+    wrote = record_check_outputs(repo, state, f"{i}.accept-checks", before, after, live_ok=True, unrecorded=counted,
+                                 skip=touched)
     failed = [r for r in results if check_failed(r)]
     live = [w["id"] for w in active(state)]
     summary = f"{len(results) - len(failed)}/{len(results)} passed"
-    md.write_text(accept_checks_evidence(run, i, results, summary, wrote, live, counted, touched))
+    here = [w["id"] for w in active(state) if not worktree_rec(state, w["id"])]
+    md.write_text(accept_checks_evidence(run, i, results, summary, wrote, live, counted, touched, here))
     if touched:  # never verified on: the code the review and the bar read is no longer what is in the checkout
         record.unlink(missing_ok=True)
         print(f"ACCEPT-CHECKS {i} {summary} in the checkout, and the checks changed {', '.join(touched)}; "
@@ -7782,7 +7892,9 @@ def combined_checks(repo: Path, state: dict, a, done: str = "") -> tuple[list[st
                          "the checks leave them alone (a formatter in its check mode, generated code outside every "
                          f"ticket's files), then run fleet accept {run} {i} again. The owner's words cannot override "
                          "this")
+    seen = contained(run_dir(repo, run), run_dir(repo, run) / "evidence" / f"{valid_id(i)}.accept-checks-failed.json")
     if not failed:
+        seen.unlink(missing_ok=True)
         atomic_json(record, {"passed": True, "commands": checks, "head": after["head"], "paths": after["paths"],
                              "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "ticket": i, "evidence": md.read_text()})
         print(f"ACCEPT-CHECKS {i} {summary} in the checkout; evidence {md}")
@@ -7791,15 +7903,31 @@ def combined_checks(repo: Path, state: dict, a, done: str = "") -> tuple[list[st
     fails = gate_failures({"failed": failed})
     print(f"ACCEPT-CHECKS {i} {summary} in the checkout ({fails}); evidence {md}")
     item = f"the combined checks failed in the checkout ({fails}); evidence {md}"
-    if (getattr(a, "accept_anyway", None) or "").strip():
+    # The owner's words cover only a failure they could have seen: this same failure, already reported by an
+    # earlier accept of this ticket, with HEAD and every changed or untracked file as that run left them.
+    try:
+        last = json.loads(seen.read_text())
+    except (OSError, ValueError):
+        last = {}
+    reported = last == {"commands": checks, "fails": fails, "head": before["head"], "paths": before["paths"]}
+    atomic_json(seen, {"commands": checks, "fails": fails, "head": after["head"], "paths": after["paths"]})
+    words = (getattr(a, "accept_anyway", None) or "").strip()
+    if words and reported:
         print(f"ACCEPT-CHECKS {i}: the owner's words (--accept-anyway) override the failure; recorded in decisions "
               "and the evidence")
         return [str(md)], [item]
     shared = (f" Workers still run in this checkout ({', '.join(live)}), so a half-done edit of theirs may be the "
               "cause." if live else "")
+    if words:
+        raise FleetError(f"{i} not accepted: the combined checks (accept_checks) failed in the checkout: {fails}. The "
+                         f"failing tail is in {md}.{shared} Nothing was verified{done}. The owner's words "
+                         "(--accept-anyway) were given before this failure was reported, so they do not cover it: "
+                         "show the owner the failure and its evidence file. Fix the combined tree and accept again, "
+                         "or, only if the owner accepts this failure too, run the same accept with --accept-anyway "
+                         "\"<owner's words>\" again while HEAD and the tree stay as they are now")
     raise FleetError(f"{i} not accepted: the combined checks (accept_checks) failed in the checkout: {fails}. The "
                      f"failing tail is in {md}.{shared} Nothing was verified{done}. Fix the combined tree, then run "
-                     f"fleet accept {run} {i} again. {OVERRIDE_HINT}")
+                     f"fleet accept {run} {i} again. {OVERRIDE_HINT}, once they have seen this failure")
 
 
 # ---------- plan first (P10) ----------
@@ -8311,9 +8439,9 @@ def fanout_routes(cfg: dict, state: dict, pool: dict | None, i: str, t: dict) ->
             check_allowed(pcfg, name, model)
             check_effort(pcfg, name, effort)
             check_ceiling(cfg, name, pcfg, role_profiles(cfg, pcfg)[0 if writers else 1])  # as its worker launches
+            family = model_family(pcfg, t["tier"], model, spec.get("family"))
         except FleetError as e:
             raise FleetError(f"{what}: {e}") from None
-        family = model_family(pcfg, t["tier"], model, spec.get("family"))
         if not family:
             raise FleetError(f"{what}: {model} has no known family, so Fleet cannot show it differs from the other "
                              f"entries; set it in {name}.model_families or family_prefixes, or give the entry its "
@@ -8901,7 +9029,7 @@ def verify_fanout(repo: Path, state: dict, a) -> None:
     for wid in ids:
         mark_verified(repo, state, wid, evidence, now)
     t = state["tickets"][i]
-    t["status"], t["closed_at"] = "verified", time.time()
+    close_ticket(repo, state, i, "verified")
     for note in notes:
         state["decisions"].append(f"Verified {i} without a verdict: {note} ({now})")
     quality_commit(state, q)
@@ -8926,12 +9054,15 @@ def accept_fanout(repo: Path, state: dict, a, cfg) -> None:
         raise FleetError(f"{a.id} is a fan-out with no writer to gate or reviewer to verify; drop "
                          f"{'--gate' if a.gate else '--review-evidence'} and pass your evidence (a fleet gate file "
                          "included) with --evidence")
-    _, problems, _ = fanout_problems(repo, state, a.id, live_ok=True)
+    ids, problems, _ = fanout_problems(repo, state, a.id, live_ok=True)
     for flag, files in (("--evidence", a.evidence),):
         try:
             read_evidence_files(files)
         except (FleetError, OSError) as e:
             problems.append(f"{flag}: {e}")
+    if a.unowned_ok is not None and not a.unowned_ok.strip():
+        problems.append("--unowned-ok needs the owner's reason")
+    problems += accept_unowned_problems(repo, state, a, ids)  # verify's scope check, before anything is stopped
     problems += quality_problems(repo, state, a, a.id)  # the strict bar, in the same refusal
     refuse_problems(a, problems, "nothing was stopped or verified")
     stop_live(a, cfg, state, fanout_members(state, a.id), "nothing was verified")
@@ -9257,11 +9388,7 @@ def accept_pick(repo: Path, state: dict, a, cfg) -> None:
     state = load_run(repo, a.run)
     bar = accept_bar(repo, state, a, i, wid)
     refuse_problems(a, pick_problems(repo, state, a, wid, bar), "its workers are stopped; nothing was verified")
-    try:
-        print(merge_ticket(repo, state, i, wid=wid))
-    except FleetError as e:
-        raise FleetError(f"{e}\n{i} not accepted; its workers are stopped; nothing was applied or verified") from None
-    save_run(repo, a.run, state)
+    merge_step(repo, state, a, i, wid)
     applied = (f"; {wid}'s diff is already in the checkout's working tree (MERGED above), and the next accept does "
                "not apply it again")
     checked, overrode = combined_checks(repo, load_run(repo, a.run), a, applied)  # accept_checks, merged checkout
@@ -9317,7 +9444,7 @@ def verify_pick(repo: Path, a, wid: str, evidence: list[str]) -> None:
     if jid:
         verdict, why, bad = pick_verdict(*parse_header((reports / f"{jid}.md").read_text()), pick_writers(t))
         verdict = "no readable pick" if bad else verdict or "neither"
-    t["status"], t["closed_at"] = "verified", time.time()
+    close_ticket(repo, state, i, "verified")
     t["picked"] = {"writer": wid, "over": other, "judge": jid, "verdict": verdict, "patch": patch, "at": now}
     judged = (f"judge {jid} ({state['workers'][jid].get('family')}) " +
               (f"picked {verdict}" if verdict in pick_writers(t) else
@@ -9754,14 +9881,34 @@ def merge_done(repo: Path, state: dict, i: str, view: dict | None = None, wid: s
     return done.get("patch") == view["sha"] and all(view["now"].get(f) == done["files"].get(f) for f in view["names"])
 
 
+MERGE_OFF = "differs from its worktree's copy after git apply (a filter or line-ending setting?)"
+
+
+def conflict_file(repo: Path, state: dict, i: str) -> Path:
+    """Where fleet merge notes the CONFLICT it reported for ticket `i`, which merge --resolved requires."""
+    d = run_dir(repo, state["run"])
+    return contained(d, d / "merge" / f"{valid_id(i)}.conflict.json")
+
+
+def note_conflict(repo: Path, state: dict, i: str, view: dict, files, wid: str | None) -> None:
+    """Note that a CONFLICT was reported for ticket `i`'s diff as it is now (writer `wid` for best-of-two)."""
+    f = conflict_file(repo, state, i)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    atomic_json(f, {"writer": wid, "result": view["result"], "files": sorted(files),
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+
+
 def merge_ticket(repo: Path, state: dict, i: str, resolved: str | None = None, wid: str | None = None) -> str:
     """Apply worktree ticket `i`'s diff, in its own files, to the checkout's working tree with plain `git apply`, and
     record it on the ticket (the caller saves). Refuses with CONFLICT, applying nothing, when the checkout's copy of
-    a file the patch touches changed since the tree was made, or `git apply --check` refuses the patch. For a
-    best-of-two ticket, `wid` names the picked writer, whose tree is applied and recorded with the merge."""
+    a file the patch touches changed since the tree was made, a file merged before no longer holds what that merge
+    recorded, or `git apply --check` refuses the patch. For a best-of-two ticket, `wid` names the picked writer,
+    whose tree is applied and recorded with the merge."""
     t, rec, view = state["tickets"][i], worktree_rec(state, wid or i), merge_view(repo, state, i, wid)
     names, now = view["names"], view["now"]
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+    if resolved is not None and not resolved.strip():
+        raise FleetError("--resolved needs what you did, in a few words; it is saved with the run's decisions")
     if merge_done(repo, state, i, view, wid):
         return f"MERGED {i}: already in the checkout ({', '.join(names) or 'no changes'})"
     prior = t.get("merged") or {}
@@ -9770,13 +9917,6 @@ def merge_ticket(repo: Path, state: dict, i: str, resolved: str | None = None, w
                          f"({', '.join(sorted(prior['files'])) or 'no files'}), so {wid}'s would apply on top of it. "
                          f"Pick {prior.get('writer')}, or have the owner put those files back first")
     pick = {"writer": wid} if wid else {}
-    if resolved is not None:
-        if not resolved.strip():
-            raise FleetError("--resolved needs what you did, in a few words; it is saved with the run's decisions")
-        t["merged"] = {"patch": view["sha"], "result": view["result"], "files": {f: now.get(f) for f in names},
-                       "at": stamp, "by_hand": True, **pick}
-        state["decisions"].append(f"Merged {i} by hand: {', '.join(names)} ({resolved.strip()}) ({stamp})")
-        return f"MERGED {i} by hand: recorded the checkout's {', '.join(names) or 'files'} as its merge"
     if prior.get("result"):  # merged before and repaired since: apply only what its tree changed after that merge
         since = prior["result"]
         touched = tree_diff(repo, since, view["result"], t["files"], names=True)
@@ -9784,19 +9924,23 @@ def merge_ticket(repo: Path, state: dict, i: str, resolved: str | None = None, w
         expect = dict(head_fingerprints(repo, since, touched), **{f: fp for f, fp in prior["files"].items()
                                                                   if f in touched})
         moved = "changed in the checkout since Fleet last merged this ticket"
-        if not touched:  # nothing new in its tree, yet not merge_done: the checkout's copy moved (the owner, a check)
-            if why := {f: moved for f in names if now.get(f) != prior["files"].get(f)}:
-                raise merge_conflict(repo, state, i, rec, why, since, wid)
+        # A merged file the repair left alone must still hold what that merge recorded: one the checkout put back or
+        # changed since would otherwise be recorded as merged.
+        kept = {f: MERGE_OFF if f in prior.get("off", ()) else moved for f in names
+                if f not in touched and now.get(f) != prior["files"].get(f)}
     else:
-        since, touched, patch = rec["base_tree"], names, view["patch"]
+        since, touched, patch, kept = rec["base_tree"], names, view["patch"], {}
         expect = head_fingerprints(repo, since, names)
         moved = "changed in the checkout since the worktree was made"
-    if not touched:
+    if resolved is not None:
+        return merge_resolved(repo, state, i, view, touched, expect, kept, resolved.strip(), wid)
+    if not touched and not kept:
         t["merged"] = {"patch": view["sha"], "result": view["result"], "files": {f: now.get(f) for f in names},
                        "at": stamp, **pick}
+        conflict_file(repo, state, i).unlink(missing_ok=True)
         return f"MERGED {i}: no changes to apply"
     now = disk_fingerprints(repo, touched)
-    why = {f: moved for f in touched if now.get(f, "not a file") != expect.get(f)}
+    why = {**kept, **{f: moved for f in touched if now.get(f, "not a file") != expect.get(f)}}
     if not why:
         check = tree_git(repo, "apply", "--check", "--whitespace=nowarn", "-", data=patch, check=False, raw=True)
         if check.returncode:
@@ -9804,32 +9948,81 @@ def merge_ticket(repo: Path, state: dict, i: str, resolved: str | None = None, w
             why = {f: "the patch does not apply: " + one_line(err, 160) for f in touched if f in err} or \
                   {f: "the patch does not apply: " + one_line(err, 160) for f in touched}
     if why:
-        raise merge_conflict(repo, state, i, rec, why, since, wid)
+        raise merge_conflict(repo, state, i, rec, why, since, wid, view, touched)
     tree_git(repo, "apply", "--whitespace=nowarn", "-", data=patch)  # the working tree only
     names = sorted(set(names) | set(touched))
-    after = disk_fingerprints(repo, names)
-    t["merged"] = {"patch": view["sha"], "result": view["result"], "files": {f: after.get(f) for f in names},
-                   "at": stamp, **pick}
-    off = [f for f, fp in head_fingerprints(repo, view["result"], names).items() if after.get(f) != fp]
+    after, want = disk_fingerprints(repo, names), head_fingerprints(repo, view["result"], names)
+    off = [f for f in names if after.get(f) != want.get(f)]
+    # A file that differs from the tree is recorded with the tree's content, so no later merge takes it as merged.
+    t["merged"] = {"patch": view["sha"], "result": view["result"],
+                   "files": {f: want.get(f) if f in off else after.get(f) for f in names}, "at": stamp, **pick,
+                   **({"off": off} if off else {})}
     if off:
-        print(f"warning: after git apply, {', '.join(off)} in the checkout differ from {i}'s worktree (a filter or "
-              "line-ending setting?); compare them before accepting", file=sys.stderr)
+        note_conflict(repo, state, i, view, off, wid)
+        raise FleetError(
+            f"{i}: after git apply, {', '.join(off)} in the checkout differ from {i}'s worktree (a filter or "
+            f"line-ending setting?), so Fleet does not record them as its merge. Its diff is in the checkout's "
+            f"working tree now; nothing was verified. Compare each with the worktree's copy in {rec['path']}; when "
+            f"the owner agrees the checkout's copy is right, run fleet merge {state['run']} {i}"
+            f"{' --pick ' + wid if wid else ''} --resolved \"<what you did>\"")
+    conflict_file(repo, state, i).unlink(missing_ok=True)
     return (f"MERGED {i}: applied {len(touched)} file(s) to the checkout's working tree ({', '.join(touched)}); "
             "the index is untouched" + ("; only what changed since its last merge" if prior.get("result") else ""))
 
 
-def merge_conflict(repo: Path, state: dict, i: str, rec: dict, why: dict[str, str],
-                   since: str | None = None, pick: str | None = None) -> FleetError:
-    """Print the CONFLICT line and return the refusal, with each file's base copy saved for a merge by hand: the
-    tree's launch contents, or `since`, the tree as Fleet last merged it."""
+def merge_resolved(repo: Path, state: dict, i: str, view: dict, touched: list[str], expect: dict[str, str],
+                   kept: dict[str, str], words: str, wid: str | None) -> str:
+    """fleet merge --resolved: record the checkout's copies as ticket `i`'s merge by hand. Refused unless fleet merge
+    reported a CONFLICT for the diff as it is now, and while a file of the diff still holds its content from before
+    the merge (the tree's as it was made, or this merge's starting copy), whose change would be lost. Saves the tree's
+    whole change as a patch, since accept then removes the tree."""
+    t, run, rec = state["tickets"][i], state["run"], worktree_rec(state, wid or i)
+    pick = f" --pick {wid}" if wid else ""
+    f = conflict_file(repo, state, i)
+    noted = json.loads(f.read_text()) if f.exists() else None
+    if not noted or noted.get("writer") != wid or noted.get("result") != view["result"]:
+        raise FleetError(f"{i}: fleet merge reported no CONFLICT for {i}'s diff as it is now, so there is no merge by "
+                         f"hand to record. Run fleet merge {run} {i}{pick}: it applies the diff, or reports the "
+                         "CONFLICT and the git merge-file line for each file. Nothing was recorded")
+    files = sorted(set(view["names"]) | set(touched) | set(kept))
+    now = disk_fingerprints(repo, files)
+    base, want = head_fingerprints(repo, rec["base_tree"], files), head_fingerprints(repo, view["result"], files)
+    left = [x for x in files if now.get(x) != want.get(x)
+            and (now.get(x) == base.get(x) or x in touched and now.get(x) == expect.get(x))]
+    if left:
+        raise FleetError(f"{i}: {', '.join(left)} in the checkout still hold their content from before this merge, so "
+                         f"{i}'s change to them is not there, and recording them would lose it. Merge each one too "
+                         f"(the git merge-file line fleet merge printed for it), then run fleet merge {run} {i}{pick} "
+                         "--resolved again. If the owner wants them left as they are, drop the ticket instead (its "
+                         "worktree's changes are saved as a patch) and add the work again. Nothing was recorded")
+    names = sorted(set(view["names"]) | set(touched))
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+    saved = save_tree_patch(repo, state, wid or i, rec)
+    t["merged"] = {"patch": view["sha"], "result": view["result"], "files": {x: now.get(x) for x in names},
+                   "at": stamp, "by_hand": True, **({"writer": wid} if wid else {})}
+    state["decisions"].append(f"Merged {i} by hand: {', '.join(names)} ({words}) ({stamp})")
+    f.unlink(missing_ok=True)
+    return f"MERGED {i} by hand: recorded the checkout's {', '.join(names) or 'files'} as its merge\n{saved}"
+
+
+def merge_conflict(repo: Path, state: dict, i: str, rec: dict, why: dict[str, str], since: str | None = None,
+                   pick: str | None = None, view: dict | None = None, touched: list[str] = ()) -> FleetError:
+    """Print the CONFLICT line, note it for merge --resolved, and return the refusal, with each file's base copy
+    saved for a merge by hand: the tree's launch contents, or `since`, the tree as Fleet last merged it. A file the
+    patch leaves alone takes the tree's launch contents, since its copy in `since` is the tree's own. The other files
+    the patch touches get their line too: a merge by hand must reach every one of them."""
     print(f"CONFLICT {i}: {', '.join(why)}")
+    if view is not None:
+        note_conflict(repo, state, i, view, why, pick)
     saved = run_dir(repo, state["run"]) / "merge" / i
     tree = Path(rec["path"])
-    lines = []
-    for f, reason in why.items():
-        base = head_fingerprints(repo, since or rec["base_tree"], [f]).get(f, "absent")
+    lines, clean = [], [f for f in touched if f not in why]
+    for f, reason in [*why.items(), *((f, "applies cleanly; merge it with the rest") for f in clean)]:
+        base = head_fingerprints(repo, since if since and f in touched else rec["base_tree"], [f]).get(f, "absent")
         copy = saved / f"{f}.base"
-        if base != "absent" and (blob := git_blob(repo, base.split(":")[1])) is not None:
+        if not (tree / f).exists() and not (tree / f).is_symlink():
+            lines.append(f"  {f}: {reason} (deleted in {i}'s worktree: remove it from the checkout's copy)")
+        elif base != "absent" and (blob := git_blob(repo, base.split(":")[1])) is not None:
             copy.parent.mkdir(parents=True, exist_ok=True)
             copy.write_bytes(blob)
             lines.append(f"  {f}: {reason}\n    git merge-file {shlex.quote(str(repo / f))} {shlex.quote(str(copy))} "
@@ -9844,7 +10037,8 @@ def merge_conflict(repo: Path, state: dict, i: str, rec: dict, why: dict[str, st
         f"checkout as it is now\n"
         f"- merge by hand: the git merge-file line under each file merges the worktree's change into the checkout's "
         f"copy (Fleet never runs it); check the result, then fleet merge {state['run']} {i}"
-        f"{' --pick ' + pick if pick else ''} --resolved \"<what you did>\"")
+        f"{' --pick ' + pick if pick else ''} --resolved \"<what you did>\", which refuses while a file listed above "
+        f"still holds its content from before the merge")
 
 
 def tree_patch_all(repo: Path, state: dict, rec: dict) -> bytes:
@@ -9882,14 +10076,25 @@ def retire_trees(repo: Path, state: dict, i: str, keep_patch: bool = False) -> l
     return out
 
 
+def merge_step(repo: Path, state: dict, a, i: str, wid: str | None = None) -> None:
+    """accept's merge, saved. On a refusal after git apply ran (its result differs from the tree), the run still
+    records what reached the checkout, and the refusal says so."""
+    before = state["tickets"][i].get("merged")
+    try:
+        print(merge_ticket(repo, state, i, wid=wid))
+    except FleetError as e:
+        if state["tickets"][i].get("merged") == before:
+            raise FleetError(f"{e}\n{i} not accepted; its workers are stopped; nothing was applied or verified") \
+                from None
+        save_run(repo, a.run, state)
+        raise FleetError(f"{e}\n{i} not accepted; its workers are stopped") from None
+    save_run(repo, a.run, state)
+
+
 def accept_merge(repo: Path, state: dict, a) -> str:
     """accept's merge step: apply the ticket's diff before anything is verified, or refuse with CONFLICT. Returns
     what a later refusal must add, since the checkout already holds the diff then."""
-    try:
-        print(merge_ticket(repo, state, a.id))
-    except FleetError as e:
-        raise FleetError(f"{e}\n{a.id} not accepted; its workers are stopped; nothing was applied or verified") from None
-    save_run(repo, a.run, state)
+    merge_step(repo, state, a, a.id)
     return (f"; its diff is already in the checkout's working tree (MERGED above), and the next accept does not "
             "apply it again")
 

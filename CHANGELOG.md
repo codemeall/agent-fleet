@@ -34,6 +34,15 @@ Teamwork release 7 (#51): Codex workers signal their turns, Fleet reports how ea
   - A refusal after the bar records no override and claims none.
   - **`[defaults] accept_checks`** run the combined-tree checks in the checkout at accept, after a worktree ticket's merge and before anything is verified. A pass is reused while the tree is unchanged, and the evidence keeps a failure's tail.
   - A check that changes a ticket's own files refuses as the checks' doing, never the worker's, and the owner's words cannot override it. A merged file the checkout changed afterwards is a `CONFLICT`, never recorded as the merge.
+  - **Final review of the verification path:**
+    - Another ticket owns only what changed in its own window: an edit to its file before it launched, or after it was verified or dropped, now counts, even while the two windows overlapped. Tickets record their files' fingerprints when they close. `grant` follows the same rule.
+    - What `accept_checks` write while other workers run in the checkout is excused only for the workers stopped then. It still counts for those that ran, and `fleet check` lists it.
+    - A file of a ticket whose plan waits, or that is closed or not launched yet, is no longer taken as owned when recording what checks wrote, so a check's output there is named as the checks', never blamed on the ticket being gated or accepted.
+    - `--accept-anyway` covers a failing `accept_checks` run only once that failure was reported, on the same tree.
+    - A re-merge refuses with `CONFLICT` when a merged file the repair left alone no longer holds the merge, and a file that differs from the tree after `git apply` is a refusal, not a warning.
+    - Merge by hand: the `CONFLICT` lists every file the diff touches. `merge --resolved` needs a reported `CONFLICT`, refuses while a file still lacks the ticket's change, and saves the tree's patch.
+    - `--family` (and a plan's or fan-out entry's `family`) can no longer contradict a family the config knows.
+    - Fan-out `accept` refuses a change outside every ticket before it stops anything, without offering `grant`.
 - **CI.** `push` runs only on `main`, so a PR commit is tested once, and each job stops after 30 minutes.
 - **Skill.** The lead's guide covers best of two and `--pick`, strict acceptance and its two overrides, `accept_checks`, `fleet usage` and `IDLE` for any worker, still within its size budget.
 

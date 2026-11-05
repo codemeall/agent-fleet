@@ -528,6 +528,51 @@ class AcceptChecks(QualityCase):
         self.assertIn("# Combined checks: 01", report)  # its evidence is part of the writer's
         self.assertIn("## Accepted anyway", report)
 
+    def test_the_owners_words_cover_a_combined_check_failure_only_once_it_was_reported(self):
+        """Final review, 6: words given for an open question never cover a failing suite the owner had not seen."""
+        self.plan(accept_checks=[{"run": "echo 3 tests FAILED; exit 1"}])
+        self.launch()
+        self.hand_back(questions=["Should the banner be blue?"])
+        out = self.accept("--accept-anyway", "Owner: blue is fine, ship it", expected=1)
+        md = self.run_file("evidence", "01.accept-checks.md")
+        self.assertIn(f"ACCEPT-CHECKS 01 0/1 passed in the checkout (echo 3 tests FAILED; exit 1: exit 1); evidence {md}",
+                      out)
+        self.assertIn("The owner's words (--accept-anyway) were given before this failure was reported, so they do "
+                      "not cover it: show the owner the failure and its evidence file.", out)
+        self.assertNotIn("override the failure", out)
+        state = self.state()
+        self.assertEqual(state["tickets"]["01"]["status"], "pending")
+        self.assertNotIn("accepted_anyway", state["tickets"]["01"])
+        self.assertFalse(any("regardless" in d for d in state["decisions"]))
+        # Once reported, the owner's words on the same HEAD and tree cover it.
+        out = self.accept("--accept-anyway", "Owner, having read the failing suite: ship it")
+        self.assertIn("ACCEPT-CHECKS 01: the owner's words (--accept-anyway) override the failure", out)
+        overrode = self.state()["tickets"]["01"]["accepted_anyway"]
+        self.assertEqual(len(overrode), 2)
+        self.assertTrue(overrode[1].startswith("the combined checks failed in the checkout"))
+
+    def test_a_reported_failure_does_not_cover_one_on_a_tree_changed_since(self):
+        self.plan(accept_checks=[{"run": "echo 3 tests FAILED; exit 1"}])
+        self.launch()
+        self.hand_back()
+        self.accept(expected=1)  # reported
+        (self.repo / "owned.txt").write_text("implemented change, edited again\n")
+        out = self.accept("--accept-anyway", OWNER, expected=1)  # the tree moved since: a failure not yet seen
+        self.assertIn("were given before this failure was reported", out)
+        self.assertIn("ACCEPT-CHECKS 01: the owner's words", self.accept("--accept-anyway", OWNER))
+
+    def test_a_reported_failure_does_not_cover_another_failure_on_the_same_tree(self):
+        count = Path(tempfile.mkdtemp()) / "count"
+        self.addCleanup(count.unlink, missing_ok=True)
+        self.plan(accept_checks=[{"run": f"echo x >> {count}; exit $(wc -l < {count})"}])  # exit 1, then 2, ...
+        self.launch()
+        self.hand_back()
+        self.assertIn("exit 1", self.accept(expected=1))
+        out = self.accept("--accept-anyway", OWNER, expected=1)
+        self.assertIn("exit 2", out)
+        self.assertIn("were given before this failure was reported", out)
+        self.assertEqual(self.state()["tickets"]["01"]["status"], "pending")
+
     def test_a_passing_run_is_reused_while_head_and_the_tree_are_unchanged(self):
         count = Path(tempfile.mkdtemp()) / "count"
         self.addCleanup(count.unlink, missing_ok=True)
@@ -567,6 +612,52 @@ class AcceptChecks(QualityCase):
         self.assertEqual(self.state()["workers"]["02"]["state"], "running")
         self.assertIn("The checks wrote `checks-cache.txt` outside every ticket's files.",
                       self.run_file("evidence", "01.accept-checks.md").read_text())
+
+    def test_what_the_checks_write_while_another_worker_runs_still_counts_for_that_worker(self):
+        """Final review, 2: while 02 runs, Fleet cannot tell 02's stray edit from what a long suite writes, so it is
+        excused for 01 (stopped then), never for 02, and fleet check lists it."""
+        tickets = [{"id": "01", "files": ["owned.txt"]}, {"id": "02", "files": ["next.txt"]}]
+        self.cfg["providers"]["writer"]["max"] = 2
+        self.plan(tickets=tickets, accept_checks=[{"run": "echo 'stray edit by 02' > stray.txt"}])
+        self.launch("01")
+        self.launch("02")
+        self.hand_back("01")
+        self.assertIn("01: verified", self.accept())
+        md = self.run_file("evidence", "01.accept-checks.md").read_text()
+        self.assertIn("02 ran in this checkout meanwhile, and Fleet cannot tell their edits from what the checks wrote, "
+                      "so the scope check still counts `stray.txt` for them", md)
+        self.hand_back("02", file="next.txt")
+        self.stop_with_receipt("02")
+        out = self.accept(ticket="02", expected=1)
+        self.assertIn("02 not accepted; nothing was stopped or verified", out)
+        self.assertIn("stray.txt (created; accept_checks wrote it while 02 ran, so Fleet cannot tell it from its edit)",
+                      out)
+        self.assertEqual(self.state()["tickets"]["02"]["status"], "pending")
+        self.assertIn("stray.txt (created; accept_checks wrote it while 02 ran", self.call("check", "demo"))
+        # Once the file is gone, the checks write it again with no worker running: theirs, for everyone.
+        (self.repo / "stray.txt").unlink()
+        self.assertIn("02: verified", self.accept(ticket="02"))
+        self.assertNotIn("NOTE changed since the run started", self.call("check", "demo"))
+
+    def test_an_output_rewritten_later_keeps_the_workers_that_ran_when_it_was_written(self):
+        """A third ticket, stopped whenever the checks ran, is never blamed for their output; 02 still is."""
+        count = Path(tempfile.mkdtemp()) / "count"
+        self.addCleanup(count.unlink, missing_ok=True)
+        tickets = [{"id": "01", "files": ["owned.txt"]}, {"id": "02", "files": ["next.txt"]},
+                   {"id": "03", "files": ["third.txt"]}]
+        self.cfg["providers"]["writer"]["max"] = 3
+        self.cfg["defaults"]["max_parallel"] = 3
+        self.plan(tickets=tickets, accept_checks=[{"run": f"echo run >> {count}; cat {count} > cache.txt"}])
+        self.launch("01")
+        self.launch("02")
+        self.hand_back("01")
+        self.assertIn("01: verified", self.accept())
+        self.launch("03")
+        self.hand_back("03", file="third.txt")
+        self.assertIn("03: verified", self.accept(ticket="03"))  # the checks rewrote cache.txt while 03 was stopped
+        self.hand_back("02", file="next.txt")
+        self.stop_with_receipt("02")
+        self.assertIn("cache.txt (created; accept_checks wrote it while 02 ran", self.accept(ticket="02", expected=1))
 
     def test_checks_that_change_a_tickets_files_refuse_before_verifying_and_never_blame_the_worker(self):
         """#53 review, 2: a formatter or codegen in accept_checks must not rewrite the code it checks."""
