@@ -13,6 +13,10 @@ Install with `npx skills add codemeall/agent-fleet`, `npx @codemeall/agent-fleet
 
 Optional companion skills for the lead: `cmux` from `manaflow-ai/cmux`, `grill-with-docs` (or `grill-me`), `to-spec` and `to-tickets` from `mattpocock/skills`, and `feature-docs` from `codemeall/feature-init`. Install them into the lead host's skill directories with `npx skills add <source> --skill <name>`. Name each skill, because the cmux repository also ships skills for developing cmux itself. `fleet doctor` reports where it finds each one, in user-level and current-directory project skill directories, and never fails on a missing one.
 
+## Feature docs
+
+The spec and tickets under `.scratch/` never reach Git; the feature is that `.scratch/<feature>/` folder, not the run name (ask the owner if the tickets are elsewhere). With `feature-docs` installed: if `docs/<feature>/feature-docs/` exists, run its `status` after `fleet check` and report its `DRIFT`, `STALE` and `MISSING` lines; when the owner asks for feature docs, follow that skill once every worker has stopped, writing or syncing the folder from the run's `notes.md`, decisions, reports and evidence (`verified_at` in `resume --json` dates a ticket). You write them yourself; they stay uncommitted with the run.
+
 ## Permission and connectivity checks
 
 1. Confirm Python 3.11+, Git, cmux or tmux, and selected worker CLIs are available in the lead's shell.
