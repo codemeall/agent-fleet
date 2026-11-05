@@ -207,6 +207,16 @@ class Policy(QualityCase):
         self.assertIn("Status: verified", self.run_file("reports", "01.md").read_text())
 
 
+    def test_one_accept_computes_the_bar_once_per_state_and_verify_reuses_it(self):
+        """#53 review, 14: before the stop, and again on the state the stop and the gate left; verify reuses that."""
+        self.plan()
+        self.launch()
+        self.hand_back()
+        with patch.object(fleet, "quality_bar", wraps=fleet.quality_bar) as bar:
+            self.assertIn("01: verified", self.accept("--gate"))
+        self.assertEqual(bar.call_count, 2)
+
+
 class Override(QualityCase):
     def test_accept_anyway_records_the_owners_words_and_each_item_it_overrode(self):
         self.plan()
@@ -538,6 +548,38 @@ class AcceptChecks(QualityCase):
         self.assertIn("ACCEPT-CHECKS 03 1/1 passed in the checkout", self.accept(ticket="03"))
         self.assertEqual(count.read_text().count("ran"), 2)
 
+    def test_what_the_checks_write_outside_every_ticket_is_theirs_while_another_worker_runs(self):
+        """#53 review, 2: the checks' own outputs are recorded as the gate records its own, live workers or not."""
+        tickets = [{"id": "01", "files": ["owned.txt"]}, {"id": "02", "files": ["next.txt"]}]
+        self.cfg["providers"]["writer"]["max"] = 2
+        self.plan(tickets=tickets, accept_checks=[{"run": "echo cached > checks-cache.txt"}])
+        self.launch("01")
+        self.launch("02")
+        self.hand_back("01")
+        out = self.accept()  # 02's worker still runs in this checkout
+        self.assertIn("ACCEPT-CHECKS 01 1/1 passed in the checkout", out)
+        self.assertIn("01: verified", out)
+        self.assertEqual(self.state()["workers"]["02"]["state"], "running")
+        self.assertIn("The checks wrote `checks-cache.txt` outside every ticket's files.",
+                      self.run_file("evidence", "01.accept-checks.md").read_text())
+
+    def test_checks_that_change_a_tickets_files_refuse_before_verifying_and_never_blame_the_worker(self):
+        """#53 review, 2: a formatter or codegen in accept_checks must not rewrite the code it checks."""
+        self.plan(accept_checks=[{"run": "echo reformatted >> owned.txt"}])
+        self.launch()
+        self.hand_back()
+        out = self.accept(expected=1)
+        md = self.run_file("evidence", "01.accept-checks.md")
+        self.assertIn("01 not accepted: accept_checks changed owned.txt; a check must not modify the code it checks, "
+                      "so nothing was verified. This is the checks' doing, not the worker's; their evidence is in "
+                      f"{md}.", out)
+        self.assertIn("The checks changed `owned.txt`, which tickets own", md.read_text())
+        state = self.state()
+        self.assertEqual(state["tickets"]["01"]["status"], "pending")
+        self.assertFalse(state["workers"]["01"].get("verified"))
+        self.assertEqual(self.status(), "needs-verification")
+        self.assertIn("The owner's words cannot override this", self.accept("--accept-anyway", OWNER, expected=1))
+
     def test_a_failed_run_is_never_reused(self):
         self.plan(accept_checks=[{"run": "test -f .scratch/pass"}])
         self.launch()
@@ -576,6 +618,40 @@ class WorktreeChecks(WorktreeCase):
                       "the next accept does not apply it again.", out)
         self.assertEqual((self.repo / "a.txt").read_text(), "from a\n")
         self.assertEqual(self.state()["tickets"]["a"]["status"], "pending")
+
+    def test_checks_that_rewrite_the_merged_files_refuse_clearly(self):
+        """#53 review, 2: after MERGED, a check that edits the ticket's files is named, not "not in the checkout"."""
+        self.cfg["defaults"]["accept_checks"] = [{"run": "echo formatted >> a.txt"}]
+        self.start([{"id": "a", "files": ["a.txt"]}])
+        self.launch("a")
+        self.work("a", {"a.txt": "from a\n"}, report=False)
+        self.report_path("a").write_text("# Report a\nStatus: needs-verification\n\n```fleet\n" + json.dumps(
+            {"files_changed": ["a.txt"], "checks": [], "criteria": [], "findings": [], "questions": []})
+            + "\n```\n")
+        self.stop_with_receipt("a")
+        out = self.accept("a", expected=1)
+        self.assertIn("a not accepted: accept_checks changed a.txt; a check must not modify the code it checks, so "
+                      "nothing was verified; its diff is already in the checkout's working tree (MERGED above)", out)
+        self.assertNotIn("not in the checkout yet", out)
+        self.assertEqual(self.state()["tickets"]["a"]["status"], "pending")
+        # Accepting again without putting the file back never records the checks' rewrite as the merge.
+        out = self.accept("a", expected=1)
+        self.assertIn("CONFLICT a: a.txt", out)
+        self.assertIn("changed in the checkout since Fleet last merged this ticket", out)
+        self.assertNotIn("ACCEPT-CHECKS", out)
+        self.assertEqual(self.state()["tickets"]["a"]["status"], "pending")
+
+    def test_a_merged_file_changed_in_the_checkout_afterwards_is_never_recorded_as_the_merge(self):
+        self.start([{"id": "a", "files": ["a.txt"]}])
+        self.launch("a")
+        self.work("a", {"a.txt": "from a\n"})
+        self.stop_with_receipt("a")
+        self.call("merge", "demo", "a")
+        (self.repo / "a.txt").write_text("from a\nand an edit after the merge\n")
+        out = self.call("merge", "demo", "a", expected=1)
+        self.assertIn("CONFLICT a: a.txt", out)
+        self.assertIn("changed in the checkout since Fleet last merged this ticket", out)
+        self.assertNotIn("no changes to apply", out)
 
     def report_path(self, i):
         return self.repo / RUN / "reports" / f"{i}.md"

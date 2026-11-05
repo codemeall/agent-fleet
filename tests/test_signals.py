@@ -203,6 +203,21 @@ class Doctor(unittest.TestCase):
         self.assertIn("no {signals} slot", fleet.signals_line(dict(p["codex"], launch="{bin} -m {model} {prompt}")))
         self.assertIn("signals claude-settings (--settings)", fleet.signals_line(p["claude"]))
 
+    def test_a_missing_signal_flag_says_the_launch_itself_may_break(self):
+        """#53 review, 9: Codex's launch line passes -c for its own settings too, so its drift is not only signals'."""
+        p = SHIPPED["providers"]
+        cfg = {"defaults": dict(fleet.DEFAULTS)}
+        with tempfile.TemporaryDirectory() as tmp:
+            codex = dict(p["codex"], bin=self.fake(tmp, "-m --model -s --sandbox -a --ask-for-approval"))
+            text = "\n".join(fleet.profile_report(cfg, "codex", codex, codex["bin"])[0])
+            self.assertIn("codex's launch line passes -c for its own settings too, so the launch itself may fail on "
+                          "this CLI version, not only its signals: check codex's launch line", text)
+            self.assertNotIn("fall back to the screen hash", text)
+            own = dict(codex, launch="{bin} -m {model} {signals} {profile} {prompt}")  # only the slot passes -c
+            text = "\n".join(fleet.profile_report(cfg, "codex", own, own["bin"])[0])
+            self.assertIn("WARNING: signals codex-notify passes -c, which", text)
+            self.assertIn("a CLI that no longer takes it may refuse the launch itself, not only its signals", text)
+
 
 class CodexWait(RuntimeCase):
     """A Codex-style test adapter: launch passes notify, the program logs, wait wakes IDLE."""

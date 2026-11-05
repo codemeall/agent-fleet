@@ -265,7 +265,7 @@ The override replaces the account's own `notify` for Fleet's workers, so a deskt
 
 **Cursor.** No signals. Cursor documents agent hooks (`hooks.json` with `stop` and `afterFileEdit`, among others), but they were not checked against the current `cursor-agent`: Cursor's docs and forum were blocked from this session, the CLI is not installed here, and search results disagree on whether `cursor-agent` runs them. `signals = "cursor-hooks"` is refused at load, so nobody turns on a mechanism nobody has checked. To add it: read Cursor's hooks docs, confirm with a logging `stop` hook that `cursor-agent` runs it in the TUI, record the payload here, then add the method and a test.
 
-`fleet doctor` names each adapter's mechanism (`signals codex-notify (-c notify): …`, `signals none: wait watches the screen (STALLED)`), and says when a slot is missing. It warns when the CLI's `--help` does not list the flag the slot passes (`--settings` for Claude, `-c` for Codex).
+`fleet doctor` names each adapter's mechanism (`signals codex-notify (-c notify): …`, `signals none: wait watches the screen (STALLED)`), and says when a slot is missing. It warns when the CLI's `--help` does not list the flag the slot passes (`--settings` for Claude, `-c` for Codex). Such a warning is about the launch itself, not only signals: a CLI that no longer takes the flag may refuse to start, and Codex's shipped launch line passes `-c` for its own settings too (`model_reasoning_effort`, `check_for_update_on_startup`), so the warning says so; check the launch line against that CLI version.
 
 ### What was checked: Codex and Cursor signals
 
