@@ -240,6 +240,22 @@ class Isolation(WorktreeCase):
         self.assertIn("LAUNCHED a", out)
         self.assertIn("LAUNCHED b", out)                       # side by side, each in its own tree
 
+    def test_add_allows_overlap_within_one_call_in_a_worktree_run(self):
+        self.start([{"id": "z", "files": ["z.txt"]}])
+        more = self.repo / ".scratch/more.json"
+        more.write_text(json.dumps({"tickets": [
+            {"id": i, "task": "Change a.", "files": ["a.txt"], "provider": "writer", "checks": [{"manual": "read it"}],
+             "context": "c"} for i in ("a", "b")]}))
+        self.assertIn("added 2 tickets: a, b", self.call("add", "demo", "--file", str(more)))
+
+    def test_a_shared_run_still_refuses_overlap_within_one_add(self):
+        self.start([{"id": "z", "files": ["z.txt"]}], isolation=None)
+        more = self.repo / ".scratch/more.json"
+        more.write_text(json.dumps({"tickets": [
+            {"id": i, "task": "Change a.", "files": ["a.txt"], "provider": "writer", "checks": [{"manual": "read it"}],
+             "context": "c"} for i in ("a", "b")]}))
+        self.assertIn("b: files overlap unverified ticket a", self.call("add", "demo", "--file", str(more), expected=1))
+
 
 class Reads(WorktreeCase):
     def test_diff_and_scope_check_read_the_worktree_against_its_base(self):

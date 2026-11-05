@@ -2622,8 +2622,8 @@ def cmd_add(a, cfg):
     # sharing files must be sequenced: one waits on the other. Saved tickets come first, then this call's in order.
     # In a worktree run each diff lives in its own tree, so they may run side by side; fleet merge then refuses
     # the second with CONFLICT if both changed a file.
-    earlier = [] if isolated(state) else list(state["tickets"])
-    for i, t in added.items():
+    earlier = list(state["tickets"])
+    for i, t in added.items() if not isolated(state) else ():  # tickets in this call, too, may share files
         waits_on = ancestors(tickets, i)
         for j in earlier:
             old = tickets[j]
