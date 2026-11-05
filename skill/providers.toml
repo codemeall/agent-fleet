@@ -33,6 +33,10 @@
 # trust: how launch marks the repo trusted when [defaults] auto_trust = true (off by default):
 #   claude-config sets the project's hasTrustDialogAccepted in the account's .claude.json, codex-flag passes the
 #   trust as a session-only -c override, agy-settings adds the repo to agy's trustedWorkspaces.
+#   In a worktree run (fleet init --isolation worktree) it marks the checkout and the worker's own tree.
+# add_dir: a launch fragment with a {dir} slot that lets a worker in its own worktree reach the run's folder
+#   (.fleet/runs/<run>/: its prompt, inbox, report and ticket copy). Launch adds it after {bin}, only in a worktree
+#   run. Without it, a CLI that keeps to its working directory asks before those reads and writes.
 # profiles: how each role launches. profiles.worker runs implementation tickets; profiles.review runs reviewers and
 #   investigate tickets, which write only their report. `args` fills the launch line's {profile} slot (trusted, not
 #   quoted; the slot is dropped when empty). `level` is what that launch lets the CLI do without the owner answering
@@ -74,6 +78,8 @@ login = "claude auth status"
 login_ok = '"loggedIn": true'
 account_env = "CLAUDE_CONFIG_DIR"
 trust = "claude-config"
+# `claude --help` 2.1.318: --add-dir <directories...> takes several values, so the = form keeps it to one.
+add_dir = "--add-dir={dir}"
 model_note = "aliases follow the current model"
 # The CLI cannot list models, so this is the list. Aliases (from `claude --help`) follow the newest model;
 # full IDs pin one. Only a launch proves the account offers a model.
@@ -113,6 +119,9 @@ login = "codex login status"
 login_ok = "Logged in"
 account_env = "CODEX_HOME"
 trust = "codex-flag"
+# openai/codex codex-rs/utils/cli/src/shared_options.rs: --add-dir DIR, "Additional directories that should be
+# writable alongside the primary workspace", so the workspace-write sandbox lets the worker write its report.
+add_dir = "--add-dir {dir}"
 models = "codex debug models"
 model_config = "config.toml"
 default_home = "~/.codex"

@@ -73,6 +73,10 @@ DEFAULTS = {
     # The owner's opt-in, for adapters with hooks: workers auto-accept edits (the guard keeps them in scope) and run
     # their ticket's planned check commands without asking. Off: workers keep the account's own permission mode.
     "scope_permissions": False,
+    # Worktree runs (fleet init --isolation worktree): where ticket trees go ("": $XDG_CACHE_HOME, else ~/.cache,
+    # then agent-fleet/worktrees), and a shell command run in each new tree before its worker starts ("": none).
+    "worktree_root": "",
+    "worktree_setup": "",
 }
 CHECK_POLICIES = ("refuse", "warn")
 STATUS_RE = re.compile(r"^\s*[*_`]*\s*status\s*[*_`]*\s*:\s*[*_`]*\s*(.+?)\s*[*_`]*\s*$", re.I)
@@ -104,7 +108,7 @@ GITIGNORE_SPECIAL_RE = re.compile(r"([\\*?\[\]])")  # Claude's Edit rules are gi
 HOOK_TIMEOUT_S = 10  # seconds Claude gives a hook; a hook that times out or fails lets the action go ahead
 PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
 TEMPLATE_KEYS = {"id", "ticket", "report", "repo", "files", "diff", "review_of", "handdown", "inbox", "transport",
-                 *PROMPT_FIELDS}
+                 "isolation", *PROMPT_FIELDS}
 HANDDOWN_LINES = 40  # of a blocker's report summary; past it, the dependent is pointed at the full report
 LATER_DECISION_RE = re.compile(r"\((?:added )?\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\)\s*$")  # Fleet stamps its own
 WAIT_SETTLE_S = 5  # after the first event, gather the others that land with it: one wake, one lead turn
@@ -127,7 +131,7 @@ ADAPTER_FIELDS = (  # every adapter field the providers.toml header documents, p
     "enabled", "placeholder", "extends", "bin", "bin_aliases", "launch", "profiles", "session", "resume", "quit",
     "login", "login_ok", "account_env", "env", "trust", "models", "model_config", "default_home", "model_note",
     "models_allow", "model_families", "family_prefixes", "efforts", "family", "plugins", "max", "tiers",
-    "hooks", "headless", "review_transport")
+    "hooks", "headless", "review_transport", "add_dir")
 TIER_FIELDS = ("model", "effort", "family")
 PROFILE_FIELDS = ("args", "level")
 
@@ -218,6 +222,11 @@ def load_config(user_path: Path | None = None) -> dict:
         raise FleetError('defaults.check_policy must be "refuse" (the default) or "warn"')
     if not isinstance(cfg["defaults"]["scope_permissions"], bool):
         raise FleetError("defaults.scope_permissions must be true or false")
+    root = cfg["defaults"]["worktree_root"]
+    if not isinstance(root, str) or root and not (root.startswith("~") or os.path.isabs(root)):
+        raise FleetError('defaults.worktree_root must be an absolute path (or start with ~), or "" for the cache directory')
+    if not isinstance(cfg["defaults"]["worktree_setup"], str):
+        raise FleetError('defaults.worktree_setup must be a shell command, or "" for none')
     if cfg["defaults"]["permission_ceiling"] not in PERMISSION_LEVELS:
         raise FleetError(f"defaults.permission_ceiling must be one of {', '.join(PERMISSION_LEVELS)} (narrowest first)")
     if cfg["defaults"]["review_transport"] not in TRANSPORTS:
@@ -264,6 +273,9 @@ def load_config(user_path: Path | None = None) -> dict:
         if adapter.get("review_transport") == HEADLESS and not adapter.get(HEADLESS):
             raise FleetError(f'{name}.review_transport is "headless" but {name} has no headless line; set '
                              f'{name}.headless, or review_transport = "tui"')
+        add_dir = adapter.get("add_dir", "")
+        if not isinstance(add_dir, str) or add_dir and "{dir}" not in add_dir:
+            raise FleetError(f'{name}.add_dir must be a launch fragment with a {{dir}} slot, like "--add-dir {{dir}}"')
         aliases = adapter.get("bin_aliases", [])
         if not (isinstance(aliases, list) and all(isinstance(b, str) for b in aliases)):
             raise FleetError(f"{name}.bin_aliases must be a list of executable names")
@@ -658,26 +670,28 @@ def trust_agy(pcfg: dict, repo: str) -> None:
     update_json(Path(AGY_SETTINGS).expanduser(), change)
 
 
-def codex_trust_args(repo: str) -> str:
+def codex_trust_args(*repos: str) -> str:
     """Codex takes the trust for this session as a config override and saves nothing. Only the inline-table form
-    works: a dotted key cannot hold a path."""
-    return "-c " + shlex.quote("projects={" + json.dumps(repo) + '={trust_level="trusted"}}')
+    works: a dotted key cannot hold a path. A worktree launch names the checkout and the worker's tree."""
+    return "-c " + shlex.quote("projects={" + ",".join(json.dumps(r) + '={trust_level="trusted"}' for r in repos) + "}")
 
 
 TRUST_METHODS = {"claude-config": trust_claude, "agy-settings": trust_agy, "codex-flag": None}
 
 
-def prepare_trust(cfg: dict, name: str, pcfg: dict, repo: Path) -> str:
+def prepare_trust(cfg: dict, name: str, pcfg: dict, repo: Path, also: tuple[Path, ...] = ()) -> str:
     """Launch arguments that mark repo trusted, after writing any file the CLI reads trust from; "" with auto_trust
-    off. A failed write only warns: the worker then shows its trust screen for the owner, as without auto_trust."""
+    off. `also` adds paths, such as a worker's own worktree. A failed write only warns: the worker then shows its
+    trust screen for the owner, as without auto_trust."""
     method = pcfg.get("trust")
     if not cfg["defaults"].get("auto_trust") or not method:
         return ""
-    path = str(repo.resolve())
+    paths = [str(repo.resolve()), *(str(Path(p).resolve()) for p in also)]
     if method == "codex-flag":
-        return codex_trust_args(path)
+        return codex_trust_args(*paths)
     try:
-        TRUST_METHODS[method](pcfg, path)
+        for path in paths:
+            TRUST_METHODS[method](pcfg, path)
     except (OSError, ValueError, AttributeError, TypeError) as e:
         print(f"auto_trust: could not mark the repo trusted for {name} ({str(e).strip()[:120]}); "
               "its trust screen will show", file=sys.stderr)
@@ -1252,7 +1266,7 @@ def scoped_diff(repo: Path, state: dict, ticket_id: str) -> str:
     t = state["tickets"][ticket_id]
     path = run_dir(repo, state["run"]) / "snapshots" / f"{ticket_id}.json"
     before = json.loads(path.read_text())
-    after = capture_files(repo, t["files"])
+    after = capture_files(work_tree(repo, state, ticket_id), t["files"])  # a worktree ticket's own tree
     result = []
     for filename in t["files"]:
         old, new = before[filename], after[filename]
@@ -1313,9 +1327,13 @@ def reported_usage(repo: Path, state: dict, w: dict) -> None:
         pass  # counts in a shape Fleet cannot read stay unknown, never zero
 
 
-def assert_scope_idle(state: dict, files: list[str]) -> None:
+def assert_scope_idle(state: dict, files: list[str], ticket: str | None = None) -> None:
+    """Refuse while a live worker may change these files. In a worktree run, only `ticket`'s own workers can:
+    every other ticket works in its own tree."""
     for w in active(state):
         owner = w.get("review_of") or w["id"]
+        if ticket and isolated(state) and owner != ticket:
+            continue
         if scopes_overlap(files, state["tickets"][owner]["files"]):
             raise FleetError("scope overlaps a worker whose exit is unconfirmed")
 
@@ -1329,8 +1347,9 @@ FINGERPRINT_BATCH = 400  # paths per git command line
 
 
 def git_lines(repo: Path, args: list[str], stdin: str | None = None) -> str:
-    res = subprocess.run(["git", "--literal-pathspecs", *args], cwd=repo, input=stdin, capture_output=True,
-                         text=True, timeout=120)
+    # --no-optional-locks: `git status` never rewrites the owner's index file, not even to refresh its stat cache.
+    res = subprocess.run(["git", "--literal-pathspecs", "--no-optional-locks", *args], cwd=repo, input=stdin,
+                         capture_output=True, text=True, timeout=120)
     if res.returncode != 0:
         raise FleetError(f"`git {' '.join(args[:3])}` failed ({res.returncode}): {res.stderr.strip()[:300]}")
     return res.stdout
@@ -1501,6 +1520,8 @@ def check_outputs(repo: Path, run: str) -> dict[str, set[str]]:
 
 def unowned_for(repo: Path, state: dict, worker_id: str, now: dict | None = None) -> list[tuple[str, str, str]] | None:
     """Unowned changes since this worker launched, or None for a worker launched by an earlier Fleet."""
+    if worktree_rec(state, worker_id):  # a worker in its own worktree is checked there, against its own files
+        return tree_unowned(repo, state, worker_id, now)
     base = tree_baseline(repo, state, worker_id)
     if base is None:
         return None
@@ -2261,6 +2282,8 @@ def cmd_init(a, cfg):
     if reason := review_off_reason(a, cfg):
         options["review_off"] = f"Review off (config default: {cfg['defaults']['review']}), by the owner: {reason}"
     init_review_check(cfg, options, pool)
+    if getattr(a, "isolation", None) == "worktree":  # opt-in; a run without the option shares the checkout
+        options.update(init_worktrees(repo, cfg, a.run))
     for sub in ("prompts", "reports", ".seen", "exits", "snapshots", "evidence"):
         (d / sub).mkdir(parents=True, exist_ok=True)
     gi = repo / ".fleet" / ".gitignore"
@@ -2277,6 +2300,9 @@ def cmd_init(a, cfg):
     else:
         print(f"run dir: {d}\nbackend: tmux (headless): workers start in session {workspace}; the owner watches them "
               f"with `fleet agents {a.run}`")
+    if isolated(state):
+        print(f"isolation: worktree; each implement ticket's worker runs in its own tree under {options['worktree_dir']}, "
+              f"and fleet accept applies its diff to this checkout's working tree (fleet merge)")
     print(f"Next: fleet plan {a.run} --file <plan.json>")
 
 
@@ -2587,7 +2613,9 @@ def cmd_add(a, cfg):
                 raise FleetError(f"{i}: blocker {b} was dropped and will never be verified")
     # An unverified ticket's review diff goes stale if another worker edits its files first, so two tickets
     # sharing files must be sequenced: one waits on the other. Saved tickets come first, then this call's in order.
-    earlier = list(state["tickets"])
+    # In a worktree run each diff lives in its own tree, so they may run side by side; fleet merge then refuses
+    # the second with CONFLICT if both changed a file.
+    earlier = [] if isolated(state) else list(state["tickets"])
     for i, t in added.items():
         waits_on = ancestors(tickets, i)
         for j in earlier:
@@ -2633,6 +2661,12 @@ def cmd_drop(a, cfg):
                 break
         report.write_text("\n".join(lines) + "\n")
     save_run(repo, a.run, state)
+    if ticket_trees(state, a.id):  # a worktree ticket's edits were never in the checkout: keep them as a patch
+        for line in retire_trees(repo, state, a.id, keep_patch=True):
+            print(line)
+        save_run(repo, a.run, state)
+        print(f"{a.id}: dropped; its files are free, and nothing it did reached the checkout")
+        return
     print(f"{a.id}: dropped; its files are free, and any edits it made stay in the checkout for the owner to review")
 
 
@@ -2663,7 +2697,10 @@ def blob_mode(repo: Path, f: str, fp: str) -> int:
 
 def owned_alongside(state: dict, i: str, f: str) -> str | None:
     """Another ticket that owned `f` while ticket `i` was running. The scope check credits it with any edit to
-    `f` in that time, so the grant must not hand those edits to `i`'s diff."""
+    `f` in that time, so the grant must not hand those edits to `i`'s diff. In a worktree run nobody else edits
+    `i`'s tree."""
+    if isolated(state) and worktree_rec(state, i):
+        return None
     mine = ticket_window(state, i)
     for j, o in state["tickets"].items():
         window = ticket_window(state, j)
@@ -2690,13 +2727,14 @@ def grant_baseline(repo: Path, state: dict, i: str, files: list[str], accept_cur
     rebuilt only while unchanged, or while Git happens to hold that blob (a staged file). Returns the entries, the
     files that took their current content under --accept-current, and notes for the lead."""
     tree = tree_baseline(repo, state, i)
-    now, disk = capture_files(repo, files), disk_fingerprints(repo, files)
+    where = work_tree(repo, state, i)  # a worktree ticket's launch snapshot is of its own tree
+    now, disk = capture_files(where, files), disk_fingerprints(where, files)
     launch = {} if tree is None else {
-        **head_fingerprints(repo, tree["head"], [f for f in files if f not in tree["paths"]]), **tree["paths"]}
+        **head_fingerprints(where, tree["head"], [f for f in files if f not in tree["paths"]]), **tree["paths"]}
     entries, current, notes, unknown = {}, [], [], []
     for f in files:
         fp, other = launch.get(f), owned_alongside(state, i, f)
-        why = launch_unknown(repo, tree, f, fp)
+        why = launch_unknown(where, tree, f, fp)
         if other:
             entries[f] = now[f]
             notes.append(f"{f}: {other} owned it while {i} ran, so its edits stay {other}'s and its current content "
@@ -2706,7 +2744,7 @@ def grant_baseline(repo: Path, state: dict, i: str, files: list[str], accept_cur
         elif why is None and fp == "absent":
             entries[f] = None
         elif why is None and (blob := git_blob(repo, fp.split(":")[1])) is not None:
-            entries[f] = {"data": base64.b64encode(blob).decode(), "mode": blob_mode(repo, f, fp)}
+            entries[f] = {"data": base64.b64encode(blob).decode(), "mode": blob_mode(where, f, fp)}
         elif accept_current:
             entries[f] = now[f]
             current.append(f)
@@ -2728,6 +2766,8 @@ def check_grantable(state: dict, i: str, files: list[str]) -> None:
     if any(w.get("review_of") == i for w in live):
         raise FleetError(f"{i}'s reviewer may still be running; stop it first (fleet stop), then grant, capture a "
                          "fresh diff and review again")
+    if isolated(state):  # each ticket edits its own tree; fleet merge sorts out a file two tickets changed
+        return
     for w in live:
         owner = w.get("review_of") or w["id"]
         if owner != i and scopes_overlap(files, tickets[owner]["files"]):
@@ -2929,7 +2969,7 @@ def cmd_prompt(a, cfg):
         if a.id in state["tickets"]:
             raise FleetError("reviewer must have a separate ID")
         t = state["tickets"][review_of]
-        assert_scope_idle(state, t["files"])
+        assert_scope_idle(state, t["files"], review_of)
         if not a.diff:
             raise FleetError("review prompt needs --diff from fleet diff")
         diff = Path(a.diff).read_text()
@@ -2966,12 +3006,15 @@ def cmd_prompt(a, cfg):
     transport = prompt_transport(repo, cfg, a, t) if review_of or investigate else "tui"
     if transport == HEADLESS:
         meta["transport"] = HEADLESS  # launch refuses it on a TUI transport, and a TUI prompt on a headless one
-    fields = {"id": a.id, "ticket": t["ticket"], "report": str(report),
-              "repo": str(repo), "files": ", ".join(t["files"]),
+    tree = prompt_tree(state, a.id, review_of, investigate)  # the worker's own worktree, in a worktree run
+    fields = {"id": a.id, "ticket": tree_ticket(d, review_of or a.id, t) if tree else t["ticket"], "report": str(report),
+              "repo": str(tree or repo), "files": ", ".join(t["files"]),
               "diff": str(d / "snapshots" / f"{a.id}.diff") if review_of else "",
               "review_of": review_of or "", "handdown": "", "inbox": str(inbox_path(repo, a.run, a.id)),
-              "transport": headless_prompt_note(report) if transport == HEADLESS else "", **lead_fields}
-    parts = [] if review_of or investigate else [(SKILL_DIR / "templates" / "preamble.md").read_text()]
+              "transport": headless_prompt_note(report) if transport == HEADLESS else "",
+              "isolation": review_tree_note(tree) if review_of and tree else "", **lead_fields}
+    preamble = "preamble-worktree.md" if tree else "preamble.md"
+    parts = [] if review_of or investigate else [(SKILL_DIR / "templates" / preamble).read_text()]
     rules = repo / ".fleet" / "rules.md"
     if rules.exists():
         parts.append("## Repo rules\n\n" + rules.read_text())
@@ -3095,8 +3138,10 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         elif family != t["family"]:
             raise FleetError("launch family must match saved plan")
         for other in running:
-            owned = state["tickets"][other.get("review_of") or other["id"]]["files"]
-            if scopes_overlap(t["files"], owned):
+            owner = other.get("review_of") or other["id"]
+            if isolated(state) and owner != a.id:
+                continue  # in a worktree run another ticket's worker edits its own tree, never this one's
+            if scopes_overlap(t["files"], state["tickets"][owner]["files"]):
                 raise FleetError("files overlap an active implementation/review; wait for its exit")
     else:
         if a.tier != "review":
@@ -3115,19 +3160,20 @@ def launch_one(a, cfg) -> tuple[str, dict]:
             raise FleetError("review requires known different model families; configure family or pass --family")
         check_pool(routing_pool(state["options"]["routing"], cfg), a.provider, model,
                    "reviewer", "; cross-family review cannot proceed")
-        assert_scope_idle(state, t["files"])
+        assert_scope_idle(state, t["files"], meta["review_of"])
         if digest(scoped_diff(repo, state, meta["review_of"]).encode()) != meta["diff_sha"]:
             raise FleetError("review snapshot is stale; regenerate diff and prompt")
     # Place before any side effect: a refused placement must not freeze a baseline or move the report.
     term = terminal(state)
     place = term.place(state, a.pane)
     d = run_dir(repo, a.run)
+    work = launch_tree(repo, state, cfg, a.id, meta, a.resume)  # the worker's cwd: the checkout, or its own worktree
     baseline = d / "snapshots" / f"{a.id}.json"
     if meta["role"] == "implementation" and not baseline.exists():
-        atomic_json(baseline, capture_files(repo, t["files"]))
+        atomic_json(baseline, capture_files(work, t["files"]))
     tree = d / "snapshots" / f"{a.id}.tree.json"
     if not tree.exists():  # the first launch's, like the scoped baseline, so repair rounds stay in one window
-        atomic_json(tree, tree_state(repo, run_ignore(state, cfg)))
+        atomic_json(tree, tree_state(work, run_ignore(state, cfg)))
     if meta["role"] == "implementation":
         t.setdefault("launched_at", time.time())  # from here until verified or dropped, it owns its files
     report = d / "reports" / f"{a.id}.md"
@@ -3139,11 +3185,12 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     hooks = None
     if hooks_on(pcfg, profile):  # a worker writes its own files; a reviewer or investigator only its report
         worker_role = profile == "worker"
-        hooks = write_hooks(repo, d, a.id, t["files"] if worker_role else [], token,
+        hooks = write_hooks(work, d, a.id, t["files"] if worker_role else [], token,
                             worker_role and bool(cfg["defaults"].get("scope_permissions")),
                             t.get("commands", []) if worker_role else [])
-    command = build_launch(pcfg, model, effort, line, session, a.resume, prepare_trust(cfg, a.provider, pcfg, repo),
-                           profile, hooks and hooks["settings"])
+    trust = prepare_trust(cfg, a.provider, pcfg, repo, () if work == repo else (work,))
+    trust = " ".join(x for x in (trust, tree_launch_args(repo, state, cfg, a.provider, pcfg, profile, work)) if x)
+    command = build_launch(pcfg, model, effort, line, session, a.resume, trust, profile, hooks and hooks["settings"])
     exit_file = d / "exits" / f"{a.id}.{token}.json"
     headless = {}
     if profile == HEADLESS:  # its runner writes the report, usage and receipt; reconcile records the usage
@@ -3171,7 +3218,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
                                                        usage_home(pcfg) if session else None))
     save_run(repo, a.run, state)
     label = f"{a.id} · {a.provider}:{model}" + (f"@{effort}" if effort else "")
-    surface, sid, why = term.open(state, place, repo, wrapped, label)
+    surface, sid, why = term.open(state, place, work, wrapped, label)
     w = state["workers"][a.id]
     w["surface"], w["surface_id"], w["state"] = surface, sid, "running"
     if not sid:
@@ -3215,7 +3262,7 @@ def ready_tickets(state: dict, live: dict, cfg: dict, prompts: Path) -> tuple[li
         t = tickets[i]
         name = live.get("provider") or t["provider"]
         blockers = [b for b in t["blockers"] if tickets[b]["status"] != "verified"]
-        clash = next((j for j, files in taken if scopes_overlap(t["files"], files)), None)
+        clash = None if isolated(state) else next((j for j, files in taken if scopes_overlap(t["files"], files)), None)
         prompt = prompts / f"{i}.md"
         meta = state["prompts"].get(i, {})
         unfilled = (unfilled_fields(prompt.read_text(), meta.get("content_placeholders", ()), meta.get("content_lead", 0))
@@ -4249,6 +4296,9 @@ def cmd_resume(a, cfg):
                   "  (fleet steer reset to undo)")
         if hold:
             print(f"hold: {hold_text(hold)}; running workers continue, `fleet release` lifts it")
+        if isolated(state):
+            print(f"isolation: worktree; trees under {o['worktree_dir']} ({len(state.get('worktrees', {}))} now; "
+                  f"fleet check {state['run']} lists them)")
         if terminal(state).name == "cmux" and WORKSPACE_REF_RE.match(state["workspace"]):  # from before init stored the UUID
             print(f"workspace: {state['workspace']} is a cmux ref, which cmux renumbers when it restarts; confirm it "
                   "still names this run's workspace before launching")
@@ -4405,7 +4455,7 @@ def cmd_diff(a, cfg):
         raise FleetError("stop writer before capturing a review diff")
     if w.get("role") != "implementation":
         raise FleetError("diff expects an implementation ID")
-    assert_scope_idle(state, state["tickets"][a.id]["files"])
+    assert_scope_idle(state, state["tickets"][a.id]["files"], a.id)
     note_lead_file(repo, state, a.output)
     guard_unowned(repo, state, a.id, a.unowned_ok)
     save_run(repo, a.run, state)
@@ -4557,11 +4607,12 @@ def run_gate(repo: Path, state: dict, cfg: dict, i: str, out: Path, loop: bool =
     """Run ticket `i`'s commands, then the scope check, and write the evidence to `out`. fleet gate and wait --gate
     share it, so both leave the same file. In the loop a worker is live, so what the commands wrote is never
     recorded as check output (verify still counts it), but it does not fail the loop's gate either: the worker
-    did not write it, and nothing about it may reach the worker."""
-    before = tree_state(repo, run_ignore(state, cfg))
-    results = [run_check(repo, c) for c in state["tickets"][i]["commands"]]
-    after = tree_state(repo, run_ignore(state, cfg))
-    wrote = record_check_outputs(repo, state, i, before, after)
+    did not write it, and nothing about it may reach the worker. A worktree ticket's checks run in its own tree."""
+    where = work_tree(repo, state, i)
+    before = tree_scan(where, state, cfg)
+    results = [run_check(where, c) for c in state["tickets"][i]["commands"]]
+    after = tree_scan(where, state, cfg)
+    wrote = (record_check_outputs if where == repo else record_tree_outputs)(repo, state, i, before, after)
     excused = set()
     if loop and wrote:  # a file already outside every scope before the commands ran is not theirs to excuse
         excused = set(wrote) - {p for p, _, _ in unowned_for(repo, state, i, before) or []}
@@ -4702,7 +4753,7 @@ def reusable_gate(repo: Path, state: dict, cfg: dict, i: str) -> str | None:
     if not r.get("passed") or r.get("commands") != state["tickets"][i].get("commands") \
             or r.get("evidence") != digest(evidence):
         return None
-    now = tree_state(repo, run_ignore(state, cfg))
+    now = tree_state(work_tree(repo, state, i), run_ignore(state, cfg))
     return r.get("at") if (now["head"], now["paths"]) == (r.get("head"), r.get("paths")) else None
 
 
@@ -4793,7 +4844,7 @@ class GateLoop:
         kept = self.deferred.get(i)
         if not kept or kept[0] != key:
             return None
-        now = tree_state(self.repo, run_ignore(state, self.cfg))
+        now = tree_state(work_tree(self.repo, state, i), run_ignore(state, self.cfg))
         return kept[2] if (now["head"], now["paths"]) == kept[1] else None
 
     def scope_line(self, i: str, path: str, kind: str, fp: str) -> str:
@@ -4813,7 +4864,7 @@ def cmd_verify(a, cfg):
     owner = w.get("review_of") or a.id
     if state["tickets"][owner]["status"] == "dropped":
         raise FleetError(f"{owner} was dropped; there is nothing to accept")
-    assert_scope_idle(state, state["tickets"][owner]["files"])
+    assert_scope_idle(state, state["tickets"][owner]["files"], owner)
     evidence = read_evidence_files(a.evidence)
     report = run_dir(repo, a.run) / "reports" / f"{a.id}.md"
     if not report.exists() or parse_status(report.read_text()) != "needs-verification":
@@ -4827,6 +4878,9 @@ def cmd_verify(a, cfg):
             sha = digest(scoped_diff(repo, state, a.id).encode())
             if not any(r.get("review_of") == a.id and r.get("verified") and r.get("diff_sha") == sha for r in state["workers"].values()):
                 raise FleetError("required cross-family review is missing, unverified or stale")
+        if worktree_rec(state, a.id) and not merge_done(repo, state, a.id):
+            raise FleetError(f"{a.id} ran in its own worktree and its diff is not in the checkout yet; apply it first "
+                             f"with fleet merge {a.run} {a.id} (fleet accept does both)")
         t["status"], t["closed_at"] = "verified", time.time()
     else:
         sha = digest(scoped_diff(repo, state, w["review_of"]).encode())
@@ -5297,6 +5351,8 @@ def cmd_accept(a, cfg):
         evidence.insert(0, str(gate_md))
     state = load_run(repo, a.run)
     refuse_problems(a, accept_problems(repo, state, a, review, rid), "its workers are stopped; nothing was verified")
+    if worktree_rec(state, a.id):  # its diff reaches the checkout's working tree before anything is verified
+        accept_merge(repo, state, a)
     if rid:
         try:
             cmd_verify(sub_args(a, id=rid, evidence=a.review_evidence or a.evidence, unowned_ok=None), cfg)
@@ -5310,6 +5366,7 @@ def cmd_accept(a, cfg):
         raise FleetError(f"{rid} is verified and recorded, but {a.id} is not: {e}. Resolve that, then run fleet "
                          f"accept {a.run} {a.id} again with the same evidence; it skips the verified reviewer, "
                          "unless the writer's files changed, which needs a new review") from None
+    accept_cleanup(repo, a)
     ready = unblocked_by(load_run(repo, a.run), a.id)
     print(f"UNBLOCKED {' '.join(ready) or 'none'}")
     if a.launch_ready:
@@ -5328,6 +5385,8 @@ def cmd_check(a, cfg):
     if tree.exists() and (changes := unowned_since(repo, state, json.loads(tree.read_text()), None, cfg=cfg)):
         print("NOTE changed since the run started outside every ticket's files (the owner's edits, or a worker's "
               f"outside its scope; investigate with the owner):\n{unowned_text(changes)}")
+    if isolated(state) or state.get("worktrees"):  # lists the run's worktrees; never changes the exit code
+        check_trees(repo, state, bool(getattr(a, "clean_worktrees", False)))
     if problems:
         print("CHANGED since the run started (fleet never commits or stages; find out who did):")
         for p in problems:
@@ -5335,6 +5394,551 @@ def cmd_check(a, cfg):
         return 1
     print("OK: captured HEAD and index states match the run baseline")
     return 0
+
+
+# ---------- worktree isolation ----------
+# Opt-in per run (`fleet init --isolation worktree`). Each implement ticket's worker runs in its own linked Git
+# worktree outside the checkout, made at its first launch from the owner's checkout as it is then, uncommitted edits
+# included, and kept for its repair rounds and resumes. Diff, scope check, gate and hooks read that tree; a reviewer
+# gets a frozen snapshot of it; `fleet merge` (which accept runs) applies the ticket's diff to the checkout's working
+# tree. Investigators still read the checkout. What this does with Git, none of which changes the owner's HEAD,
+# index or refs:
+# - `git stash create` records the owner's tracked and staged edits as a commit object and stores no ref (refs/stash
+#   is untouched). It reads a copy of the index (GIT_INDEX_FILE), so not even its stat refresh rewrites the owner's.
+# - `git worktree add --detach` and `git worktree remove` / `prune` write only Git's worktree admin files
+#   (.git/worktrees/<name>/: the linked tree's own HEAD and index); no branch is made and no ref moves. Hooks are
+#   off for every command here (core.hooksPath=/dev/null), so an owner's post-checkout hook never runs.
+# - a tree's contents are read through a temporary index file (read-tree, add -A, write-tree), and a reviewer's
+#   snapshot base is a commit-tree; both write only unreferenced objects, which Git's gc prunes in time.
+# - merge runs plain `git apply`, which changes the working tree only: never --index, never --3way.
+
+WORKTREE_SETUP_TIMEOUT_S = 1800
+FLEET_IDENT = {"GIT_AUTHOR_NAME": "Fleet", "GIT_AUTHOR_EMAIL": "fleet@localhost",
+               "GIT_COMMITTER_NAME": "Fleet", "GIT_COMMITTER_EMAIL": "fleet@localhost"}
+# A tree-to-tree diff that `git apply` reads back whatever the owner's diff config says.
+PATCH_ARGS = ("-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "--literal-pathspecs", "diff",
+              "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/")
+
+
+def isolated(state: dict) -> bool:
+    """True for a run started with --isolation worktree. Older runs, and runs without the option, share the checkout."""
+    return (state.get("options") or {}).get("isolation") == "worktree"
+
+
+def worktree_home(cfg: dict) -> Path:
+    """[defaults] worktree_root, else $XDG_CACHE_HOME (when absolute, as the XDG spec asks), else ~/.cache, then
+    agent-fleet/worktrees: outside the checkout, where its test runners, linters, watchers and searches never look."""
+    root = cfg["defaults"].get("worktree_root") or ""
+    if root:
+        return Path(root).expanduser()
+    cache = os.environ.get("XDG_CACHE_HOME", "")
+    return (Path(cache) if os.path.isabs(cache) else Path.home() / ".cache") / "agent-fleet" / "worktrees"
+
+
+def init_worktrees(repo: Path, cfg: dict, run: str) -> dict:
+    """The options a worktree run saves at init: where its trees go, <root>/<repo-key>/<run>/<id>."""
+    if not sh(["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=repo, check=False).strip():
+        raise FleetError("--isolation worktree builds each tree from a commit, and this repository has none yet")
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", repo.name).strip("-")[:32] or "repo"
+    where = worktree_home(cfg).resolve() / f"{slug}-{digest(str(repo.resolve()).encode())[:8]}" / run
+    if where.is_relative_to(repo.resolve()) or repo.resolve().is_relative_to(where):
+        raise FleetError(f"worktrees would go in {where}, inside this checkout, where its test runners, linters and "
+                         "the scope check would read them; set [defaults] worktree_root outside it")
+    return {"isolation": "worktree", "worktree_dir": str(where)}
+
+
+def worktree_rec(state: dict, wid: str) -> dict | None:
+    """Worker `wid`'s worktree record (a writer's, or a reviewer's snapshot), or None."""
+    return (state.get("worktrees") or {}).get(wid)
+
+
+def ticket_trees(state: dict, i: str) -> list[str]:
+    """Ticket `i`'s worktrees: its writer's and its reviewers'."""
+    return [wid for wid, rec in (state.get("worktrees") or {}).items() if rec.get("ticket") == i]
+
+
+def work_tree(repo: Path, state: dict, wid: str) -> Path:
+    """Where worker `wid`'s files are: its own worktree while it has one, else the checkout."""
+    rec = worktree_rec(state, wid)
+    if not rec:
+        return repo
+    path = Path(rec["path"])
+    if not path.is_dir():
+        raise FleetError(f"{wid}'s worktree {path} is gone, so Fleet cannot read its work. Drop the ticket (fleet "
+                         f"drop) and add it again, or see fleet check {state['run']}")
+    return path
+
+
+def prompt_tree(state: dict, i: str, review_of: str | None, investigate: bool) -> Path | None:
+    """The tree a prompt names, before launch makes it: a worktree ticket's own, or a reviewer's snapshot of its
+    writer's. None in a shared run, for an investigator (it reads the checkout) and for a writer without a tree."""
+    if not isolated(state) or investigate or review_of and not worktree_rec(state, review_of):
+        return None
+    return Path(state["options"]["worktree_dir"]) / valid_id(i)
+
+
+def tree_ticket(d: Path, i: str, t: dict) -> str:
+    """The ticket file a worker in its own tree reads: inside the run's folder, which launch lets it reach (add_dir),
+    so no folder of the checkout ever has to be opened to it. A ticket kept elsewhere is copied there."""
+    source = Path(t["ticket"])
+    if source.resolve().is_relative_to(d.resolve()):
+        return str(source)
+    copy = contained(d, d / "tickets" / f"{valid_id(i)}{source.suffix or '.md'}")
+    copy.parent.mkdir(exist_ok=True)
+    shutil.copyfile(source, copy)
+    return str(copy)
+
+
+def review_tree_note(tree: Path) -> str:
+    return (f"\n\nYou run in `{tree}`, a frozen snapshot of the writer's worktree made for this review: its staged "
+            "changes (`git diff --cached`) are everything the writer changed in its tree, and the captured diff is "
+            "the part in the ticket's files. Nothing there reaches the owner's checkout; still write only your report.")
+
+
+def tree_git(cwd: Path, *args: str, env: dict | None = None, data: bytes | None = None, check: bool = True,
+             raw: bool = False):
+    """git with hooks off and no optional index locks; stdout as text, or the whole result with raw."""
+    res = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "--no-optional-locks", *args], cwd=cwd,
+                         input=data, capture_output=True, timeout=600,
+                         env={**os.environ, **env} if env else None)
+    if check and res.returncode:
+        raise FleetError(f"`git {' '.join(a for a in args if not a.startswith('-'))[:80]}` failed "
+                         f"({res.returncode}): {res.stderr.decode(errors='replace').strip()[:300]}")
+    return res if raw else res.stdout.decode(errors="surrogateescape")
+
+
+def tree_excludes(state: dict) -> list[str]:
+    """Pathspecs for what a tree's snapshot leaves as its base had it: .fleet/ and the run's scope_ignore list."""
+    def glob(text: str) -> str:
+        return re.sub(r"([*?\[\]\\])", r"\\\1", text)
+    out = [":(exclude,glob).fleet/**"]
+    for entry in run_ignore(state):
+        name = entry.strip("/")
+        out.append(f":(exclude,literal){name}" if not entry.endswith("/") else
+                   f":(exclude,glob){glob(name)}/**" if "/" in name else f":(exclude,glob)**/{glob(name)}/**")
+    return out
+
+
+def tree_of(path: Path, state: dict, base: str, files: list[str]) -> str:
+    """The tree object of what worktree `path` holds now, built in a temporary index: `base`'s tree with every
+    non-ignored file on top, plus the ticket's own `files` even when gitignored. The tree's own index is untouched."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        tree_git(path, "read-tree", base, env=env)
+        tree_git(path, "add", "-A", "--", ".", *tree_excludes(state), env=env)
+        own = [f":(literal){f}" for f in files if os.path.lexists(path / f)]
+        if own:
+            tree_git(path, "add", "-A", "-f", "--", *own, env=env)
+        return tree_git(path, "write-tree", env=env).strip()
+
+
+def tree_scan(path: Path, state: dict, cfg: dict | None = None) -> dict:
+    """tree_state, tagged with the tree it read, so the scope check knows whether it may reuse it."""
+    return dict(tree_state(path, run_ignore(state, cfg)), tree=str(path))
+
+
+def owner_commit(repo: Path) -> str:
+    """The owner's checkout as a commit: `git stash create` (tracked and staged edits; no ref, nothing stored), run on
+    a copy of the index so the owner's index file is never rewritten; HEAD when nothing is changed."""
+    index = repo / tree_git(repo, "rev-parse", "--git-path", "index").strip()
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(FLEET_IDENT)
+        if index.is_file():
+            shutil.copyfile(index, Path(tmp) / "index")
+            env["GIT_INDEX_FILE"] = str(Path(tmp) / "index")
+        made = tree_git(repo, "stash", "create", "fleet: the owner's checkout for a worktree", env=env).strip()
+    return made or tree_git(repo, "rev-parse", "--verify", "HEAD").strip()
+
+
+def copy_untracked(repo: Path, path: Path, state: dict, files: list[str]) -> None:
+    """Copy the checkout's untracked, non-ignored files (the set the scope check fingerprints) into a new tree, and
+    the ticket's own files that are gitignored there. Other ignored files (node_modules, .env) are never copied."""
+    ignore = run_ignore(state)
+    names = [p for p in tree_git(repo, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
+             if p and not p.endswith("/") and not p.startswith(".fleet/") and not scope_ignored(p, ignore)]
+    names += [f for f in files if f not in names and os.path.lexists(repo / f) and not os.path.lexists(path / f)]
+    for p in names:
+        src, dst = repo / p, path / p
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if src.is_symlink():
+            os.symlink(os.readlink(src), dst)
+        elif src.is_file():
+            shutil.copy2(src, dst)
+
+
+def registered_trees(repo: Path) -> set[str]:
+    """The resolved paths of every linked worktree Git knows for this repository."""
+    out = tree_git(repo, "worktree", "list", "--porcelain", check=False)
+    return {str(Path(line[9:]).resolve()) for line in out.splitlines() if line.startswith("worktree ")}
+
+
+def make_tree(repo: Path, state: dict, wid: str, owner: str, files: list[str], review_of: str | None = None) -> dict:
+    """A new worktree for worker `wid`, with the owner's setup command run in it. A writer's starts from the owner's
+    checkout as it is now. A reviewer's is a frozen snapshot of its writer's tree: based on the writer's launch
+    contents, with the writer's current contents staged, so `git diff --cached` shows the whole change."""
+    path = Path(state["options"]["worktree_dir"]) / valid_id(wid)
+    if os.path.lexists(path):
+        raise FleetError(f"{path} already exists, so {wid} cannot get a fresh worktree there; if no worker uses it, "
+                         f"fleet check {state['run']} --clean-worktrees removes it")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = worktree_rec(state, review_of) if review_of else None
+    if writer:
+        result = tree_of(work_tree(repo, state, review_of), state, writer["base_commit"],
+                         state["tickets"][review_of]["files"])
+        base = tree_git(repo, "commit-tree", "--no-gpg-sign", "-p", writer["base_commit"], "-m",
+                        f"fleet: {review_of}'s worktree at its launch", writer["base_tree"], env=FLEET_IDENT).strip()
+    else:
+        base = owner_commit(repo)
+    head = sh(["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=repo, check=False).strip()
+    # Only Git's worktree admin files change: .git/worktrees/<name>/ holds the new tree's own HEAD and index.
+    tree_git(repo, "worktree", "add", "--detach", *(["--no-checkout"] if writer else []), str(path), base)
+    try:
+        if writer:
+            tree_git(path, "read-tree", "-u", "--reset", result)  # the reviewer tree's own index, never the owner's
+        else:
+            copy_untracked(repo, path, state, files)
+        setup = state["options"].get("worktree_setup") or ""
+        if setup:
+            run_tree_setup(repo, state, wid, path, setup)
+        base_tree = tree_of(path, state, base, files)  # after setup: what setup wrote is not the worker's change
+    except BaseException:
+        remove_tree(repo, state, {"path": str(path)})
+        raise
+    return {"path": str(path), "ticket": owner, "role": "review" if writer else "implementation",
+            "base_commit": base, "base_tree": base_tree, "checkout_head": head,
+            "created": time.strftime("%Y-%m-%dT%H:%M:%S")}
+
+
+def run_tree_setup(repo: Path, state: dict, wid: str, path: Path, command: str) -> None:
+    """[defaults] worktree_setup, run in a new tree before its worker starts, as fleet gate runs a check."""
+    r = run_check(path, {"run": command, "cwd": ".", "timeout": WORKTREE_SETUP_TIMEOUT_S})
+    log = run_dir(repo, state["run"]) / "worktrees" / f"{wid}.setup.log"
+    log.parent.mkdir(exist_ok=True)
+    log.write_text(f"$ {command}\n(in {path})\n\n{r['output']}\n{check_outcome(r)}, {r['seconds']:.1f}s\n")
+    if check_failed(r):
+        raise FleetError(f"worktree_setup `{command}` failed in {wid}'s new worktree ({check_outcome(r)}); its "
+                         f"output is in {log}. The tree was removed and nothing was launched")
+
+
+def remove_tree(repo: Path, state: dict, rec: dict) -> None:
+    """Remove one worktree: `git worktree remove --force` (it holds the worker's untracked and ignored files), then
+    prune. Only Git's worktree admin files and the tree itself change. A directory Git does not know is deleted only
+    inside this run's worktree folder."""
+    path = Path(rec["path"])
+    root = Path(state["options"]["worktree_dir"]).resolve()
+    if not path.resolve().is_relative_to(root):
+        raise FleetError(f"{path} is outside this run's worktree folder {root}; Fleet does not remove it")
+    if str(path.resolve()) in registered_trees(repo):
+        tree_git(repo, "worktree", "remove", "--force", str(path), check=False)
+    if os.path.lexists(path):  # never registered, or Git could not remove it
+        shutil.rmtree(path, ignore_errors=True)
+    tree_git(repo, "worktree", "prune", check=False)
+
+
+def launch_tree(repo: Path, state: dict, cfg: dict, wid: str, meta: dict, resume: bool) -> Path:
+    """The cwd launch gives worker `wid`. In a worktree run a writer gets its own tree at its first launch and the
+    same one for every repair round and resume; another ticket never does. Each review round gets a fresh frozen
+    snapshot of the writer's tree (a resume keeps it). Investigators, and every worker in a shared run, get the
+    checkout."""
+    if not isolated(state):
+        return repo
+    trees = state.setdefault("worktrees", {})
+    if meta.get("role") == "implementation":
+        t = state["tickets"][wid]
+        if t.get("kind", "implement") != "implement":
+            return repo
+        if wid not in trees:
+            trees[wid] = make_tree(repo, state, wid, wid, t["files"])
+        return work_tree(repo, state, wid)
+    writer = meta["review_of"]
+    if not worktree_rec(state, writer):
+        return repo
+    if wid in trees:
+        if resume:
+            return work_tree(repo, state, wid)
+        remove_tree(repo, state, trees.pop(wid))  # a new round reviews a new diff
+    trees[wid] = make_tree(repo, state, wid, writer, [], review_of=writer)
+    return work_tree(repo, state, wid)
+
+
+def tree_launch_args(repo: Path, state: dict, cfg: dict, name: str, pcfg: dict, profile: str, work: Path) -> str:
+    """For a worker in its own tree: the adapter's add_dir fragment for the one folder outside the tree it must reach,
+    the run's folder (its prompt, inbox, report, ticket copy and any review diff; never the checkout itself), and a
+    warning when its CLI may ask to trust the tree. A headless line that runs a subcommand (`codex exec`) gets no
+    fragment: a root flag may not reach it, and its runner writes the report."""
+    if work == repo:
+        return ""
+    if pcfg.get("trust") and not cfg["defaults"].get("auto_trust"):
+        print(f"warning: {name} runs in its worktree {work}. auto_trust is off, so if {name} asks whether to trust "
+              "that folder, the worker waits until the owner answers in its pane (Claude Code and Codex trust a "
+              "worktree when its checkout is trusted; see providers.md#folder-trust)", file=sys.stderr)
+    fragment = pcfg.get("add_dir") or ""
+    if profile == HEADLESS and re.match(r"\{bin\}\s+[a-z][\w-]*(\s|$)", pcfg.get(HEADLESS, "")):
+        fragment = ""
+    if not fragment:
+        return ""
+    return fragment.format(dir=shlex.quote(str(run_dir(repo, state["run"]).resolve())))
+
+
+def tree_unowned(repo: Path, state: dict, wid: str, now: dict | None = None) -> list[tuple[str, str, str]] | None:
+    """The scope check for a worker in its own worktree: changes there since its launch outside its ticket's files
+    (none for a reviewer), the run's scope_ignore list and what fleet gate's commands wrote there while it was not
+    running. Other tickets own nothing in this tree. None without a launch snapshot."""
+    base = tree_baseline(repo, state, wid)
+    if base is None:
+        return None
+    path, rec = work_tree(repo, state, wid), worktree_rec(state, wid)
+    if not now or now.get("tree") != str(path):
+        now = tree_scan(path, state)
+    own = set(state["tickets"][rec["ticket"]]["files"]) if rec.get("role") == "implementation" else set()
+    ignore, accepted = run_ignore(state), state.get("accepted_changes", {})
+    wrote = tree_outputs(repo, state, wid)
+    return [(p, change_kind(old, new), new) for p, (old, new) in tree_changes(path, base, now).items()
+            if p not in own and not scope_ignored(p, ignore) and accepted.get(p) != new
+            and new not in wrote.get(p, ())]
+
+
+def tree_outputs_file(repo: Path, state: dict, i: str) -> Path:
+    d = run_dir(repo, state["run"])
+    return contained(d, d / "tree-outputs" / f"{valid_id(i)}.json")
+
+
+def tree_outputs(repo: Path, state: dict, i: str) -> dict[str, set[str]]:
+    f = tree_outputs_file(repo, state, i)
+    data = json.loads(f.read_text()) if f.exists() else {}
+    return {p: {fp} if isinstance(fp, str) else set(fp) for p, fp in data.items()}
+
+
+def record_tree_outputs(repo: Path, state: dict, i: str, before: dict, after: dict) -> list[str]:
+    """record_check_outputs for a worktree ticket's gate: what its commands wrote in its tree outside its files,
+    recorded only while its own writer is not running, as the checkout's are while no worker runs."""
+    own = set(state["tickets"][i]["files"])
+    changed = {p: new for p, (_, new) in tree_changes(Path(after["tree"]), before, after).items() if p not in own}
+    if changed and not any((w.get("review_of") or w["id"]) == i for w in active(state)):
+        f = tree_outputs_file(repo, state, i)
+        f.parent.mkdir(exist_ok=True)
+        kept = {p: sorted(v) for p, v in tree_outputs(repo, state, i).items()}
+        for p, fp in changed.items():
+            kept[p] = sorted(set(kept.get(p, [])) | {fp})
+        atomic_json(f, kept)
+    return sorted(changed)
+
+
+def tree_diff(repo: Path, a: str, b: str, files: list[str], names: bool = False):
+    """Between two tree objects, limited to `files`: the changed paths, or a binary patch `git apply` takes."""
+    if not files:
+        return [] if names else b""
+    args = [*PATCH_ARGS, *(["--name-only", "-z"] if names else ["--binary", "--full-index"]), a, b, "--", *files]
+    res = tree_git(repo, *args, raw=True)
+    if names:
+        return [p for p in res.stdout.decode(errors="surrogateescape").split("\0") if p]
+    return res.stdout
+
+
+def merge_view(repo: Path, state: dict, i: str) -> dict:
+    """What fleet merge would apply for ticket `i` now: the tree's result, the files the patch touches, the patch
+    and the checkout's current fingerprints of those files."""
+    t, rec = state["tickets"][i], worktree_rec(state, i)
+    result = tree_of(work_tree(repo, state, i), state, rec["base_commit"], t["files"])
+    names = tree_diff(repo, rec["base_tree"], result, t["files"], names=True)
+    patch = tree_diff(repo, rec["base_tree"], result, t["files"]) if names else b""
+    return {"result": result, "names": names, "patch": patch, "sha": digest(patch),
+            "now": disk_fingerprints(repo, names)}
+
+
+def merge_done(repo: Path, state: dict, i: str, view: dict | None = None) -> bool:
+    """True when ticket `i`'s current diff is already in the checkout: merged, by Fleet or by hand, and those files
+    unchanged since."""
+    done = state["tickets"][i].get("merged")
+    if not done:
+        return False
+    view = view or merge_view(repo, state, i)
+    return done.get("patch") == view["sha"] and all(view["now"].get(f) == done["files"].get(f) for f in view["names"])
+
+
+def merge_ticket(repo: Path, state: dict, i: str, resolved: str | None = None) -> str:
+    """Apply worktree ticket `i`'s diff, in its own files, to the checkout's working tree with plain `git apply`, and
+    record it on the ticket (the caller saves). Refuses with CONFLICT, applying nothing, when the checkout's copy of
+    a file the patch touches changed since the tree was made, or `git apply --check` refuses the patch."""
+    t, rec, view = state["tickets"][i], worktree_rec(state, i), merge_view(repo, state, i)
+    names, now = view["names"], view["now"]
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+    if merge_done(repo, state, i, view):
+        return f"MERGED {i}: already in the checkout ({', '.join(names) or 'no changes'})"
+    if resolved is not None:
+        if not resolved.strip():
+            raise FleetError("--resolved needs what you did, in a few words; it is saved with the run's decisions")
+        t["merged"] = {"patch": view["sha"], "files": {f: now.get(f) for f in names}, "at": stamp, "by_hand": True}
+        state["decisions"].append(f"Merged {i} by hand: {', '.join(names)} ({resolved.strip()}) ({stamp})")
+        return f"MERGED {i} by hand: recorded the checkout's {', '.join(names) or 'files'} as its merge"
+    if not names:
+        t["merged"] = {"patch": view["sha"], "files": {}, "at": stamp}
+        return f"MERGED {i}: no changes to apply"
+    base = head_fingerprints(repo, rec["base_tree"], names)
+    why = {f: "changed in the checkout since the worktree was made" for f in names
+           if now.get(f, "not a file") != base.get(f)}
+    if not why:
+        check = tree_git(repo, "apply", "--check", "--whitespace=nowarn", "-", data=view["patch"], check=False, raw=True)
+        if check.returncode:
+            err = check.stderr.decode(errors="replace")
+            why = {f: "the patch does not apply: " + one_line(err, 160) for f in names if f in err} or \
+                  {f: "the patch does not apply: " + one_line(err, 160) for f in names}
+    if why:
+        raise merge_conflict(repo, state, i, rec, why)
+    tree_git(repo, "apply", "--whitespace=nowarn", "-", data=view["patch"])  # the working tree only
+    after = disk_fingerprints(repo, names)
+    t["merged"] = {"patch": view["sha"], "files": {f: after.get(f) for f in names}, "at": stamp}
+    off = [f for f, fp in head_fingerprints(repo, view["result"], names).items() if after.get(f) != fp]
+    if off:
+        print(f"warning: after git apply, {', '.join(off)} in the checkout differ from {i}'s worktree (a filter or "
+              "line-ending setting?); compare them before accepting", file=sys.stderr)
+    return (f"MERGED {i}: applied {len(names)} file(s) to the checkout's working tree ({', '.join(names)}); "
+            "the index is untouched")
+
+
+def merge_conflict(repo: Path, state: dict, i: str, rec: dict, why: dict[str, str]) -> FleetError:
+    """Print the CONFLICT line and return the refusal, with each file's base copy saved for a merge by hand."""
+    print(f"CONFLICT {i}: {', '.join(why)}")
+    saved = run_dir(repo, state["run"]) / "merge" / i
+    tree = Path(rec["path"])
+    lines = []
+    for f, reason in why.items():
+        base = head_fingerprints(repo, rec["base_tree"], [f]).get(f, "absent")
+        copy = saved / f"{f}.base"
+        if base != "absent" and (blob := git_blob(repo, base.split(":")[1])) is not None:
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            copy.write_bytes(blob)
+            lines.append(f"  {f}: {reason}\n    git merge-file {shlex.quote(str(repo / f))} {shlex.quote(str(copy))} "
+                         f"{shlex.quote(str(tree / f))}")
+        else:
+            lines.append(f"  {f}: {reason} (no base copy: the file was new in {i}'s worktree)")
+    return FleetError(
+        f"{i}'s diff does not apply cleanly to the checkout, so nothing was applied:\n" + "\n".join(lines) +
+        f"\nThe lead's options, with the owner:\n"
+        f"- relaunch from the current checkout: fleet drop {state['run']} {i} --reason \"<why>\" (its worktree's "
+        f"changes are saved as a patch), then fleet add the work again; the new ticket's tree starts from the "
+        f"checkout as it is now\n"
+        f"- merge by hand: the git merge-file line under each file merges the worktree's change into the checkout's "
+        f"copy (Fleet never runs it); check the result, then fleet merge {state['run']} {i} --resolved \"<what you did>\"")
+
+
+def tree_patch_all(repo: Path, state: dict, rec: dict) -> bytes:
+    """Everything a tree changed since it was made, outside .fleet/ and the scope_ignore list."""
+    t = state["tickets"].get(rec["ticket"], {})
+    result = tree_of(Path(rec["path"]), state, rec["base_commit"], t.get("files", []) if rec.get("role") ==
+                     "implementation" else [])
+    return tree_git(repo, *PATCH_ARGS, "--binary", "--full-index", rec["base_tree"], result, raw=True).stdout
+
+
+def retire_trees(repo: Path, state: dict, i: str, keep_patch: bool = False) -> list[str]:
+    """Remove ticket `i`'s worktrees (writer and reviewers) and their records; with keep_patch, save the writer's
+    whole change as a patch first. Returns what to print. A tree that cannot be removed is left for fleet check."""
+    out = []
+    for wid in ticket_trees(state, i):
+        rec = state["worktrees"][wid]
+        try:
+            if keep_patch and rec.get("role") == "implementation" and Path(rec["path"]).is_dir():
+                patch = run_dir(repo, state["run"]) / "worktrees" / f"{wid}.patch"
+                patch.parent.mkdir(exist_ok=True)
+                patch.write_bytes(tree_patch_all(repo, state, rec))
+                out.append(f"{wid}: its worktree's changes are saved in {patch} (git apply it to look; Fleet never does)")
+            remove_tree(repo, state, rec)
+        except (FleetError, OSError, subprocess.TimeoutExpired) as e:
+            out.append(f"{wid}: could not remove its worktree {rec['path']} ({str(e).strip()[:200]}); fleet check "
+                       f"{state['run']} --clean-worktrees retries")
+            continue
+        del state["worktrees"][wid]
+        out.append(f"REMOVED worktree {rec['path']}")
+    return out
+
+
+def accept_merge(repo: Path, state: dict, a) -> None:
+    """accept's merge step: apply the ticket's diff before anything is verified, or refuse with CONFLICT."""
+    try:
+        print(merge_ticket(repo, state, a.id))
+    except FleetError as e:
+        raise FleetError(f"{e}\n{a.id} not accepted; its workers are stopped; nothing was applied or verified") from None
+    save_run(repo, a.run, state)
+
+
+def accept_cleanup(repo: Path, a) -> None:
+    """After accept verified a worktree ticket: remove its trees, writer's and reviewers'."""
+    state = load_run(repo, a.run)
+    if ticket_trees(state, a.id):
+        for line in retire_trees(repo, state, a.id):
+            print(line)
+        save_run(repo, a.run, state)
+
+
+def cmd_merge(a, cfg):
+    """Apply a worktree ticket's diff to the checkout's working tree (git apply, never the index), or refuse with
+    CONFLICT and apply nothing."""
+    repo = repo_root()
+    state = load_run(repo, a.run)
+    reconcile(repo, state)
+    if not isolated(state):
+        raise FleetError(f"run {a.run} shares the checkout, so its workers' edits are already there; fleet merge is "
+                         "for runs started with --isolation worktree")
+    t = own_ticket(a, state, "merge")
+    if not worktree_rec(state, a.id):
+        raise FleetError(f"{a.id} has no worktree" + (": an investigate ticket changes nothing" if
+                                                       t.get("kind") == "investigate" else ""))
+    live = [w["id"] for w in active(state) if (w.get("review_of") or w["id"]) == a.id]
+    if live:
+        raise FleetError(f"{', '.join(live)} may still be running; stop it first (fleet stop) and confirm its exit")
+    try:
+        line = merge_ticket(repo, state, a.id, a.resolved)
+    finally:
+        save_run(repo, a.run, state)
+    print(line)
+
+
+def check_trees(repo: Path, state: dict, clean: bool) -> None:
+    """fleet check's list of the run's worktrees. An orphan is a tree whose ticket is verified or dropped (accept or
+    drop could not remove it) or one in the run's worktree folder that the run has no record of. With clean, Fleet
+    removes the orphans, and forgets a missing reviewer snapshot or a closed ticket's missing tree."""
+    root = Path(state["options"].get("worktree_dir") or "")
+    trees = state.setdefault("worktrees", {})
+    rows: list[tuple[str, Path, str, dict | None]] = []
+    for wid, rec in trees.items():
+        path, status = Path(rec["path"]), state["tickets"].get(rec.get("ticket"), {}).get("status")
+        if status in ("verified", "dropped"):
+            kind = f"orphan: {rec['ticket']} is {status}"
+        elif not path.is_dir():
+            kind = "missing" + ("" if rec.get("role") == "review" else
+                                f": {rec['ticket']} cannot be diffed or merged; drop it and add the work again")
+        else:
+            kind = "in use"
+        rows.append((wid, path, kind, rec))
+    known = {str(Path(r["path"]).resolve()) for r in trees.values()}
+    if root.name and root.is_dir():
+        registered = registered_trees(repo)
+        for child in sorted(root.iterdir()):
+            if str(child.resolve()) not in known:
+                rows.append(("-", child, "orphan: not in the run's records" +
+                             ("" if str(child.resolve()) in registered else ", and not a Git worktree"), None))
+    orphans = 0
+    for wid, path, kind, rec in rows:
+        print(f"WORKTREE {wid} {path}: {kind}")
+        gone = kind.startswith("missing") and (rec or {}).get("role") == "review"
+        if not clean or not (kind.startswith("orphan") or gone):
+            orphans += kind.startswith("orphan")
+            continue
+        try:
+            remove_tree(repo, state, rec or {"path": str(path)})
+        except (FleetError, OSError, subprocess.TimeoutExpired) as e:
+            print(f"  could not remove it: {str(e).strip()[:200]}")
+            orphans += 1
+            continue
+        if wid in trees:
+            del trees[wid]
+        print(f"REMOVED worktree {path}")
+    if not rows:
+        print(f"WORKTREES none (folder {root})")
+    if orphans:
+        print(f"NOTE {orphans} orphan worktree(s): fleet check {state['run']} --clean-worktrees removes them")
+    if clean:
+        save_run(repo, state["run"], state)
 
 
 def cmd_steer(a, cfg):
@@ -6354,6 +6958,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--review", choices=["off", "cross-heavy", "cross-all"])
     s.add_argument("--reason", help="with --review off when the config asks for review: the owner's words, saved "
                                     "with the run's decisions")
+    s.add_argument("--isolation", choices=["shared", "worktree"], default="shared",
+                   help="shared (default): every worker edits this checkout; worktree: each implement ticket's worker "
+                        "runs in its own Git worktree outside it, and accept applies its diff here (fleet merge)")
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("plan", help="persist a ticket graph and routing assignments")
@@ -6544,9 +7151,23 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--read-only", action="store_true", help="watch without being able to type into the worker")
     s.set_defaults(fn=cmd_attach)
 
-    s = sub.add_parser("check", help="compare HEAD and index with the captured baseline")
+    s = sub.add_parser("check", help="compare HEAD and index with the captured baseline; in a worktree run, also "
+                                     "list the run's worktrees and flag orphans")
     s.add_argument("run")
+    s.add_argument("--clean-worktrees", action="store_true",
+                   help="remove orphan worktrees: those of verified or dropped tickets, and unrecorded ones in the "
+                        "run's worktree folder")
     s.set_defaults(fn=cmd_check)
+
+    s = sub.add_parser("merge", help="apply a worktree ticket's diff to this checkout's working tree with plain git "
+                                     "apply (never the index); CONFLICT, applying nothing, when it does not apply "
+                                     "cleanly. fleet accept runs it")
+    s.add_argument("run")
+    s.add_argument("id")
+    s.add_argument("--resolved", metavar="WHAT_YOU_DID",
+                   help="after merging the ticket's files by hand, record the checkout's copies as its merge "
+                        "(saved in decisions)")
+    s.set_defaults(fn=cmd_merge)
 
     s = sub.add_parser("handoff", help="at a safe point, save a handoff entry to notes.md and print the owner's "
                                        "steps to compact the lead or start a fresh one")
