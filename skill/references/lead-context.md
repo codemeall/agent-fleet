@@ -28,7 +28,12 @@ You cannot compact yourself. Only the owner can, or the host when it auto-compac
 
 ## When a run closes
 
-No handoff is needed: nothing is running and the run is on disk. Your closing report ends with a **Next step** block (skill step 6): a one-line reset suggestion (a fresh lead by default) and a start prompt for the next run with placeholders for the owner's open decisions. Their decisions travel in that prompt, so nothing goes to `notes.md`.
+No handoff is needed: nothing is running and the run is on disk. Their decisions travel in the start prompt, so nothing goes to `notes.md`. Your closing report (skill step 6) ends with a **Next step** block the owner can paste, built from what you already know (no extra checks):
+
+1. Your reset suggestion, in one line next to your `fleet context` reading. Default to a fresh lead: nothing is running and the run is on disk, so `/clear` (Codex: `/new`; other hosts: a new session) loses nothing. Suggest compaction only when the next run depends on discussion that is not on disk and does not fit in the start prompt. When your reading is small, say continuing in this session is also fine. The owner decides.
+2. A start prompt for the next run: `/fleet` (Codex: `$fleet`; plugin install: `/agent-fleet:fleet`), the next run's name, routing, the tickets with their path, your proposed order, a `<placeholder>` for each decision the owner still owes, and one line of context pointing at the files this run left (run directory, decision records, uncommitted changes) plus any constraint the next run must respect.
+
+When no further run is proposed, the block holds only the reset suggestion and the owner's review/commit steps.
 
 ## After a compaction or a fresh start
 

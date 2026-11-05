@@ -28,6 +28,18 @@ If the allowed pool cannot provide a known different-family reviewer, tell the o
 
 The review sequence is in the skill's step 5. Review-only is a prompt contract in a shared checkout, not a security sandbox: inspect for unauthorized changes. Dependents remain blocked until the writer is verified.
 
+## Steering
+
+When a provider is failing, rate-limited or a poor fit mid-run, steer future implementation launches instead of rewriting the plan:
+
+- `fleet steer provider <run> <name>` moves future implementation launches to that provider, at the tier's model and effort (or the model pinned by `agents=`). It must be inside the run's routing.
+- `fleet steer model <run> <name>` then picks that provider's model; it must pass `models_allow`. It replaces every tier's model, light tickets included, so prefer steering the provider alone.
+- `fleet steer reset <run>` returns to the plan's routing.
+
+Keep passing the plan's provider and tier to `fleet launch`; it prints `steered (<tier>): …` and records what the worker actually ran. Open panes and reviews are never steered, so cross-family review checks the writer's actual family. `fleet resume` shows an active steer.
+
+A worker on a usage limit usually shows as `STALLED`; `fleet peek` confirms it. Stop it, then either relaunch after the reset with `--resume`, which continues the worker's own session (same provider, adapters with `resume` such as Claude), or steer within the run's routing and relaunch fresh with a Repair note (examples 6). A usage limit is not a permission denial: steering inside the run's routing needs no further approval. When neither is possible, tell the owner.
+
 ## Failures and plan changes
 
 Before any worker launches, record an unavailable adapter and any owner-authorized substitution in the plan's decisions and update assignments explicitly. After the first launch, follow the skill's rules for follow-up runs, repairs and recovery (steps 5 and 6).
