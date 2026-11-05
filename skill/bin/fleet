@@ -3304,13 +3304,14 @@ def cmd_grant(a, cfg):
     if not live:
         print(f"{a.id}: saved message {n} in {path}; no worker is running, so it reads it when relaunched")
         return
+    sent_at = time.time()  # before typing: a quick worker may hand back while the keys are still going in
     try:
         terminal(state).send(w, [inbox_pointer(n, path), "enter"])
     except (FleetError, OSError, subprocess.TimeoutExpired) as e:
         raise FleetError(f"{a.id}: the grant is saved and message {n} is in {path}, but typing the pointer failed "
                          f"({str(e).strip()[:200]}). The worker reads it when it next checks its inbox, so do not "
                          f"grant or send again; check the pane with fleet peek {a.run} {a.id}") from None
-    w["last_send"] = time.time()  # the worker owes a response now; wait may report it stalled
+    w["last_send"] = sent_at  # the worker owes a response now; wait may report it stalled
     save_run(repo, a.run, state)
     print(f"sent message {n} to {a.id} ({w['surface']}): {path}")
 
@@ -4295,13 +4296,14 @@ def deliver_pointer(repo: Path, state: dict, i: str, n: int, box: Path, done: st
         print(f"{i}: saved message {n} in {box}; {i} runs headless and reads no input once started, so only "
               f"its next launch reads it (fleet stop {run} {i}, then launch it again)")
         return
+    sent_at = time.time()  # before typing: a quick worker may hand back while the keys are still going in
     try:
         terminal(state).send(w, [inbox_pointer(n, box), "enter"])
     except (FleetError, OSError, subprocess.TimeoutExpired) as e:
         raise FleetError(f"{i}: {done}message {n} is saved in {box}, but typing the pointer failed "
                          f"({str(e).strip()[:200]}). The worker reads it when it next checks its inbox, so do not "
                          f"{again}; check the pane with fleet peek {run} {i}") from None
-    w["last_send"] = time.time()  # the worker owes a response now; wait may report it stalled
+    w["last_send"] = sent_at  # the worker owes a response now; wait may report it stalled
     save_run(repo, run, state)
     print(f"sent message {n} to {i} ({w['surface']}): {box}")
 
@@ -6200,11 +6202,12 @@ def send_gate_round(repo: Path, run: str, i: str, key: str, g: dict, cap: int, s
         except (FleetError, OSError) as e:
             return ("unsent", str(e).strip()[:200])
         (seen / i).write_text(report_key(f, f.read_text()))  # the park is not news, even to wait --any-change
+        sent_at = time.time()  # before typing: a quick worker may hand back while the keys are still going in
         try:
             terminal(state).send(w, [inbox_pointer(msg, path), "enter"])
         except (FleetError, OSError, subprocess.TimeoutExpired) as e:
             return ("untyped", n, msg, path, str(e).strip()[:200])
-        w["last_send"] = time.time()  # the worker owes a response now; wait may report it stalled
+        w["last_send"] = sent_at  # the worker owes a response now; wait may report it stalled
         save_run(repo, run, state)
         return ("sent", n)
 
@@ -7144,19 +7147,20 @@ def accept_problems(repo: Path, state: dict, a, review: dict | None, rid: str | 
     if review and (rid or t["review_required"]) and \
             digest(scoped_diff(repo, state, a.id).encode()) != review.get("diff_sha"):
         out.append(f"{review['id']} reviewed an earlier diff of {a.id}; run fleet review {a.run} {a.id} again")
-    out += handback_problems(repo, state, [rid, a.id])
+    out += handback_problems(repo, state, [rid, a.id], reviewer=rid)
     out += accept_flag_problems(a, t, rid, "reviewer")
     out += accept_unowned_problems(repo, state, a, [rid, a.id])
     return out + quality_problems(repo, state, a, a.id, items=bar)  # the strict bar, in the same refusal
 
 
-def handback_problems(repo: Path, state: dict, ids: list[str | None]) -> list[str]:
-    """Each of `ids` (None skipped) whose report does not say Status: needs-verification, which verify requires."""
+def handback_problems(repo: Path, state: dict, ids: list[str | None], reviewer: str | None = None) -> list[str]:
+    """Each of `ids` (None skipped) whose report does not say Status: needs-verification, which verify requires.
+    The `reviewer`'s report may also be parked at findings-sent: it is still the review."""
     reports, out = run_dir(repo, state["run"]) / "reports", []
     for wid in filter(None, ids):
         f = reports / f"{wid}.md"
         status = parse_status(f.read_text()) if f.exists() else None
-        if status not in (REVIEWED_STATUSES if wid == rid else ("needs-verification",)):
+        if status not in (REVIEWED_STATUSES if reviewer and wid == reviewer else ("needs-verification",)):
             said = f"Status: {status}" if status else "no status line" if f.exists() else "nothing (no report yet)"
             out.append(f"{wid}'s report says {said}; it must say Status: needs-verification")
     return out
@@ -7408,7 +7412,7 @@ def review_items(repo: Path, state: dict, i: str, accepted) -> list[tuple]:
             if t["review_required"] else []
     text = report_text(repo, state, rid)
     status = parse_status(text) if text is not None else None
-    if (status or "").lower() not in ("needs-verification", "verified"):
+    if (status or "").lower() not in (*REVIEWED_STATUSES, "verified"):  # findings-sent: still its review
         return [(f"{rid}'s report says {'Status: ' + status if status else 'nothing yet'}",
                  f"wait for {rid} to hand back with Status: needs-verification", True)]
     data, shape = parse_header(text)

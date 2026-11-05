@@ -276,6 +276,24 @@ class CodexWait(RuntimeCase):
         self.assertNotIn("IDLE", out)
         self.assertIn("TIMEOUT", self.wait(2))
 
+    def test_a_hand_back_made_while_the_answer_is_still_being_typed_wakes_no_idle(self):
+        """A quick worker hands back, and its turn ends, before fleet send has finished typing the pointer: the
+        message's time is taken before typing, so that hand-back answers it and no IDLE follows."""
+        self.setup_run()
+        self.launch()
+        self.end_turn("Which file?")
+        self.assertIn("IDLE 01", self.wait())
+
+        def quick_worker(*_):
+            self.report()
+            self.end_turn("Handed back.")
+
+        with patch.object(fleet, "send_keys", side_effect=quick_worker):
+            self.call("send", "demo", "01", "api.txt")
+        out = self.wait()
+        self.assertIn("REPORT 01 [needs-verification]", out)
+        self.assertNotIn("IDLE", out)
+
     def test_an_idle_line_keeps_the_same_screen_from_also_waking_as_stalled(self):
         self.setup_run()
         self.launch()
