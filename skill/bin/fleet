@@ -5440,6 +5440,12 @@ class Supervisor:
             self.note(i, f"{'not reviewed' if t['review_required'] else 'not ready'}: {why}")
             return True
         n = len(t["commands"])
+        review = latest_reviewer(state, i)
+        if not t["review_required"] and review and not review.get("verified") and \
+                reviewed_earlier(self.repo, state, i, review):
+            # A review the lead started anyway binds accept, which verifies that reviewer too and refuses one of an
+            # earlier diff: this hand-back is reviewed again rather than called READY.
+            return self.review(i, f, g, header_summary(self.repo, state, i, text)[0])
         if not t["review_required"]:
             self.lines[i] = [f"READY {i}: gate passed ({n}/{n}), no review required (review "
                              f"{state['options']['review']}, {t['tier']}){quality_note(self.repo, state, i)}; "
@@ -6501,6 +6507,15 @@ def latest_reviewer(state: dict, i: str) -> dict | None:
     """The reviewer of ticket `i` launched last: each new round replaces the previous one's verdict."""
     reviews = [w for w in state["workers"].values() if w.get("review_of") == i]
     return max(reviews, key=lambda w: w.get("launched_at", 0), default=None)
+
+
+def reviewed_earlier(repo: Path, state: dict, i: str, review: dict) -> bool:
+    """Whether reviewer record `review` read an earlier diff of ticket `i` than its current one; True when the
+    current diff cannot be read, so nothing is called reviewed on a diff Fleet could not see."""
+    try:
+        return digest(scoped_diff(repo, state, i).encode()) != review.get("diff_sha")
+    except (FleetError, OSError, KeyError, ValueError, subprocess.TimeoutExpired):
+        return True
 
 
 # ---------- review rounds ----------

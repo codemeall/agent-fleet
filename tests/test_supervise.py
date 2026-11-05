@@ -223,6 +223,32 @@ class Supervise(RuntimeCase):
         self.assertEqual(self.reviewers(), [])
         self.assertEqual(self.state()["workers"]["01"]["state"], "running")  # supervise stops nothing for it
 
+    def test_ready_and_accept_agree_on_a_review_the_lead_started_on_a_ticket_without_one(self):
+        """Final review, 4: a standard ticket under cross-heavy needs no review, but once the lead reviews it anyway
+        and sends the findings back, accept verifies that reviewer too and refuses one of an earlier diff. The
+        repaired hand-back is reviewed again, so READY comes only when accept would take it."""
+        medium = {"severity": "medium", "file": "owned.txt:1", "confidence": "confirmed"}
+        for acceptance in ("strict", "warn"):
+            with self.subTest(acceptance=acceptance):
+                self.reset()
+                self.reviewer_report = None
+                self.cfg["defaults"]["acceptance"] = acceptance
+                self.handed_back(tier="standard")
+                self.reviewer_report = {"findings": [medium], "prose": "## Findings\n- Medium: a line.\n"}
+                self.lead("review", "demo", "01", "--settle", "0")             # the lead's own choice
+                self.lead("send", "demo", "01", "--findings")                  # the writer relaunches
+                (self.repo / "owned.txt").write_text("repaired change\n")
+                self.write_report("01", files_changed=["owned.txt"], checks=[{"run": "true", "exit": 0}],
+                                  responses=[{"finding": "F1", "action": "fixed", "evidence": "the line is back"}])
+                self.assertIn("review-01 reviewed an earlier diff of 01", self.accept("--gate", expected=1))
+                self.reviewer_report = {}
+                out = self.supervise("--auto", "gate,review")
+                self.assertNotIn("no review required", out)
+                self.assertIn("REVIEWING 01: review-01 ", out)
+                [ready] = [x for x in out.splitlines() if x.startswith("READY 01: ")]
+                self.assertIn("review clean (anthropic, findings 0)", ready)
+                self.assertIn("01: verified", self.accept("--gate"))         # what READY said, accept does
+
     def test_a_header_problem_or_an_unmet_criterion_wakes_the_lead_without_a_review(self):
         for fields, why in (({"header": False}, "not reviewed: its report has no fleet header"),
                             ({"files_changed": ["owned.txt", "other.txt"]}, "not reviewed: header: other.txt "
