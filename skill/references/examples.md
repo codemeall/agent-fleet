@@ -22,7 +22,7 @@ Command sequences for the cases the skill describes in prose. Each uses the run 
 | --- | --- |
 | `/fleet -- .scratch/settings/issues` | `fleet init settings` (routing and review from the owner's config) |
 | `/fleet auto review=cross-all -- …` | `fleet init settings --routing auto --review cross-all` |
-| `/fleet single:codex review=off -- …` | `fleet init settings --routing single:codex --review off` |
+| `/fleet single:codex review=off -- …` | `fleet init settings --routing single:codex --review off --reason "owner: review=off"` |
 | `/fleet agents=codex,claude:sonnet -- …` | `fleet init settings --routing agents=codex,claude:sonnet` |
 | `/fleet workspace=workspace:3 -- …` | `fleet init settings --workspace workspace:3` |
 | "Resume the settings run" | `fleet resume settings` (init refuses an existing run) |

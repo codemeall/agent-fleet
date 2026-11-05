@@ -93,12 +93,12 @@ class ReviewAccept(RuntimeCase):
         self.assertIn("REVIEW review-01 second:pinned-model@high family=google", self.review())
 
     def test_review_refuses_with_each_candidates_reason_when_only_the_writers_family_is_left(self):
+        self.setup_run(review="cross-all")  # plan refuses an impossible review, so the pool shrinks after it
         self.cfg["providers"]["reviewer"]["family"] = "openai"
         for tier in self.cfg["providers"]["reviewer"]["tiers"].values():
             tier["family"] = "openai"
         self.add_provider("off", "google", enabled=False)
         self.cfg["defaults"]["prefer"] = ["off"]
-        self.setup_run(review="cross-all")
         self.handed_back()
         out = self.review(expected=1)
         self.assertIn("no provider can review 01 now; its writer ran writer:writer-model (family openai)", out)
