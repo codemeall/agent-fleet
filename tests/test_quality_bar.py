@@ -116,7 +116,7 @@ class QualityCase(RuntimeCase):
 WRITER_ITEMS = (
     ("no header", None, "01's report has no fleet header"),
     ("unreadable", "```fleet\n{not json\n```\n\n", "01's fleet header cannot be read (invalid JSON)"),
-    ("file out of scope", clean(files_changed=["owned.txt", "src/x.py"]), "01's header: src/x.py outside scope"),
+    ("file out of scope", clean(files_changed=["owned.txt", "src/x.py"]), "01's header: \"src/x.py\" outside scope"),
     ("planned command not reported", clean(checks=[]), "01's header: true not reported"),
     ("planned command without an exit", clean(checks=[{"run": "true", "exit": None}]),
      "01's header: true has no exit code"),
@@ -182,7 +182,7 @@ class Policy(QualityCase):
         out = self.accept(expected=1)
         self.assertIn('01: open question "Which copy wins?". Way out: answer it with fleet send demo 01 "<answer>", '
                       "and have it hand back without the question", out)
-        self.assertIn("01's header: src/x.py outside scope. Way out: fleet grant demo 01 <file> --reason \"<why>\" if "
+        self.assertIn("01's header: \"src/x.py\" outside scope. Way out: fleet grant demo 01 <file> --reason \"<why>\" if "
                       "it is the ticket's own work; else send it back with fleet send demo 01 --changes \"<what to "
                       "fix>\"", out)
 
@@ -383,7 +383,7 @@ class Warn(QualityCase):
         self.plan()
         state = self.state()
         del state["options"]["acceptance"], state["options"]["accept_checks"]  # as an earlier Fleet saved it
-        (self.repo / RUN / "run.json").write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
         self.launch()
         self.hand_back(header="")
         out = self.accept()

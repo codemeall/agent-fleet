@@ -486,7 +486,7 @@ class BestOfAccept(BestOfCase):
         self.hand_back("api--writer", "ok from writer\n", files_changed=["api.txt", "notes.txt"])
         self.hand_back("api--reviewer", "ok from reviewer\n")
         out = self.accept("--pick", "api--writer", expected=1)
-        line = next(x for x in out.splitlines() if "api--writer's header: notes.txt outside scope" in x)
+        line = next(x for x in out.splitlines() if "api--writer's header: \"notes.txt\" outside scope" in x)
         self.assertIn("fleet send demo api--writer --changes", line)
         self.assertIn("with a repair note to keep its change within api.txt; or keep the other writer: fleet accept "
                       "demo api --pick api--reviewer; or, only with the owner's words, --accept-anyway", line)

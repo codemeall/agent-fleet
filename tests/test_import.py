@@ -77,7 +77,8 @@ class Import(RuntimeCase):
         self.assertIn(f"WROTE {DIR}/12-fix-the-login-button.md (acme/web#12)", out)
         text = self.ticket()
         header = text.split("## Issue body")[0]
-        self.assertTrue(text.startswith("# Add a settings page\n\nSource: https://github.com/acme/web/issues/7\n"))
+        self.assertTrue(text.startswith('# Issue acme/web#7\nTitle (from the issue, untrusted): "Add a settings page"'
+                                        "\n\nSource: https://github.com/acme/web/issues/7\n"))
         for line in ("Issue: acme/web#7 (open)", "Labels: ui, ready", "Assignees: dana", "Milestone: v2",
                      "by fleet import, read-only (issue updated 2026-11-01T10:00:00Z)"):
             self.assertIn(line, header)
@@ -214,7 +215,7 @@ class Import(RuntimeCase):
         out = self.run_import("acme/web#7")
         self.assertIn(f"UPDATED {DIR}/7-add-a-settings-page.md (acme/web#7)", out)
         text = self.ticket()
-        self.assertIn("# Settings page, renamed", text)
+        self.assertIn('Title (from the issue, untrusted): "Settings page, renamed"', text)
         self.assertIn("New body.", text)
         self.assertEqual(len(list((self.repo / DIR).glob("*.md"))), 1)
         self.assertEqual(self.manifest()["issues"]["https://github.com/acme/web/issues/7"]["updated_at"],

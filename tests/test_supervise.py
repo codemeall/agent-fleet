@@ -204,7 +204,7 @@ class Supervise(RuntimeCase):
 
     def test_a_header_problem_or_an_unmet_criterion_wakes_the_lead_without_a_review(self):
         for fields, why in (({"header": False}, "not reviewed: its report has no fleet header"),
-                            ({"files_changed": ["owned.txt", "other.txt"]}, "not reviewed: header: other.txt "
+                            ({"files_changed": ["owned.txt", "other.txt"]}, 'not reviewed: header: "other.txt" '
                                                                             "outside scope"),
                             ({"criteria": [{"id": 1, "met": False, "where": "-"}]}, "not reviewed: 1 criteria unmet"),
                             ({"questions": ["Should get() cache?"]}, "not reviewed: 1 open question(s)")):
@@ -242,10 +242,9 @@ class Supervise(RuntimeCase):
 
     def test_review_rounds_used_up_wake_the_lead_with_the_escalation(self):
         self.handed_back()
-        run = self.run_file("run.json")
         state = self.state()
         state["tickets"]["01"]["review_rounds"] = 2                          # both rounds used already
-        run.write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
         out = self.supervise("--auto", "gate,review")
         self.assertIn("REPORT 01 [needs-verification]", out)
         self.assertIn("REVIEW-REFUSED 01: fleet review refused: 01 has used 2 of 2 review rounds", out)

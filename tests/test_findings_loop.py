@@ -242,10 +242,9 @@ class Loop(RuntimeCase):
 
     def test_send_findings_counts_as_a_repair_against_the_review_rounds(self):
         self.reviewed()
-        run = self.run_file("run.json")
         state = self.state()
         state["tickets"]["01"]["review_rounds"] = 2                           # both rounds used already
-        run.write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
         out = self.call("send", "demo", "01", "--findings", expected=1)
         self.assertIn("01 has used 2 of 2 review rounds, so Fleet refuses another repair. Nothing was changed.", out)
         self.assertIn("ESCALATE 01: 2 of 2 review rounds used", out)
@@ -499,7 +498,7 @@ class Loop(RuntimeCase):
     def gate_rounds_used(self, n):
         state = self.state()
         state["tickets"]["01"]["gate_rounds_used"] = n
-        self.run_file("run.json").write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
 
     def test_findings_sent_bind_only_writer_launches_before_the_next_review_round(self):
         self.reviewed()
