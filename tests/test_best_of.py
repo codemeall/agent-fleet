@@ -189,7 +189,10 @@ class BestOfLaunch(BestOfCase):
         out = self.call("diff", "demo", "api--writer")
         self.assertIn("diff --fleet api.txt", out)
         self.assertIn("+ok", out)
-        self.assertIn("stray.txt", self.call("diff", "demo", "api--reviewer", expected=1))
+        out = self.call("diff", "demo", "api--reviewer", expected=1)
+        self.assertIn("stray.txt", out)
+        self.assertIn("Fleet grant cannot add them: grant refuses a best-of-two ticket once its writers have launched",
+                      out)  # final review, 8: never a way out that refuses
         self.assertFalse((self.repo / "api.txt").exists())  # nothing reached the checkout
 
 

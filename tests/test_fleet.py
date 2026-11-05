@@ -745,6 +745,21 @@ class AllowList(unittest.TestCase):
         fleet.check_allowed({}, "codex", "anything")
         self.assertEqual(fleet.model_family(p, "heavy", "kimi"), "moonshot")
 
+    def test_an_explicit_family_names_one_only_where_the_config_knows_none(self):
+        """Final review, 5: an explicit family that contradicts the config is refused, never taken over it."""
+        p = {"family": "openai", "tiers": {"review": {"model": "m", "family": "openai"}}}
+        self.assertEqual(fleet.model_family(p, "review", "m", "openai"), "openai")
+        with self.assertRaisesRegex(fleet.FleetError, "family anthropic contradicts the config, which puts m in family "
+                                                      "openai"):
+            fleet.model_family(p, "review", "m", "anthropic")
+        with self.assertRaises(fleet.FleetError):  # a single-family adapter knows every model's family
+            fleet.model_family({"family": "openai"}, "heavy", "other", "anthropic")
+        mixed = {"family": "mixed", "model_families": {"k": "moonshot"}}
+        self.assertEqual(fleet.model_family(mixed, "heavy", "auto", "google"), "google")
+        self.assertIsNone(fleet.model_family(mixed, "heavy", "auto"))
+        with self.assertRaises(fleet.FleetError):
+            fleet.model_family(mixed, "heavy", "k", "google")
+
     def test_family_prefixes_label_every_listed_model_longest_match_first(self):
         p = {"family": "mixed", "family_prefixes": {"meta/": "meta", "meta/x-": "other", "grok-": "xai"},
              "model_families": {"grok-odd": "fork"}}

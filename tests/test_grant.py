@@ -158,6 +158,22 @@ class Grant(RuntimeCase):
         self.assertNotIn("+03's change", diff)
         self.assertIn("+01's addition", diff)
 
+    def test_an_edit_after_the_other_ticket_was_verified_stays_in_this_tickets_diff(self):
+        """Final review, 1: 03 owned the file only until it was verified, so 01's edit after that is not 03's, and a
+        grant must not take it as the baseline."""
+        self.two_live_slots()
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"]}, {"id": "03", "files": ["third.txt"]}])
+        self.launch("01")
+        self.launch("03")
+        (self.repo / "third.txt").write_text("03's change\n")
+        self.hand_back("03")
+        self.verify("03")
+        (self.repo / "third.txt").write_text("03's change\n01's edit after 03 was verified\n")
+        out = self.grant("01", "third.txt")
+        self.assertNotIn("03 owned it while 01 ran", out)
+        self.hand_back("01")
+        self.assertIn("+01's edit after 03 was verified", self.call("diff", "demo", "01"))
+
     # ---------- review ----------
 
     def test_a_review_captured_before_the_grant_goes_stale(self):

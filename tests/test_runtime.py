@@ -1500,6 +1500,59 @@ class Runtime(RuntimeCase):
         self.hand_back("02")
         self.assertIn("owned.txt (changed)", self.verify("02", expected=1))
 
+    def test_an_overlapping_window_never_covers_an_edit_after_the_other_ticket_was_verified(self):
+        """Final review, 1(A): 01 and 02 ran together, 02 was verified, then 01 edited 02's file."""
+        self.cfg["defaults"]["max_parallel"] = 2
+        self.cfg["providers"]["writer"]["max"] = 2
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"]}, {"id": "02", "files": ["next.txt"]}])
+        self.launch("01")
+        self.launch("02")
+        (self.repo / "next.txt").write_text("02's change\n")
+        self.hand_back("02")
+        self.verify("02")
+        (self.repo / "next.txt").write_text("02's change\n01's stray edit into the verified file\n")
+        (self.repo / "owned.txt").write_text("01's change\n")
+        self.hand_back("01")
+        self.assertIn("next.txt (created)", self.verify("01", expected=1))  # absent when 01 launched
+        self.assertIn("next.txt (created)", self.call("check", "demo"))
+        self.assertEqual(self.state()["tickets"]["01"]["status"], "pending")
+
+    def test_an_overlapping_window_never_covers_an_edit_made_before_the_other_ticket_launched(self):
+        """Final review, 1(B): 01 edited 02's file before 02 launched, so 02's launch snapshot holds the edit."""
+        self.cfg["defaults"]["max_parallel"] = 2
+        self.cfg["providers"]["writer"]["max"] = 2
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"]}, {"id": "02", "files": ["next.txt"]}])
+        self.launch("01")
+        (self.repo / "next.txt").write_text("01's stray edit\n")
+        self.launch("02")
+        (self.repo / "owned.txt").write_text("01's change\n")
+        self.hand_back("01")
+        self.assertIn("next.txt (created)", self.verify("01", expected=1))
+        (self.repo / "next.txt").write_text("01's stray edit\n02's change\n")
+        self.hand_back("02")
+        self.verify("02")  # 02's diff starts at its launch: the stray edit is not its own work, nor in its diff
+        self.assertIn("next.txt (created)", self.call("check", "demo"))
+
+    def test_a_file_owned_by_one_ticket_then_its_dependent_is_never_blamed_on_a_third(self):
+        """A file passed from a verified ticket to one that waits on it stays owned across the hand-over."""
+        self.cfg["defaults"]["max_parallel"] = 2
+        self.cfg["providers"]["writer"]["max"] = 2
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"]}, {"id": "02", "files": ["next.txt"]},
+                                {"id": "03", "files": ["next.txt"], "blockers": ["02"]}])
+        self.launch("01")
+        self.launch("02")
+        (self.repo / "next.txt").write_text("02's change\n")
+        self.hand_back("02")
+        self.verify("02")
+        self.launch("03")
+        (self.repo / "next.txt").write_text("02's change\n03's change\n")
+        (self.repo / "owned.txt").write_text("01's change\n")
+        self.hand_back("01")
+        self.verify("01")
+        self.hand_back("03")
+        self.verify("03")
+        self.assertNotIn("NOTE changed since the run started", self.call("check", "demo"))
+
     def test_unowned_ok_records_the_owners_reason_for_that_exact_content(self):
         self.commit_other()
         self.setup_run()
