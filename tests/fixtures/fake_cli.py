@@ -14,6 +14,11 @@ Claude's `--settings <file>` must name a file that parses to a settings object; 
 Claude Code would: PreToolUse (Write) before each file it writes, refusing to write when a hook exits 2, and Stop
 after its report. An expectation with "settings": true also requires the flag.
 
+A warm worker (`fleet launch --after`) gets Fleet's continuation line instead of the worker line; the fake accepts it
+only when the expectation's "warm_after" names that earlier ticket, the line names this ticket's own prompt, inbox
+and report, and the session is resumed (--resume), and it refuses a warm line nobody expected. A --resume of a
+session listed in "unknown_sessions" prints Claude's "No conversation found" line and exits 1, as a lost session does.
+
 For tests/test_smoke.py: $FAKE_CLI_EXPECT may hold one expectation per CLI under "by_cli"; a writer whose prompt
 carries a `fleet smoke` check (`grep -qx '<line>' smoke/<name>.txt`) writes that file first; and a CLI named in
 $FAKE_CLI_STALL (comma-separated) never writes its report, like a CLI stuck at a login or trust prompt.
@@ -210,20 +215,32 @@ def check(cli: str, flags: dict, positional: list[str], want: dict) -> str:
     return one(flags, place)
 
 
-def prompt_file(prompt: str) -> tuple[str, Path, bool]:
-    """The ticket ID, its Fleet prompt file and whether this is a resume, from the launch prompt argument."""
+def prompt_file(prompt: str) -> tuple[str, Path, bool, str | None]:
+    """The ticket ID, its Fleet prompt file, whether this is a resume, and the earlier ticket a warm worker
+    continues after (launch --after), from the launch prompt argument."""
     m = re.fullmatch(r"Read (\S+) and follow it exactly\. You are fleet worker (\S+)\. .*", prompt, re.S)
     resumed = re.fullmatch(r"Continue as fleet worker (\S+) from where you stopped;.* Check the end of (\S+) for .*",
                            prompt, re.S)
+    warm = re.fullmatch(r"Fleet ticket (\S+) is closed: it was verified, so leave its work as it is\. You are now "
+                        r"fleet worker (\S+)\. Read (\S+) and follow it exactly: its rules and files replace \1's, and "
+                        r"you may edit only the files it names\. Read (\S+) if it exists: it holds the lead's "
+                        r"messages\. Write your report to (\S+)\.", prompt, re.S)
+    after = None
     if m:
         path, ticket, resume = Path(m.group(1)), m.group(2), False
     elif resumed:
         path, ticket, resume = Path(resumed.group(2)), resumed.group(1), True
+    elif warm:
+        after, ticket, path, resume = warm.group(1), warm.group(2), Path(warm.group(3)), False
+        inbox, report = Path(warm.group(4)), Path(warm.group(5))
+        if (inbox.parent.name, inbox.name) != ("inbox", f"{ticket}.md") or \
+                (report.parent.name, report.name) != ("reports", f"{ticket}.md"):
+            raise Refused(f"warm line names another ticket's inbox or report: {prompt!r}")
     else:
         raise Refused(f"no Fleet prompt file in the prompt argument: {prompt!r}")
     if not path.is_file() or path.parent.name != "prompts" or path.stem != ticket:
         raise Refused(f"prompt file {path} is missing or is not worker {ticket}'s")
-    return ticket, path, resume
+    return ticket, path, resume, after
 
 
 def smoke_edit(ticket: str, text: str) -> None:
@@ -245,7 +262,11 @@ def main() -> int:
             raise Refused(f"no grammar for {cli}")
         flags, positional = parse(cli, argv)
         prompt = check(cli, flags, positional, want)
-        ticket, path, resume = prompt_file(prompt)
+        ticket, path, resume, after = prompt_file(prompt)
+        if after != want.get("warm_after"):  # a warm line only where the test expects one, after the right ticket
+            raise Refused(f"warm line after {after!r}, expected {want.get('warm_after')!r}")
+        if after and "--resume" not in flags:
+            raise Refused("a warm line without --resume would start a new session")
         account = GRAMMAR[cli].get("account")
         if account and os.environ.get(account) != want.get("account_dir"):
             raise Refused(f"{account}={os.environ.get(account)!r}, expected {want.get('account_dir')!r}")
@@ -259,13 +280,19 @@ def main() -> int:
     found = re.search(r"`([^`\s]+/reports/" + re.escape(ticket) + r"\.md)`", text)
     report = Path(found.group(1)) if found else path.parent.parent / "reports" / f"{ticket}.md"
     with (log / f"{cli}.jsonl").open("a") as fh:
-        fh.write(json.dumps({"argv": argv, "ticket": ticket, "resume": resume, "id": uuid.uuid4().hex}) + "\n")
+        fh.write(json.dumps({"argv": argv, "ticket": ticket, "resume": resume, "warm_after": after,
+                             "id": uuid.uuid4().hex}) + "\n")
+    lost = flags.get("--resume", [None])[0]
+    if lost and lost in want.get("unknown_sessions", []):  # a session the CLI no longer has: it exits at once
+        print(f"No conversation found with session ID: {lost}", flush=True)
+        return 1
     if cli in os.environ.get("FAKE_CLI_STALL", "").split(","):
         print(f"fake {cli} is waiting at a sign-in prompt", flush=True)
     else:
         smoke_edit(ticket, text)
+        how = " (resumed)" if resume else f" (warm, after {after})" if after else ""
         if not fake_write(report, f"# Report {ticket}\n\nStatus: needs-verification\n\n## Work or review performed\n"
-                                  f"- Smoke run of the {cli} launch line{' (resumed)' if resume else ''}; no files changed.\n"):
+                                  f"- Smoke run of the {cli} launch line{how}; no files changed.\n"):
             print(f"FAKE {cli}: a PreToolUse hook refused my own report", flush=True)
         run_hooks("Stop", {"session_id": "fake", "hook_event_name": "Stop", "stop_hook_active": False,
                            "last_assistant_message": f"Report written for {ticket}.", "background_tasks": [],

@@ -60,6 +60,11 @@ review = "cross-heavy"
 # so keep it short. A run keeps the values it was started with.
 # worktree_root = "~/.cache/agent-fleet/worktrees"
 # worktree_setup = "npm ci --prefer-offline"
+# Warm workers (fleet launch --after, a plan's "after"): warm_max caps the tickets one CLI session takes in a row,
+# the first included; past it the next ticket starts fresh. Launch warns when the earlier session's context is above
+# warm_context_tokens, and launches anyway. A run keeps the values it was started with.
+# warm_max = 4
+# warm_context_tokens = 150000
 # Set only when you intentionally target a validated cmux workspace:
 # workspace = "workspace:3"
 

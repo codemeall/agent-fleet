@@ -36,6 +36,7 @@ why-slow  → investigate · claude · standard · checks: pytest -q tests/test_
 
 - `implement` (the default) owns exact files, like any ticket.
 - `investigate` owns no files: research, investigation, debugging. It writes only its report, runs only read-only commands and the checks you list, and never fixes what it finds. It is never cross-family reviewed; you verify its report.
+- `fanout` on an `investigate` task asks one investigator per model family the same question, for a heavy or uncertain one only, since it multiplies cost ([fan-out](commands.md#fan-out)).
 
 ## 3. Add and launch
 
@@ -54,6 +55,7 @@ fleet launch desk-20261007 --ready
 ```
 
 - `task` is inline text; Fleet writes it to `.fleet/runs/<run>/tasks/<id>.md`. Give `context` and `checks` so the prompt is complete and `--ready` can write it. `checks` needs at least one `{"run": …}` command or `{"manual": "<one-line reason>"}` check, or `add` refuses the ticket ([plan](commands.md#plan)).
+- A GitHub issue comes in as a local file first, because a URL is not a `ticket` input: `fleet import owner/repo#N --dir .scratch/<feature>/issues` writes `<N>-<slug>.md`, to give as `ticket` with the file name as its `id` ([import](commands.md#import)).
 - `add` appends and never changes saved tickets. A new ticket touching files of an unverified ticket must list it in `blockers`.
 - `--ready` prints `LAUNCHED` or `SKIPPED <id>: <reason>` per ticket and no worker screens; `fleet wait` reports a worker stuck at a prompt as `STALLED`.
 
