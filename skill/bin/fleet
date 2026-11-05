@@ -1844,12 +1844,16 @@ def cmd_grant(a, cfg):
 
 def report_summary(text: str) -> list[str]:
     """A report's lines above its appendix (and the lead's verification note), without the title and Status
-    lines: what the lead itself reads, so it is what a dependent needs."""
-    out = []
-    for n, line in enumerate(text.splitlines()):
+    lines: what the lead itself reads, so it is what a dependent needs. The `fleet` header is left out: it is
+    machine data the prose repeats."""
+    out, lines = [], text.splitlines()
+    start, end = header_span(lines) or (-1, -1)
+    if end == len(lines):  # never closed: keep the prose a broken fence would swallow
+        start, end = -1, -1
+    for n, line in enumerate(lines):
         if line.strip().lower() in ("## appendix", "## lead verification"):
             break
-        if (n == 0 and line.startswith("# ")) or STATUS_RE.match(line):
+        if (n == 0 and line.startswith("# ")) or STATUS_RE.match(line) or start <= n <= end:
             continue
         out.append(line.rstrip())
     while out and not out[0].strip():
@@ -2773,6 +2777,146 @@ def report_extent(text: str) -> str:
     return ""
 
 
+# ---------- report header ----------
+# A report opens with a `fleet` block of JSON facts (files, checks, criteria, findings, questions) that Fleet checks
+# against the run, so the lead reads the prose only when the summary shows something off. The block never carries
+# status and never decides anything: a report without one wakes and reads as before.
+
+HEADER_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})\s*fleet\s*$")
+CHECKBOX_RE = re.compile(r"^\s*[-*]\s+\[[ xX]\]\s")
+SEVERITIES = ("high", "medium", "low")
+HEADER_SHAPES = {
+    "files_changed": ("a path", lambda x: isinstance(x, str) and x.strip()),
+    "checks": ('{"run": text, "exit": integer or null}',
+               lambda x: isinstance(x, dict) and isinstance(x.get("run"), str) and x["run"].strip()
+               and (x.get("exit") is None or type(x["exit"]) is int)),
+    "criteria": ('{"id", "met": true or false, "where"}', lambda x: isinstance(x, dict) and isinstance(x.get("met"), bool)),
+    "findings": ('{"severity": high, medium or low, "file", "confidence": confirmed or suspected}',
+                 lambda x: isinstance(x, dict) and str(x.get("severity", "")).lower() in SEVERITIES
+                 and str(x.get("confidence", "")).lower() in ("confirmed", "suspected")),
+    "questions": ("text", lambda x: isinstance(x, str)),
+}
+
+
+def header_span(lines: list[str]) -> tuple[int, int] | None:
+    """Line indexes of the first `fleet` block's opening and closing fences; the end is len(lines) when the block
+    is never closed."""
+    for n, line in enumerate(lines):
+        m = HEADER_FENCE_RE.match(line)
+        if m:
+            fence = m.group(1)
+            for end in range(n + 1, len(lines)):
+                close = lines[end].strip()
+                if close.startswith(fence) and not close.strip(fence[0]):
+                    return n, end
+            return n, len(lines)
+    return None
+
+
+def parse_header(text: str) -> tuple[dict | None, list[str]]:
+    """The report's header and what is wrong with its shape, as phrases for header_text; ["header missing"]
+    when the report has no `fleet` block."""
+    lines = text.splitlines()
+    span = header_span(lines)
+    if span is None:
+        return None, ["header missing"]
+    start, end = span
+    if end == len(lines):
+        return None, ["fleet block not closed"]
+    try:
+        data = json.loads("\n".join(lines[start + 1:end]))
+    except ValueError:
+        return None, ["invalid JSON"]
+    if not isinstance(data, dict):
+        return None, ["not a JSON object"]
+    problems = []
+    for key, (shape, ok) in HEADER_SHAPES.items():
+        if key not in data:
+            problems.append(f"{key} missing")
+        elif not isinstance(data[key], list):
+            problems.append(f"{key} must be a list")
+        else:
+            problems += [f"{key} item {n} is not {shape}" for n, x in enumerate(data[key], 1) if not ok(x)]
+    return data, problems
+
+
+def ticket_checkboxes(t: dict) -> int:
+    try:
+        return sum(1 for line in Path(t["ticket"]).read_text().splitlines() if CHECKBOX_RE.match(line))
+    except (KeyError, OSError, UnicodeDecodeError):
+        return 0
+
+
+def header_file_problems(repo: Path, t: dict, review: bool, files_changed: list[str]) -> list[str]:
+    """An implement ticket's files must sit in its scope; a reviewer or an investigator changes none."""
+    files = []
+    for p in files_changed:
+        path = Path(p.strip())
+        if path.is_absolute() and path.is_relative_to(repo):
+            path = path.relative_to(repo)
+        files.append(path.as_posix())
+    if t.get("kind", "implement") == "implement" and not review:
+        return [f"{p} outside scope" for p in files if p not in t["files"]]
+    if files:
+        return [f"files_changed lists {len(files)}; {'a review' if review else 'an investigation'} changes none"]
+    return []
+
+
+def header_check_problems(t: dict, review: bool, data: dict) -> list[str]:
+    """Planned commands the header leaves out or gives no exit code, and a criteria count unlike the source
+    ticket's checkboxes. A reviewer reads; the planned commands are the writer's to run."""
+    problems = []
+    if not review:
+        exits = {c["run"].strip(): c.get("exit") for c in data["checks"]}
+        for c in t.get("commands", []):
+            if c["run"] not in exits:
+                problems.append(f"{c['run']} not reported")
+            elif type(exits[c["run"]]) is not int:
+                problems.append(f"{c['run']} has no exit code")
+    boxes = ticket_checkboxes(t)
+    if boxes and len(data["criteria"]) != boxes:
+        problems.append(f"{len(data['criteria'])} criteria for the ticket's {boxes} checkboxes")
+    return problems
+
+
+def header_text(problems: list[str]) -> str:
+    """Problems as one phrase: `header: a; b`."""
+    if problems == ["header missing"]:
+        return problems[0]
+    return "header: " + "; ".join(problems)
+
+
+def header_summary(repo: Path, state: dict, wid: str, text: str) -> tuple[str | None, list[str]]:
+    """A report header as one line for the REPORT wake, plus its problems for verify and accept to warn about.
+    The line is None for a report without a header, so it wakes exactly as before."""
+    data, problems = parse_header(text)
+    if data is None or problems:
+        return (None if problems == ["header missing"] else header_text(problems)), problems
+    meta = state["workers"].get(wid) or state["prompts"].get(wid) or {}
+    t, review = state["tickets"].get(meta.get("review_of") or wid), meta.get("role") == "review"
+    files = header_file_problems(repo, t, review, data["files_changed"]) if t else []
+    problems = files + (header_check_problems(t, review, data) if t else [])
+    criteria, checks, findings = data["criteria"], data["checks"], data["findings"]
+    severity = [str(f["severity"]).lower() for f in findings]
+    by_severity = ", ".join(f"{severity.count(s)} {s}" for s in SEVERITIES if s in severity)
+    parts = [f"criteria {sum(c['met'] for c in criteria)}/{len(criteria)}",
+             f"checks {sum(c.get('exit') == 0 for c in checks)}/{len(checks)} exit 0" if checks else "checks none",
+             f"findings {len(findings)}" + (f" ({by_severity})" if findings else ""),
+             f"questions {sum(1 for q in data['questions'] if q.strip())}"]
+    if not files:
+        parts.append("files in scope" if data["files_changed"] else "files none")
+    if problems:
+        parts.append(header_text(problems))
+    return ", ".join(parts), problems
+
+
+def warn_header(repo: Path, state: dict, wid: str, text: str) -> None:
+    """verify and accept name a header's problems but never refuse on them: the lead's evidence decides."""
+    _, problems = header_summary(repo, state, wid, text)
+    if problems:
+        print(f"WARNING {wid} {header_text(problems)} (not a refusal; check the report's prose)", file=sys.stderr)
+
+
 def pending_reports(reports: Path) -> list[tuple[str, str]]:
     return [(f.stem, st) for f in sorted(reports.glob("*.md"))
             if (st := (parse_status(f.read_text()) or "").lower()) in WAKE_STATUSES]
@@ -2886,7 +3030,9 @@ def wait_loop(a, repo: Path, d: Path, seen: Path, statuses, deadline: float) -> 
                 events += scan_workers(repo, load_run(repo, a.run), seen, a.stall)
             fresh = list({i: (i, status, f) for i, status, f in fresh}.values())  # a rewritten report: latest status
             for i, status, f in fresh:
-                print(f"REPORT {i} [{status}] {f}{report_extent(f.read_text())}")
+                text = f.read_text()
+                line, _ = header_summary(repo, state, i, text)
+                print(f"REPORT {i} [{status}] {line + ' ' if line else ''}{f}{report_extent(text)}")
             for line in events + scope_lines(repo, state, seen):
                 print(line)
             return 0
@@ -3315,6 +3461,7 @@ def cmd_verify(a, cfg):
     w["verified_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     w["verification_evidence"] = evidence
     text = report.read_text()
+    warn_header(repo, state, a.id, text)
     lines = text.splitlines()
     for n, line in enumerate(lines):
         if STATUS_RE.match(line):
