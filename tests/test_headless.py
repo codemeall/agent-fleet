@@ -144,6 +144,16 @@ class ShippedHeadlessLines(unittest.TestCase):
         self.assertIn("boom", none)
 
 
+    def test_headless_timeout_minutes_must_be_a_whole_number_in_range(self):
+        for bad in ("0", "241", "true", '"30"'):
+            with self.subTest(value=bad):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "config.toml"
+                    path.write_text(f"[defaults]\nheadless_timeout_minutes = {bad}\n")
+                    with self.assertRaisesRegex(fleet.FleetError, "headless_timeout_minutes"):
+                        fleet.load_config(path)
+
+
 class HeadlessRuntime(RuntimeCase):
     """Command-level: fake cmux records the window's command, and the test runs it the way the pane would."""
 
@@ -395,6 +405,19 @@ class HeadlessRuntime(RuntimeCase):
         self.assertIn("runs headless and reads no input once started", out)
         self.assertIn("look again", (self.repo / ".fleet/runs/demo/inbox/review-01.md").read_text())
         self.assertFalse([c for c in self.cmux_calls if c[0] in ("send", "send-key")])
+
+
+    def test_a_headless_run_past_its_time_limit_is_stopped_with_a_blocked_report(self):
+        work = Path(self.temp.name)
+        receipt, report, usage = work / "exit.json", work / "r1.md", work / "usage" / "r1.tok.json"
+        started = time.monotonic()
+        code = fleet.headless_child([str(receipt), "tok", str(report), str(usage), "sleep 30", "1"])
+        self.assertLess(time.monotonic() - started, 15)                  # stopped, not waited out
+        text = report.read_text()
+        self.assertEqual(fleet.parse_status(text), "blocked")
+        self.assertIn("had not finished after 0 minutes (headless_timeout_minutes)", text)
+        self.assertEqual(json.loads(receipt.read_text())["token"], "tok")
+        self.assertNotEqual(code, 0)
 
 
 @unittest.skipUnless(HAS_TMUX, "tmux is not installed")

@@ -131,7 +131,7 @@ Doctor prints, for each enabled adapter, the binary it found, each profile's lev
 
 ## Headless reviewers
 
-A TUI reviewer or investigator is read-only only by its prompt, writes its own report and can stall at a permission prompt. With `review_transport = "headless"` (under `[defaults]` for every adapter that has a `headless` line, or under one adapter; default `"tui"`), reviewers and investigate tickets on that adapter run its `headless` line instead: one non-interactive CLI call whose own flags deny every write and every prompt. Implementation workers always run in a TUI.
+A TUI reviewer or investigator is read-only only by its prompt, writes its own report and can stall at a permission prompt. With `review_transport = "headless"` (under `[defaults]` for every adapter that has a `headless` line, or under one adapter; default `"tui"`), reviewers and investigate tickets on that adapter run its `headless` line instead: one non-interactive CLI call whose own flags deny every write and every prompt. Implementation workers always run in a TUI. A headless run that has not finished after `headless_timeout_minutes` (under `[defaults]`, 1 to 240, default 30) is stopped, and Fleet writes a `Status: blocked` report saying so, so a hung CLI still wakes the lead.
 
 | Adapter | Headless line (beyond model and effort) | What makes it read-only |
 | --- | --- | --- |
@@ -305,7 +305,7 @@ For every new adapter, test a harmless local ticket, multiple waves, a required 
 | Section | Keys |
 | --- | --- |
 | Top level | `defaults`, `providers`, `lead_context` |
-| `[defaults]` | `workspace`, `routing`, `prefer`, `max_parallel`, `review`, `review_rounds`, `gate`, `gate_rounds`, `auto_trust`, `backend`, `tmux_socket`, `max_workers`, `max_wall_minutes`, `scope_ignore`, `permission_ceiling`, `check_policy`, `scope_permissions`, `review_transport` |
+| `[defaults]` | `workspace`, `routing`, `prefer`, `max_parallel`, `review`, `review_rounds`, `gate`, `gate_rounds`, `auto_trust`, `backend`, `tmux_socket`, `max_workers`, `max_wall_minutes`, `scope_ignore`, `permission_ceiling`, `check_policy`, `scope_permissions`, `review_transport`, `headless_timeout_minutes` |
 | `[providers.<name>]` | `enabled`, `placeholder`, `extends`, `bin`, `bin_aliases`, `launch`, `profiles`, `session`, `resume`, `quit`, `login`, `login_ok`, `account_env`, `env`, `trust`, `models`, `model_config`, `default_home`, `model_note`, `models_allow`, `model_families`, `family_prefixes`, `efforts`, `family`, `plugins`, `max`, `tiers`, `hooks`, `headless`, `review_transport` |
 | `[providers.<name>.tiers.<tier>]` | `model`, `effort`, `family` (any tier name) |
 | `[providers.<name>.profiles.<role>]` | `args`, `level`; the roles are `worker` and `review` |

@@ -24,6 +24,11 @@ review = "cross-heavy"
 # scope_permissions on, Claude workers also auto-accept edits (acceptEdits: the guard keeps them in scope) and run
 # their ticket's planned check commands without asking; nothing else is allowed. Off by default; only you turn it on.
 # scope_permissions = true
+# Reviewers and investigators on Claude or Codex can run headless and read-only by the CLI's own flags: their
+# final message becomes the report, they never stall at a prompt, and their token use goes to `fleet cost`.
+# review_transport = "headless"
+# A headless run not finished after this many minutes (1 to 240) is stopped with a blocked report.
+# headless_timeout_minutes = 30
 # Where workers run: "cmux" (visible panes beside the lead, macOS), "tmux" (headless windows in a detached
 # session; watch them with `fleet agents`) or "auto" (the default: cmux inside cmux, else tmux).
 # backend = "tmux"

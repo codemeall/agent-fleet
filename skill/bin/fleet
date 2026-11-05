@@ -28,7 +28,7 @@ import time
 import tomllib
 from pathlib import Path
 
-VERSION = "0.1.0-preview.25"  # bump with package.json on release; tests/test_install.py checks they match
+VERSION = "0.1.0-preview.26"  # bump with package.json on release; tests/test_install.py checks they match
 SKILL_DIR = Path(__file__).resolve().parent.parent
 USER_CONFIG = Path(os.environ.get("FLEET_CONFIG", "~/.config/agent-fleet/config.toml")).expanduser()
 HARNESS_SKILL_DIRS = {
@@ -69,6 +69,7 @@ DEFAULTS = {
     "permission_ceiling": "workspace-write",  # the widest profile level launch will start; the owner's to raise
     "check_policy": "refuse",  # plan and add refuse a ticket without a runnable or manual check; "warn" saves it
     "review_transport": "tui",  # reviewers and investigators: TUI panes, or "headless" where an adapter has the line
+    "headless_timeout_minutes": 30,  # a headless run that has not finished by then is stopped with a blocked report
     # The owner's opt-in, for adapters with hooks: workers auto-accept edits (the guard keeps them in scope) and run
     # their ticket's planned check commands without asking. Off: workers keep the account's own permission mode.
     "scope_permissions": False,
@@ -203,6 +204,9 @@ def load_config(user_path: Path | None = None) -> dict:
         raise FleetError("defaults.max_parallel must be a positive integer")
     if cfg["defaults"]["review"] not in ("off", "cross-heavy", "cross-all"):
         raise FleetError("invalid defaults.review")
+    timeout = cfg["defaults"]["headless_timeout_minutes"]
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 240:
+        raise FleetError("defaults.headless_timeout_minutes must be a whole number from 1 to 240")
     for key in ("review_rounds", "gate_rounds"):
         rounds = cfg["defaults"][key]
         if isinstance(rounds, bool) or not isinstance(rounds, int) or not 1 <= rounds <= 5:
@@ -1715,9 +1719,10 @@ def write_text_atomic(path: Path, text: str) -> None:
 def headless_child(args: list[str]) -> int:
     """`fleet _headless`: runs inside the worker terminal. Writes the report, the usage sidecar and the exit receipt,
     never the shared run state. An interrupt (`fleet stop` sends Ctrl-C) stops the CLI and leaves no report."""
-    if len(args) != 5:
-        raise FleetError("internal headless runner expects receipt, token, report, usage file, command")
+    if len(args) not in (5, 6):
+        raise FleetError("internal headless runner expects receipt, token, report, usage file, command[, seconds]")
     receipt, token, report, usage_file, command = Path(args[0]), args[1], Path(args[2]), Path(args[3]), args[4]
+    limit = float(args[5]) if len(args) == 6 else None  # a launch from before the limit has none
     wid = report.stem
     print(f"fleet: {wid} runs headless and read-only; its final message becomes {report}", flush=True)
     # Its own process group, so an interrupt ends the CLI and everything it started, whatever the shell does; a
@@ -1747,7 +1752,18 @@ def headless_child(args: list[str]) -> int:
 
     errs = threading.Thread(target=drain, daemon=True)
     errs.start()
-    out, interrupted = [], False
+    out, interrupted, timed_out = [], False, threading.Event()
+
+    def time_up() -> None:  # a CLI that never finishes must still wake the lead, with a report that says why
+        timed_out.set()
+        end(signal.SIGTERM)
+        kill = threading.Timer(HEADLESS_KILL_S, end, (signal.SIGKILL,))
+        kill.daemon = True
+        kill.start()
+    if limit:
+        clock = threading.Timer(limit, time_up)
+        clock.daemon = True
+        clock.start()
     while True:
         try:
             for line in iter(child.stdout.readline, ""):
@@ -1771,7 +1787,11 @@ def headless_child(args: list[str]) -> int:
         usage_file.parent.mkdir(parents=True, exist_ok=True)
         usage_file.with_suffix(".out").write_text(text)  # the CLI's own output, for the lead to inspect
         parsed = headless_output(text)
-        if not interrupted:
+        if timed_out.is_set():
+            write_text_atomic(report, blocked_report(
+                wid, f"it had not finished after {int(limit // 60)} minutes (headless_timeout_minutes), so Fleet "
+                     "stopped it", parsed["message"], parsed["errors"], tail))
+        elif not interrupted:
             write_text_atomic(report, headless_report(wid, code, parsed, tail))
         atomic_json(usage_file, {"token": token, "returncode": code, "interrupted": interrupted,
                                  "usage": parsed["usage"], "denials": parsed["denials"], "errors": parsed["errors"]})
@@ -3111,8 +3131,9 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         usage_file = d / "usage" / f"{a.id}.{token}.json"
         usage_file.parent.mkdir(exist_ok=True)
         headless = {"transport": HEADLESS, "usage_file": str(usage_file)}
+        limit = state["options"].get("headless_timeout_minutes", cfg["defaults"]["headless_timeout_minutes"])
         wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_headless", str(exit_file), token,
-                              str(report), str(usage_file), command])
+                              str(report), str(usage_file), command, str(int(limit) * 60)])
     else:
         wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_run", str(exit_file), token, command])
     if meta["role"] != "implementation" and not a.resume:  # a launch that reaches the terminal is a round;
