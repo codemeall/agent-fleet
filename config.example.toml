@@ -8,6 +8,11 @@ review = "cross-heavy"
 # Reviewer launches per ticket (1 to 5). Past them, Fleet refuses the next repair or review and the lead brings
 # you the open findings: accept as is, drop the ticket, or allow one more round (--extra-round "<your words>").
 # review_rounds = 2
+# Make every `fleet wait` a gate loop (as `fleet wait --gate`): when a running worker hands back a ticket with
+# planned check commands, Fleet runs them first and sends a failure straight back to the worker, waking the lead
+# only for a pass, a scope problem, or once gate_rounds failures (1 to 5) have gone back. Off by default.
+# gate = true
+# gate_rounds = 2
 # Mark the repo trusted in Claude, Codex and Antigravity before each launch, so their first-run
 # "trust this folder?" screen does not stall a worker. Off by default; only the owner turns it on.
 # auto_trust = true
