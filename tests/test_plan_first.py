@@ -554,7 +554,7 @@ class PlanReview(PlanFirstCase):
         self.cfg["defaults"]["max_parallel"] = 1
         state = self.state()
         state["options"]["max_parallel"] = 1
-        self.run_file("run.json").write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
         out = self.call("approve", "demo", "01", "--review", expected=1)
         self.assertIn("no provider can review 01's plan now", out)
         self.assertNotIn("plan-review-01", self.state()["workers"])

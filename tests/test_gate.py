@@ -155,7 +155,7 @@ class Gate(RuntimeCase):
     def test_gate_reports_a_worker_without_a_snapshot(self):
         self.gate_run([{"run": "true"}])
         self.launch()
-        (self.repo / ".fleet/runs/demo/snapshots/01.tree.json").unlink()   # launched by an earlier Fleet
+        fleet.control_unlink(self.repo / ".fleet/runs/demo/snapshots/01.tree.json")  # launched by an earlier Fleet
         self.assertIn("scope not checked (no whole-tree snapshot)", self.call("gate", "demo", "01"))
 
     def test_gate_output_is_the_leads_file_and_verify_accepts_it(self):

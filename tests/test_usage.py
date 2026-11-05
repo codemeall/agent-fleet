@@ -226,7 +226,7 @@ class Usage(UsageCase):
         self.assertEqual(u["totals"]["tokens_unknown"], 10)
         state = json.loads(self.run_file("run.json").read_text())
         state["ledger"][0]["tokens"] = {"input": 1200, "output": 300}  # one launch's CLI reported usage
-        self.run_file("run.json").write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
         u = self.usage_json("demo")
         self.assertEqual(u["totals"]["tokens"], {"input": 1200, "output": 300})
         self.assertEqual(u["totals"]["tokens_unknown"], 9)

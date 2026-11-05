@@ -46,7 +46,7 @@ class FleetCase(unittest.TestCase):
         self.config = self.root / "config.toml"
         self.env = {k: v for k, v in os.environ.items() if not SCRUB.match(k)}
         self.env.update(HOME=str(self.home), FLEET_CONFIG=str(self.config), SHELL="/bin/sh",
-                        GIT_CONFIG_NOSYSTEM="1")
+                        GIT_CONFIG_NOSYSTEM="1", XDG_CACHE_HOME=str(self.root / "cache"))
 
     def git(self, *args: str) -> str:
         return subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True, text=True).stdout

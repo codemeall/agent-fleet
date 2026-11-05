@@ -23,7 +23,7 @@ class LedgerCase(RuntimeCase):
         f = self.repo / ".fleet/runs/demo/run.json"
         state = json.loads(f.read_text())
         change(state)
-        f.write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
 
     def age(self, seconds, index=-1):
         """Move a ledger entry's start into the past, as if the worker launched that long ago."""

@@ -385,7 +385,7 @@ class Isolation(WorktreeCase):
         t = self.state()["tickets"]["a"]
         self.assertEqual(fleet.header_file_problems(self.repo, t, False, [str(tree / "a.txt")], tree), [])
         self.assertEqual(fleet.header_file_problems(self.repo, t, False, [str(tree / "b.txt")], tree),
-                         ["b.txt outside scope"])
+                         ['"b.txt" outside scope'])  # the header's path is quoted: the worker's text
 
     def test_verify_refuses_an_unmerged_worktree_ticket(self):
         self.start([{"id": "a", "files": ["a.txt"]}])
@@ -480,7 +480,7 @@ class Reads(WorktreeCase):
         """A file the gate's own commands write in the tree while its worker is stopped is not blamed on it."""
         state = self.state()
         state["tickets"]["a"]["commands"] = [{"run": "echo out > made-by-check.txt", "cwd": ".", "timeout": 30}]
-        (self.repo / ".fleet/runs/demo/run.json").write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
         (self.tree("a") / "cache.tmp").unlink()
         self.assertIn("GATE a 1/1 passed, scope ok", self.call("gate", "demo", "a"))
         self.assertTrue((self.tree("a") / "made-by-check.txt").exists())
@@ -598,7 +598,7 @@ class Lifecycle(WorktreeCase):
         subprocess.run(["git", "worktree", "add", "--detach", str(stray), "HEAD"], cwd=self.repo, check=True,
                        capture_output=True)
         state["tickets"]["b"]["status"] = "dropped"             # as if drop could not remove its tree
-        (self.repo / ".fleet/runs/demo/run.json").write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
         out = self.call("check", "demo")
         self.assertIn(f"WORKTREE a {self.tree('a')}: in use", out)
         self.assertIn(f"WORKTREE b {self.tree('b')}: orphan: b is dropped", out)
@@ -631,7 +631,7 @@ class Lifecycle(WorktreeCase):
         self.assertNotIn(".setup-done", self.call("diff", "demo", "a"))  # setup output is the tree's base
         state = self.state()
         state["options"]["worktree_setup"] = "echo broken; exit 4"     # the run keeps the value saved at init
-        (self.repo / ".fleet/runs/demo/run.json").write_text(json.dumps(state))
+        fleet.save_run(self.repo, "demo", state)
         out = self.launch("b", expected=1)
         self.assertIn("worktree_setup `echo broken; exit 4` failed in b's new worktree (exit 4)", out)
         self.assertNotIn("b", self.state()["workers"])
