@@ -1258,7 +1258,7 @@ def try_lock(repo: Path):
 def mutation_lock(a):
     # wait, supervise and gate may run for minutes; holding the lock would block the lead's commands. supervise
     # takes it only for each brief change, without waiting (try_lock).
-    if a.cmd not in ("hold", "release") and (not hasattr(a, "run") or a.cmd in ("wait", "supervise", "gate",
+    if a.cmd not in ("hold", "release") and (not hasattr(a, "run") or a.cmd in ("wait", "supervise", "gate", "usage",
                                                                               *BOARD_COMMANDS, *OWNER_VIEWS)):
         yield
         return
@@ -2390,6 +2390,233 @@ def cmd_cost(a, cfg):
     print(caps_text(c["caps"]))
     if c["totals"]["tokens_unknown"]:
         print("Tokens come from a Claude worker's own session log, or usage its CLI reported; the rest are unknown.")
+
+
+# ---------- usage report (P19) ----------
+# `fleet usage` reads runs and writes nothing: no lock, no ledger backfill, no .seen marker. Each run's state is
+# loaded, reconciled and its ledger synced in a copy (reconcile and ledger_usage read receipts and session logs,
+# never write them), so it runs beside any other command. Ticket numbers (tickets, rework, first pass, findings)
+# go to the group of the ticket's first writer launch, the attempt first pass judges; launch numbers (launches,
+# wall time, tokens) go to each launch's own group, so a reviewer's launches count under the reviewer's own.
+
+USAGE_BY = ("ticket", "provider", "model", "tier", "role")
+USAGE_HANDED_BACK = ("needs-verification", "changes-requested")  # a report that a relaunch after it repairs
+GATE_ROUND_RE = re.compile(r"^## Message \d+ \([^)\n]*\)\n\nFleet gate, round \d+ of \d+:", re.M)
+
+
+def archived_reports(d: Path, wid: str) -> list[Path]:
+    """A worker's reports that its later launches archived (`<id>.<hex>.previous`), oldest first."""
+    name = re.compile(re.escape(wid) + r"\.[0-9a-f]{32}\.previous\Z")
+    reports = d / "reports"
+    found = [f for f in reports.iterdir() if name.match(f.name)] if reports.is_dir() else []
+    return sorted(found, key=lambda f: f.stat().st_mtime)
+
+
+def read_text(f: Path) -> str:
+    try:
+        return f.read_text(errors="replace")
+    except OSError:
+        return ""
+
+
+def report_status(f: Path) -> str:
+    return (parse_status(read_text(f)) or "").lower()
+
+
+def plan_review(state: dict, wid: str) -> bool:
+    return bool(state["workers"].get(wid, {}).get("plan_of")) or wid.startswith(PLAN_REVIEW_PREFIX)
+
+
+def usage_repairs(d: Path, entries: list[dict]) -> int:
+    """Repair launches of one writer or investigator: each launch after its first, except a --resume that continues
+    a launch which never handed back (a usage limit, a crash). A launch handed back when the next launch archived
+    a report it wrote at needs-verification or changes-requested."""
+    entries = sorted(entries, key=lambda e: e.get("start") or 0)
+    if len(entries) < 2:
+        return 0
+    archived = [(f.stat().st_mtime, report_status(f)) for f in archived_reports(d, entries[0]["worker"])]
+    repairs = 0
+    for prev, e in zip(entries, entries[1:]):
+        if e.get("resume") and prev.get("start") is not None and e.get("start") is not None:
+            if not any(prev["start"] <= at <= e["start"] + 1 and status in USAGE_HANDED_BACK
+                       for at, status in archived):
+                continue  # the same round, continued
+        repairs += 1
+    return repairs
+
+
+def usage_findings(d: Path, state: dict, i: str) -> tuple[int, int]:
+    """(findings, rounds read) over the review rounds of ticket `i` whose reviewer report can still be read: the
+    current one and those later rounds archived. A round without a readable header is left out, never zero."""
+    found = rounds = 0
+    for wid, w in state["workers"].items():
+        if w.get("review_of") != i or plan_review(state, wid):
+            continue
+        for f in [*archived_reports(d, wid), d / "reports" / f"{wid}.md"]:
+            data = parse_header(read_text(f))[0] if f.exists() else None
+            if isinstance(data, dict) and isinstance(data.get("findings"), list):
+                found, rounds = found + len(data["findings"]), rounds + 1
+    return found, rounds
+
+
+def usage_ticket(d: Path, state: dict, i: str, entries: list[dict]) -> dict | None:
+    """One launched ticket's outcome and rework; None for a ticket with no writer or investigator launch."""
+    t = state["tickets"].get(i, {})
+    own = [e for e in entries if e.get("role") in ("writer", "investigator")]
+    if not own:
+        return None
+    first = min(own, key=lambda e: e.get("start") or 0)
+    by_worker: dict[str, list[dict]] = {}
+    for e in own:
+        by_worker.setdefault(e["worker"], []).append(e)
+    repairs = sum(usage_repairs(d, es) for es in by_worker.values())
+    gates = max(len(GATE_ROUND_RE.findall(read_text(d / "inbox" / f"{i}.md"))), t.get("gate_rounds_used", 0))
+    reviews = [e for e in entries if e.get("role") == "reviewer" and not plan_review(state, e["worker"])]
+    rounds = t["review_rounds"] if "review_rounds" in t else max(
+        sum(not e.get("resume") for e in reviews), review_rounds(state, i) if i in state["tickets"] else 0)
+    findings, read = usage_findings(d, state, i)
+    parked = [d / "reports" / f"{i}.md", *archived_reports(d, i)]
+    changes = (gates > 0 or bool(t.get("findings_sent"))
+               or any(report_status(f) == "changes-requested" for f in parked if f.exists()))
+    outcome = t.get("status") if t.get("status") in ("verified", "dropped") else "open"
+    return {"run": state["run"], "ticket": i, "outcome": outcome, "role": first.get("role"),
+            "provider": first.get("provider"), "model": first.get("model"), "tier": first.get("tier") or t.get("tier"),
+            "repairs": repairs, "gate_rounds": gates, "review_rounds": rounds, "changes_requested": changes,
+            "findings": findings if read else None, "finding_rounds": read,
+            "first_pass": (repairs == 0 and not changes) if outcome == "verified" else None}
+
+
+def usage_run(repo: Path, run: str, cfg: dict, now: float) -> tuple[list[dict], list[dict]]:
+    """A run's launched tickets and its launches, from a copy of its state; nothing is saved."""
+    state = json.loads(json.dumps(load_run(repo, run)))
+    d = run_dir(repo, run)
+    reconcile(repo, state)  # the exits receipts confirm, and usage a headless runner saved
+    ledger_usage(state, cfg)  # a run from before the ledger gets its latest launches; Claude logs give tokens
+    entries = state.get("ledger", [])
+    launches = [{"run": run, "ticket": e.get("ticket"), "role": e.get("role"), "provider": e.get("provider"),
+                 "model": e.get("model"), "tier": e.get("tier"), "wall_s": entry_wall(state, e, now),
+                 "tokens": e.get("tokens") or None} for e in entries]
+    by_ticket: dict[str, list[dict]] = {}
+    for e in entries:
+        by_ticket.setdefault(e.get("ticket"), []).append(e)
+    tickets = [t for i, es in by_ticket.items() if (t := usage_ticket(d, state, i, es))]
+    return tickets, launches
+
+
+def usage_key(x: dict, by: str, many: bool) -> str:
+    if by == "ticket":
+        return f"{x['run']}/{x['ticket']}" if many else str(x["ticket"])
+    return str(x.get(by) or "unknown")
+
+
+def usage_group(tickets: list[dict], launches: list[dict]) -> dict:
+    verified = [t for t in tickets if t["outcome"] == "verified"]
+    read = [t for t in tickets if t["findings"] is not None]
+    walls = [x["wall_s"] for x in launches]
+    tokens: dict = {}
+    for x in launches:
+        for k, v in (x["tokens"] or {}).items():
+            tokens[k] = tokens.get(k, 0) + v
+    return {"tickets": len(tickets), "verified": len(verified), "first_pass": sum(t["first_pass"] for t in verified),
+            "dropped": sum(t["outcome"] == "dropped" for t in tickets),
+            "open": sum(t["outcome"] == "open" for t in tickets),
+            "repairs": sum(t["repairs"] for t in tickets), "gate_rounds": sum(t["gate_rounds"] for t in tickets),
+            "review_rounds": sum(t["review_rounds"] for t in tickets),
+            "findings": sum(t["findings"] for t in read) if read else None,
+            "finding_rounds": sum(t["finding_rounds"] for t in read),
+            "launches": len(launches), "wall_s": round(sum(w for w in walls if w is not None), 1),
+            "wall_unknown": walls.count(None), "tokens": tokens or None,
+            "tokens_unknown": sum(not x["tokens"] for x in launches)}
+
+
+def usage_report(repo: Path, runs: list[str], cfg: dict, by: str = "ticket", now: float | None = None,
+                 skip_bad: bool = False) -> dict:
+    """Every group's numbers, the totals and each ticket's own. With skip_bad (--all), a run Fleet cannot read
+    (legacy, another checkout's, damaged) is listed under skipped instead of failing the report."""
+    now = time.time() if now is None else now
+    tickets, launches, skipped = [], [], []
+    for run in runs:
+        try:
+            ts, ls = usage_run(repo, run, cfg, now)
+        except (FleetError, OSError, ValueError, KeyError, TypeError) as e:
+            if not skip_bad:
+                raise
+            skipped.append({"run": run, "reason": str(e).strip()[:200]})
+            continue
+        tickets += ts
+        launches += ls
+    read = [r for r in runs if r not in {s["run"] for s in skipped}]
+    many = len(read) > 1
+    keys = sorted({usage_key(x, by, many) for x in [*tickets, *launches]})
+    groups = {k: usage_group([t for t in tickets if usage_key(t, by, many) == k],
+                             [x for x in launches if usage_key(x, by, many) == k]) for k in keys}
+    dropped = [usage_key(t, "ticket", many) for t in tickets if t["outcome"] == "dropped"]
+    return {"runs": read, "by": by, "groups": groups, "totals": usage_group(tickets, launches), "dropped": dropped,
+            "tickets": tickets, "skipped": skipped}
+
+
+def usage_lines(g: dict) -> tuple[str, str]:
+    """A group's ticket line and launch line."""
+    if g["tickets"]:
+        outcome = ", ".join(f"{g[k]} {k}" for k in ("verified", "dropped", "open") if g[k])
+        first = (f"first pass {g['first_pass']} of {g['verified']} verified "
+                 f"({round(100 * g['first_pass'] / g['verified'])}%)" if g["verified"] else "first pass none verified")
+        if not g["review_rounds"] and not g["finding_rounds"]:
+            findings = "no review"
+        elif g["findings"] is None:
+            findings = f"findings unknown ({g['review_rounds']} review rounds, no readable reviewer header)"
+        else:
+            unread = g["review_rounds"] - g["finding_rounds"]
+            findings = (f"findings {g['findings'] / g['finding_rounds']:.1f} per round ({g['findings']} in "
+                        f"{g['finding_rounds']} round{'' if g['finding_rounds'] == 1 else 's'}"
+                        + (f", unknown for {unread} more" if unread > 0 else "") + ")")
+        tickets = (f"{g['tickets']} ticket{'' if g['tickets'] == 1 else 's'} ({outcome}); {first}; repairs "
+                   f"{g['repairs']}, gate rounds {g['gate_rounds']}, review rounds {g['review_rounds']}; {findings}")
+    else:
+        tickets = "no ticket of its own"
+    if g["wall_unknown"] == g["launches"]:
+        wall = "unknown"
+    else:
+        wall = minutes(g["wall_s"]) + (f" (unknown for {g['wall_unknown']})" if g["wall_unknown"] else "")
+    launches = (f"{g['launches']} launch{'' if g['launches'] == 1 else 'es'}, wall {wall}, "
+                f"{tokens_text(g['tokens'], g['tokens_unknown'], g['launches'])}")
+    return tickets, launches
+
+
+def cmd_usage(a, cfg):
+    repo = repo_root()
+    if a.all and a.runs:
+        raise FleetError("give run names or --all, not both")
+    if a.all:
+        root = repo / ".fleet" / "runs"
+        runs = sorted(f.parent.name for f in root.glob("*/run.json")) if root.is_dir() else []
+        if not runs:
+            raise FleetError("no runs in this checkout yet")
+    else:
+        runs = list(dict.fromkeys(a.runs)) or [latest_run(repo)]
+    for run in runs:
+        valid_id(run)
+    u = usage_report(repo, runs, cfg, a.by, skip_bad=a.all)
+    if a.json:
+        print(json.dumps(u, indent=2))
+        return
+    for s in u["skipped"]:
+        print(f"skipped run {s['run']}: {s['reason']}")
+    whose = ("a reviewer's launches count toward the ticket it reviews" if a.by == "ticket" else
+             f"ticket numbers go to the ticket's first writer, launches to their own {a.by}")
+    print(f"usage of run{'' if len(u['runs']) == 1 else 's'} {', '.join(u['runs']) or 'none'}, by {a.by} ({whose}):")
+    width = max([len(k) for k in u["groups"]] + [8])
+    for k, g in u["groups"].items():
+        tickets, launches = usage_lines(g)
+        print(f"  {k:<{width}}  {tickets}")
+        print(f"  {'':<{width}}  {launches}")
+    if not u["groups"]:
+        print("  (no worker launched yet)")
+    tickets, launches = usage_lines(u["totals"])
+    print(f"total: {tickets}")
+    print(f"       {launches}")
+    if u["dropped"]:
+        print(f"dropped, neither a pass nor a fail: {', '.join(u['dropped'])}")
 
 
 # ---------- commands ----------
@@ -9942,6 +10169,14 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("run")
     s.add_argument("--json", action="store_true", help="print the totals, caps and every ledger entry")
     s.set_defaults(fn=cmd_cost)
+
+    s = sub.add_parser("usage", help="read-only: tickets, launches, rework, first-pass acceptance, review findings "
+                                     "per round, wall time and tokens per group, over one or more runs")
+    s.add_argument("runs", nargs="*", metavar="RUN", help="default: the run changed most recently")
+    s.add_argument("--all", action="store_true", help="every run in this checkout")
+    s.add_argument("--by", choices=USAGE_BY, default="ticket", help="group by (default ticket)")
+    s.add_argument("--json", action="store_true", help="print the groups, totals and every ticket's numbers")
+    s.set_defaults(fn=cmd_usage)
 
     s = sub.add_parser("status", help="workers and their report status")
     s.add_argument("run")

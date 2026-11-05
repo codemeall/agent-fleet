@@ -75,6 +75,17 @@ Keep passing the plan's provider and tier to `fleet launch`; it prints `steered 
 
 A worker on a usage limit usually shows as `STALLED`; `fleet peek` confirms it. Stop it, then either relaunch after the reset with `--resume`, which continues the worker's own session (same provider, adapters with `resume` such as Claude), or steer within the run's routing and relaunch fresh with a Repair note (examples 6). A usage limit is not a permission denial: steering inside the run's routing needs no further approval. When neither is possible, tell the owner.
 
+## Reading fleet usage
+
+`fleet usage` shows how each provider, model, tier or role did across runs ([usage](commands.md#usage)). Use it to propose a routing change to the owner, never to make one on your own. It never changes routing by itself, and nothing in Fleet reads it.
+
+- **Low first pass at a tier:** a model whose `light` tickets often need a repair, a gate round or changes should move up a tier (its `light` tickets to `standard`). One that passes nearly every `standard` ticket first time may take more of them at `light`.
+- **Many gate rounds:** the worker hands back before running its checks. Name the check commands in the prompt, or move the work up a tier.
+- **Many findings per round:** the writer misses what reviewers catch. Move its heavy work to another model, or turn on [plan first](#plan-first). Few findings and many review rounds point to rebuttals: read the reviewer's reports before blaming the writer.
+- **Repairs without findings:** relaunches after crashes or a lead's Repair note. Read the run's decisions before drawing a conclusion.
+
+Read small numbers with care: a group with three tickets says little, and `--all` mixes runs with different tickets and settings. Drops are listed apart and count as neither a pass nor a fail. Unknown tokens are unknown, never cheap: compare tokens only between groups whose counts are known.
+
 ## Failures and plan changes
 
 Before any worker launches, record an unavailable adapter and any owner-authorized substitution in the plan's decisions and update assignments explicitly. After the first launch, follow the skill's rules for follow-up runs, repairs and recovery (steps 5 and 6).
