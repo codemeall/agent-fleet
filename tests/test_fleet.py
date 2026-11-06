@@ -237,6 +237,15 @@ class Reports(unittest.TestCase):
 
 
 class SkillText(unittest.TestCase):
+    def test_the_lead_may_start_fleet_itself_on_every_host(self):
+        """A lead the owner asks to delegate work starts Fleet without the owner typing /fleet: neither Claude Code's
+        frontmatter nor Codex's policy blocks model invocation, and the description says when to use it."""
+        skill = (ROOT / "skill/SKILL.md").read_text()
+        front = skill.split("---", 2)[1]
+        self.assertNotIn("disable-model-invocation", front)
+        self.assertIn("Use when the owner asks to run tickets or delegate work with Fleet.", front)
+        self.assertIn("allow_implicit_invocation: true", (ROOT / "skill/agents/openai.yaml").read_text())
+
     def test_the_skill_stays_within_its_context_budget(self):
         # The lead carries SKILL.md on every turn of a run. New guidance goes in references/ (read when needed) or
         # in CLI output (seen when it applies); to add to SKILL.md, move something out instead of raising this.

@@ -3,4 +3,4 @@ interface:
   short_description: "Lead parallel agent CLIs in cmux panes or headless tmux through a batch of tickets"
   default_prompt: "Use $fleet to implement these tickets with a fleet of agent CLIs."
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true

@@ -258,7 +258,7 @@ Uninstall removes only the Fleet skill it installed. It keeps modified copies, a
        -- <local tickets directory, or tasks in plain words>
 ```
 
-The lead interprets these options and saves them with CLI commands; there's no autonomous scheduler behind them. `single:codex` restricts the pool to one adapter. Required review still needs a *different* model family, so either set `review=off` explicitly or widen the pool. `fleet import` brings GitHub issues in as local tickets, read-only through `gh`, with each body fenced as untrusted data ([import](skill/references/commands.md#import)). Export other trackers' tickets to local Markdown first, keeping their IDs, blockers, acceptance criteria and source links.
+You can type `/fleet` yourself, or ask the lead in plain words to run tickets or delegate work with Fleet, and it starts Fleet on its own. The lead interprets these options and saves them with CLI commands; there's no autonomous scheduler behind them. `single:codex` restricts the pool to one adapter. Required review still needs a *different* model family, so either set `review=off` explicitly or widen the pool. `fleet import` brings GitHub issues in as local tickets, read-only through `gh`, with each body fenced as untrusted data ([import](skill/references/commands.md#import)). Export other trackers' tickets to local Markdown first, keeping their IDs, blockers, acceptance criteria and source links.
 
 Example request to the lead:
 
@@ -606,7 +606,7 @@ The lead carries `skill/SKILL.md` on every turn of a run, so a test holds it to 
 | Codex plugin | `npm run build` → `dist/codex/agent-fleet/` from `skill/` + `plugin-manifests/codex.json` |
 | npm package | `npm pack` (runs the build and includes the Codex bundle) |
 
-The Codex bundle expresses explicit invocation through `agents/openai.yaml`. Add it through a configured Codex plugin marketplace, because `codex plugin add` takes a marketplace selector rather than a local path. Codex marketplace discovery still needs live validation, so the portable skill install is the common path for all three hosts.
+The Codex bundle's `agents/openai.yaml` lets Codex pick the skill itself, as Claude Code can. Add it through a configured Codex plugin marketplace, because `codex plugin add` takes a marketplace selector rather than a local path. Codex marketplace discovery still needs live validation, so the portable skill install is the common path for all three hosts.
 
 **Releasing:** bump the version in `package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` and `plugin-manifests/codex.json`. Run the checks above and `npm pack`, then inspect the tarball. Once npm publishing is set up, publish with `npm publish --access public --tag preview`. Setup, build and tests never publish anything.
 
