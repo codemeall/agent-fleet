@@ -2,7 +2,7 @@
 
 Every `fleet` command: what it does and when to use it. Commands that take `<run>` act on `.fleet/runs/<run>/` in the current checkout; run them from the repository root. `fleet <command> --help` prints the exact flags. For full sequences, see the [worked examples](examples.md).
 
-The lead runs these commands. The owner may run any of them too, most often `hold`, `release`, `context` and `stop`, once `fleet` is on their PATH. `agents` and `attach` are the owner's alone: the lead never runs them. `smoke` is the owner's too, because it spends their real usage: the lead runs it only when the owner asks.
+The lead runs these commands. The owner may run any of them too, most often `hold`, `release`, `context` and `stop`, once `fleet` is on their PATH. `agents`, `attach`, `statusline` and `dashboard` are the owner's alone: the lead never runs them. `smoke` is the owner's too, because it spends their real usage: the lead runs it only when the owner asks.
 
 ## At a glance
 
@@ -30,7 +30,7 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`approve`](#approve) | Approves a [plan-first](#plan-first) ticket's plan through its inbox, or first sends it to a reviewer from another family | A `PLAN` wake, once you have read the plan |
 | [`wait`](#wait) | Blocks until something needs the lead; with `--gate`, sends failing checks back to the worker first | Between actions, while workers run |
 | [`supervise`](#supervise) | `wait --gate` that also starts reviews, sends findings back to the writer and dispatches unblocked tickets, as the owner opted in; wakes the lead for a judgment call or a ticket ready to accept | In place of `wait --gate`, when the owner's config or `--auto` names steps |
-| [`status`](#status) | Lists workers and report statuses | You need a snapshot after `EXITED` or a recovery |
+| [`status`](#status) | Lists workers and report statuses; `--brief` prints one line per live worker, without the lock | You need a snapshot after `EXITED` or a recovery |
 | [`cost`](#cost) | Shows each ticket's worker launches, wall time and tokens, and the run's caps | Reporting a wave's outcome, or a launch refused at a cap |
 | [`usage`](#usage) | Read-only report over one or more runs: rework, first-pass acceptance, review findings, wall time and tokens per ticket, provider, model, tier or role | The owner asks how routing performs, or before changing tiers ([reading it](routing.md#reading-fleet-usage)) |
 | [`review`](#review) | Stops the writer, saves its diff and launches a reviewer from another family | A writer hands back on a ticket that needs review |
@@ -51,6 +51,8 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`release`](#release) | Lifts a hold | The owner is ready to continue |
 | [`agents`](#agents) | Owner's browser: every worker, its live screen, attach to any one | The owner wants to see what a worker is doing |
 | [`attach`](#attach) | Owner opens one worker's terminal | The owner wants to type into or watch one worker |
+| [`statusline`](#statusline) | Owner's rows of live workers in Claude Code's status line, after their own line | The owner leads from Claude Code and wants the workers in view |
+| [`dashboard`](#dashboard) | Owner's local, read-only web page of the workers and their screens | The owner leads from a desktop app, or has no terminal open |
 
 **Similar names:** `hold` and `release` pause and continue *launches*. `resume` reloads a *run* into the lead's memory. `launch --resume` continues a stopped *worker's* own CLI session. There is no `pause` command: `hold` is the pause.
 
@@ -638,6 +640,37 @@ Reconciles exit receipts, then lists each worker's provider and model, pane, sta
 
 **Use:** after `EXITED`, after a recovery, or when you need a current table. `wait` covers routine watching.
 
+#### The brief view
+
+```text
+fleet status [<run>] --brief [--json]
+```
+
+One line per worker, in the spirit of Claude Code's agent rows. With no run named it covers every run in this checkout that has a live worker, and lists each one's live workers plus the stopped ones whose hand-back or exit still waits on the lead. Name a run to list all its workers. With no run named and no live worker, it prints nothing at all.
+
+```text
+fleet checkout · 3 live · 2 handed back
+  ● api-client   codex:gpt-6-sol@high           permission prompt 2m 4s ago: Allow `npm test`? · 12m 40s
+  ● settings-ui  claude:claude-opus-5-5@high    working · 9m 3s · 2.1M in, 41.2K out
+  ○ copy         cursor:auto                    handed back: needs-verification · gate passed · 31m 5s
+  ● schema       claude:claude-sonnet-5@medium  blocked: "v1 or v2 of the export API?" · 5m 2s · 310.9K in, 5.1K out
+```
+
+`●` is a live worker, `○` a stopped one. Then come its ID, `provider:model@effort`, what it is doing, the wall time of its latest launch and its tokens. What it is doing comes from cheap signals, best first:
+
+1. A report handed back since the lead's last message to the worker: `handed back: needs-verification` or `handed back: plan-ready`, with `gate passed` or `gate failed` when the gate ran on that very report and `in review by <reviewer>` while a reviewer works on it. A blocked report shows `blocked:` and its question: the first in its `fleet` header, else the first line under Decisions and blockers.
+2. For a tmux run, a live worker whose window its tmux server no longer lists (one listing per run): `unreachable: its tmux window is gone and it left no exit receipt`, as after a reboot or `tmux kill-server`; confirm it and run [`recover`](#recover).
+3. The latest event in a hooked Claude or notified Codex worker's events file since that message: `permission prompt <age> ago: <its text>`, `idle, no hand-back` or `turn ended, no hand-back`, with the worker's last words. A prompt the owner has answered stays on the line until the worker's turn ends, which is why it shows its age.
+4. Otherwise its state: `working`, `starting`, `stop failed`, or for a stopped worker `exited (code N), no hand-back`.
+
+Tokens are input, with cache reads and writes, then output: the ledger's count when it has one (as [`cost`](#cost) shows it), else for a Claude worker its own session log, so far while it runs. A count Fleet does not have is left out, never shown as 0, so other CLIs' workers show no tokens until their CLI reports some.
+
+It holds no lock, saves nothing in the checkout and writes no `.seen` marker, so it runs beside any command. A damaged `run.json`, a run from before the ledger or a worker record it cannot read never stops it: the default view leaves out a run it cannot read, and a record it cannot read gets a line that says so. A run you name that cannot be read prints the reason and exits 1. The one file it keeps is a cache of token counts outside the checkout (`agent-fleet/brief-tokens.json` in `$XDG_CACHE_HOME`, else `~/.cache`), so each refresh reads only what a session log gained since the last one: about 10 ms for ten workers. A worker's report, last words, ticket title and the rest of its record are worker text: each is flattened to one line, control and bidi characters removed, before it is printed. The screen's last line is not shown: reading it costs a terminal call per worker (about 6 ms under tmux), and a TUI's last line is its own footer.
+
+`--json` prints the same rows with every field (`run`, `id`, `live`, `state`, `worker`, `provider`, `model`, `effort`, `activity`, `doing`, `report`, `elapsed_s`, `tokens`, `title`) under `runs`, and the runs it could not read under `skipped`. It always prints that object, even with nothing live. `activity` is one of `working`, `starting`, `stop-failed`, `unknown`, `unreachable`, `permission`, `idle`, `handed-back`, `blocked`, `plan-ready`, `verified`, `settled`, `exited` or `unreadable`.
+
+**Use:** the owner's quick look, from any terminal, a script or another tool. [`statusline`](#statusline) and [`dashboard`](#dashboard) show these same rows.
+
 ### cost
 
 ```text
@@ -1117,7 +1150,16 @@ Removes the hold so launches can continue.
 
 ## Owner views
 
-These commands are for the owner, not the lead. They only read run state (no lock, nothing saved), so they can stay open beside a running lead.
+These commands are for the owner, not the lead. They only read run state (no lock, nothing saved in the checkout), so they can stay open beside a running lead. `statusline --install` and `--uninstall` change one Claude Code settings file, nothing else.
+
+Native subagent panels (Claude Code's agent panel, Codex's, Antigravity's Agent Manager) list only the agents their host started itself, and none offers a public way to add others, so Fleet shows its workers beside them:
+
+| Where you talk to the lead | Where you see its workers |
+| --- | --- |
+| Claude Code | [`statusline`](#statusline): a row per live worker under the prompt, after your own status line |
+| Codex CLI | [`agents`](#agents) in a split, or [`dashboard`](#dashboard); Codex's status line takes its built-in items only, no command |
+| A desktop app: ChatGPT or Codex desktop, Claude desktop, T3 Code, Antigravity, the Cursor IDE | [`dashboard`](#dashboard), in any browser |
+| Any terminal | [`agents`](#agents), or [`status --brief`](#the-brief-view) for one look |
 
 ### agents
 
@@ -1153,3 +1195,59 @@ fleet attach <run> <id> [--read-only]
 ```
 
 Opens one worker's terminal. Under tmux it attaches to the run's session with that worker's window selected (inside your own tmux on the same server it switches to it instead); `--read-only` watches without typing. Under cmux it prints which tab holds the worker. Inside the tmux session, your prefix and `w` lists every session and window to jump between.
+
+### statusline
+
+```text
+fleet statusline --install [--scope user|project]
+fleet statusline --uninstall [--scope user|project]
+fleet statusline [--then '<your command>'] [--rows N]
+```
+
+Puts the [brief view](#the-brief-view)'s rows in Claude Code's status line, below the prompt, the way its own agent panel lists its subagents. It is for Claude Code only. Codex's status line takes its built-in items only, with no command of your own, so under Codex use [`agents`](#agents) in a split or the [`dashboard`](#dashboard).
+
+```text
+~/src/app  main  Opus 5.5
+fleet checkout · 3 live · 2 handed back
+  ● api-client   codex:gpt-6-sol@high           permission prompt 2m 4s ago: Allow `npm test`? · 12m 40s
+  ● settings-ui  claude:claude-opus-5-5@high    working · 9m 3s · 2.1M in, 41.2K out
+  +2 more: fleet status --brief
+```
+
+The first line is your own status line, run by `--then`; Fleet's rows follow it, here capped with `--rows 2`. With no live worker in the session's checkout, only your own line shows.
+
+`--install` sets `statusLine` in `~/.claude/settings.json` (in `$CLAUDE_CONFIG_DIR` when that is set), or with `--scope project` in this checkout's `.claude/settings.local.json`, to `{"type": "command", "command": "<this fleet> statusline", "refreshInterval": 2}`. Claude Code runs that command with the session's JSON on stdin, prints each line it writes as a row, and runs it again every 2 seconds, even while the session is idle. A status line you already had is kept: the new command runs it first with `--then '<it>'`, and its other keys (`padding`) stay. Before writing, Fleet copies the file to `statusline-backups/` beside your Fleet config (`~/.config/agent-fleet/`), readable by you only since a settings file may hold keys, and prints what changed and where the backup is. Every other key in the file stays as it was. It refuses a file that is not valid JSON, or a `statusLine` that is not a command, rather than overwrite it. Run it again and nothing changes: it never chains Fleet to itself, and after Fleet moves it points the line at the new path, keeping what it chains. `--uninstall` puts back the `statusLine` it replaced, or removes the key when there was none. A symlinked settings file stays a link. It never edits another host's config.
+
+`--scope project` changes a file in the checkout. Unless Git ignores `.claude/settings.local.json` there, it refuses while workers run, since the [scope check](#the-scope-check) would count the change against them.
+
+The command itself reads the checkout from the session's `workspace.current_dir` (else `cwd`) and always exits 0: garbage on stdin, a broken config, a damaged run or a failing `--then` command only leave Fleet's rows out. Your own command's output prints as it wrote it, colours included, and is cut off after 5 seconds. `--rows` caps Fleet's worker rows (default 6), then `+k more`.
+
+Claude Code runs a status line in every session that reads the file, Fleet's own Claude workers included. Each run costs about 0.2 s of CPU, almost all of it Python starting Fleet; the brief view itself takes about 10 ms for ten workers.
+
+**Use:** once, when the owner leads from Claude Code: `fleet statusline --install`.
+
+### dashboard
+
+```text
+fleet dashboard [--port N] [--open]
+```
+
+Serves a local, read-only web page of this checkout's runs and workers, for an owner who leads from a desktop app (ChatGPT or Codex desktop, Claude desktop, T3 Code, Antigravity, the Cursor IDE) or has no terminal open. It prints the page's address and serves until Ctrl-C:
+
+```text
+Fleet dashboard for /Users/me/src/app:
+  http://127.0.0.1:53817/?t=6pX0oV1r2m0bS1y3Qf8wJ6kHq0hVb9u4
+Read-only, and served to this computer only (127.0.0.1). The token in the link is its key: keep it to yourself. Ctrl-C stops it.
+```
+
+The page lists each run with a live worker, and the five other runs changed most recently, with every worker's row as in the [brief view](#the-brief-view). It refreshes every 2 seconds. Click a worker to see its current screen below the list. It is one page with no external files, so it works offline, and it follows the system's light or dark mode. `--port` picks the port (default 0, any free one); `--open` opens it in your browser.
+
+- It listens on 127.0.0.1 only, and every request needs the token, which is new at each start: without it, or with a wrong one, the answer is 403.
+- It refuses any request whose `Host` is not `127.0.0.1:<port>` or `localhost:<port>`, so a web page that rebinds its own name to your computer cannot read it.
+- It answers GET and HEAD only (405 otherwise), sends no CORS headers, and its page runs under a strict Content-Security-Policy with no external sources.
+- It reads only: no lock, nothing saved in the checkout. A worker's screen comes from the same terminal read as [`peek`](#peek), at most its last 200 lines, with control and bidi characters removed.
+- Every worker's text is set on the page as text, never as markup, and the JSON escapes `<`, `>` and `&`.
+
+`GET /api/status?t=<token>` returns the brief view's `--json` object for those runs. `GET /api/screen?t=<token>&run=<run>&id=<id>` returns `{"run", "id", "screen", "error"}`.
+
+**Use:** when the owner wants to watch workers outside a terminal. Run it in a terminal of its own, or in the background, and open the printed link in any browser.
