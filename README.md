@@ -84,7 +84,7 @@ fleet setup --harness all
 
 The package is published under the `preview` tag during the preview period. To install straight from GitHub instead of npm, use `npx github:codemeall/agent-fleet setup --harness all`.
 
-Use `--harness claude`, `codex`, `cursor` or `all`. The skill is copied to:
+Use `--harness claude`, `codex`, `cursor` or `all`. With `claude` (or `all`), setup also sets Claude Code's status line to show your Fleet workers under the prompt, keeping a status line you already have (it runs first) and backing up your settings file; `--no-statusline` skips that, and `fleet uninstall` puts your own line back. The skill is copied to:
 
 | Host | User install (default) | Project install (`--scope project`) |
 | --- | --- | --- |
@@ -116,7 +116,7 @@ claude plugin marketplace add codemeall/agent-fleet
 claude plugin install agent-fleet@agent-fleet
 ```
 
-Plugin skills are namespaced, so you invoke this one as `/agent-fleet:fleet`. To update, run `claude plugin marketplace update agent-fleet`, then `claude plugin update agent-fleet@agent-fleet`. The plugin does not add `fleet` to your PATH. The skill finds its bundled runtime itself, and you can [add a PATH command](#put-fleet-on-your-path-optional) if you want one.
+Plugin skills are namespaced, so you invoke this one as `/agent-fleet:fleet`. To update, run `claude plugin marketplace update agent-fleet`, then `claude plugin update agent-fleet@agent-fleet`. The plugin does not add `fleet` to your PATH. The skill finds its bundled runtime itself, and you can [add a PATH command](#put-fleet-on-your-path-optional) if you want one. A plugin cannot set Claude Code's status line, so to see your workers under the prompt, run `fleet statusline --install` once (the same after a skills CLI install).
 
 #### Option 4: Git clone
 
@@ -305,15 +305,16 @@ The lead drives Fleet through the `fleet` CLI; you rarely need to, but you can r
 | `fleet release` | Lift the hold so launches continue |
 | `fleet resume <run>` | Show a run's plan, workers and reports; a fresh lead starts here |
 | `fleet status <run>` | Table of workers and their report status |
-| `fleet status --brief` | One line per live worker: what it's doing, how long, tokens (prints nothing when none is live) |
+| `fleet track [--pane]` | A live list of every repo's workers in your terminal; `--pane` opens it below, in tmux or cmux |
+| `fleet status --brief [--all]` | One line per live worker: what it's doing, how long, tokens; `--all` covers every repo on your computer |
 | `fleet stop <run> --all` | Quit every worker and confirm it exited; do this before shutting down |
 | `fleet context` | How full the lead's context is |
 | `fleet usage [<run>] [--by provider]` | How each provider, model or tier performed: rework and first-pass rate |
 | `fleet doctor` | Check the terminal backend, logins, models and installed skills |
 | `fleet agents [<run>]` | Browse the workers, watch any one live, attach to it (yours; the lead never runs it) |
 | `fleet attach <run> <id>` | Open one worker's terminal (headless runs) |
-| `fleet statusline --install` | Show live workers in Claude Code's status line, below your own line (`--uninstall` undoes it) |
-| `fleet dashboard [--open]` | A local, read-only web page of the workers and their screens, for desktop apps |
+| `fleet statusline --install` | Show live workers in Claude Code's status line, below your own line; `fleet setup` does it for you (`--uninstall` undoes it) |
+| `fleet dashboard [--background\|--stop]` | A local, read-only web page of every repo's workers and their screens, for desktop apps; it starts on its own with a run |
 | `fleet provider enable\|disable <name>` | Turn a provider on or off in your config |
 
 More: [safe first run](examples/README.md) · [agent workflow](skill/SKILL.md) · [commands](skill/references/commands.md) · [routing](skill/references/routing.md) · [host setup](skill/references/harnesses.md) · [providers](skill/references/providers.md) · [lead context](skill/references/lead-context.md) · [worked examples](skill/references/examples.md)
@@ -443,14 +444,14 @@ A headless worker's window stays open after it exits, so the lead (and you) can 
 
 #### Where you see your workers
 
-The agent panels hosts build in (Claude Code's agent panel, Codex's, Antigravity's Agent Manager) list only the agents that host started itself, and none offers a public way to add others. So Fleet shows its workers beside them, wherever you talk to the lead:
+The agent panels hosts build in (Claude Code's agent panel, Codex's, Antigravity's Agent Manager) list only the agents that host started itself, and none offers a public way to add others. So Fleet shows its workers beside them, wherever you talk to the lead, and you need no step of your own: when a run starts, the lead relays a `WATCH` line that says where they are. The views show every active Fleet session on your computer, not only the current checkout's.
 
-| You lead from | See the workers with |
+| You lead from | You see the workers in |
 | --- | --- |
-| Claude Code | `fleet statusline --install`: a row per live worker under the prompt, below your own status line, refreshed every 2 seconds |
-| Codex CLI | `fleet agents` in a split, or `fleet dashboard`. Codex's status line takes its built-in items only, so it can't run Fleet's |
-| A desktop app: ChatGPT or Codex desktop, Claude desktop, T3 Code, Antigravity, the Cursor IDE | `fleet dashboard`: open the link it prints in any browser |
-| Any terminal | `fleet agents`, or `fleet status --brief` for one look |
+| Claude Code | Its status line: a row per live worker under the prompt, below your own line, and one line for your other repos. `fleet setup` installs it; after a plugin or `npx skills add` install, run `fleet statusline --install` once |
+| Codex CLI | `fleet track` in another terminal tab: a live list of every repo's workers. In tmux or cmux, `fleet track --pane` opens it in a short pane below yours. Codex's status line takes its built-in items only, so it can't run Fleet's |
+| A desktop app: ChatGPT or Codex desktop, Claude desktop, T3 Code, Antigravity, the Cursor IDE | The dashboard, which starts in the background with the run: open the link in the `WATCH` line |
+| Any terminal | `fleet track` for a live view, `fleet agents` to watch or attach to one worker, `fleet status --brief --all` for one look |
 
 ```text
 fleet checkout · 2 live · 1 handed back
@@ -459,7 +460,7 @@ fleet checkout · 2 live · 1 handed back
   ○ copy         cursor:auto                  handed back: needs-verification · gate passed · 31m 5s
 ```
 
-Each row is a worker: `●` live or `○` stopped, its provider and model, what it is doing (working, a Claude worker's permission prompt or idle from its hooks, handed back, blocked with its question), its wall time and its tokens when Fleet knows them. Codex reports only the end of a turn, so a Codex worker waiting at an approval prompt shows `working`: open its screen with `fleet agents` or the dashboard. The status line keeps yours: `--install` backs up your settings file, then makes your current status line run first with Fleet's rows after it, and `--uninstall` puts it back. The dashboard listens on 127.0.0.1 only and needs the token in its link; on Linux, copy the link it prints rather than using `--open`, which would show the token to other users of the computer. All three only read run state, without the lock. See [status --brief](skill/references/commands.md#the-brief-view), [statusline](skill/references/commands.md#statusline) and [dashboard](skill/references/commands.md#dashboard).
+Each row is a worker: `●` live or `○` stopped, its provider and model, what it is doing (working, a Claude worker's permission prompt or idle from its hooks, handed back, blocked with its question), its wall time and its tokens when Fleet knows them. Codex reports only the end of a turn, so a Codex worker waiting at an approval prompt shows `working`: open its screen with `fleet agents` or the dashboard. The status line keeps yours: `--install` backs up your settings file, then makes your current status line run first with Fleet's rows after it, and `--uninstall` (or `fleet uninstall`) puts it back. The background dashboard is one per computer; it stops itself after 30 minutes with no live worker in any repo, and `fleet dashboard --stop` stops it sooner. Set `watch = "off"` under `[defaults]` to start nothing. The dashboard listens on 127.0.0.1 only and needs the token in its link; on Linux, copy the link it prints rather than using `--open`, which would show the token to other users of the computer. All three only read run state, without the lock. See [status --brief](skill/references/commands.md#the-brief-view), [statusline](skill/references/commands.md#statusline) and [dashboard](skill/references/commands.md#dashboard).
 
 ## Keeping the lead sharp
 

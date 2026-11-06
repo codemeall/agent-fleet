@@ -80,6 +80,10 @@ review = "cross-heavy"
 # verified; a failure refuses the ticket. Same shape as a ticket's checks: cwd (default ".") and timeout (seconds,
 # 1 to 3600, default 300) are optional. A passing run is reused while HEAD and the tree are unchanged.
 # accept_checks = [{run = "npm test", cwd = ".", timeout = 900}, {run = "npm run typecheck"}]
+# Where you see the workers once a run starts: "auto" (the default) has init print a WATCH line the lead relays,
+# with Claude Code's status line when your lead runs in it with Fleet's line set, else the background dashboard,
+# started then (fleet dashboard --stop ends it). "off" starts nothing and only names fleet agents.
+# watch = "off"
 # Set only when you intentionally target a validated cmux workspace:
 # workspace = "workspace:3"
 

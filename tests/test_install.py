@@ -20,10 +20,14 @@ class InstallTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
         self.root = self.base / 'fresh root'
+        # Setup also sets Claude Code's status line: its records, backups and caches stay in this test's folders.
+        self.env = {k: v for k, v in os.environ.items() if k != 'CLAUDE_CONFIG_DIR'}
+        self.env.update(HOME=str(self.base / 'home'), FLEET_CONFIG=str(self.base / 'fleet-config/config.toml'),
+                        XDG_CACHE_HOME=str(self.base / 'cache'))
 
-    def command(self, *args, ok=True, entry=None):
+    def command(self, *args, ok=True, entry=None, env=None):
         result = subprocess.run([NODE, str(entry or REPO / 'bin/fleet.js'), *map(str, args)],
-                                text=True, capture_output=True)
+                                text=True, capture_output=True, env=env or self.env)
         if ok:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         else:
@@ -55,6 +59,62 @@ class InstallTests(unittest.TestCase):
         self.remove()
         self.remove()
         self.assertFalse(self.installed().exists())
+
+    def settings(self, path=None):
+        return json.loads((path or self.root / '.claude/settings.json').read_text())
+
+    def test_setup_sets_the_claude_status_line_keeping_the_owners_and_uninstall_restores_it(self):
+        mine = {'theme': 'dark', 'statusLine': {'type': 'command', 'command': 'echo mine', 'padding': 1}}
+        (self.root / '.claude').mkdir(parents=True)
+        (self.root / '.claude/settings.json').write_text(json.dumps(mine))
+        out = self.setup('claude').stdout
+        line = self.settings()['statusLine']
+        runtime = str(self.installed() / 'bin/fleet')
+        self.assertIn(runtime, line['command'])  # the installed copy, never npx's cache
+        self.assertIn("statusline --then 'echo mine'", line['command'])
+        self.assertNotIn('_npx', line['command'])
+        self.assertEqual((line['refreshInterval'], line['padding'], self.settings()['theme']), (2, 1, 'dark'))
+        self.assertIn('statusLine in', out)
+        self.setup('claude')  # an update: the same line, never chained to itself
+        self.assertEqual(self.settings()['statusLine'], line)
+        res = subprocess.run(['/bin/sh', '-c', line['command']], input='{}', text=True, capture_output=True,
+                             env=self.env, cwd=self.base, timeout=60)
+        self.assertEqual(res.stdout, 'mine\n')
+        self.remove('claude')
+        self.assertEqual(self.settings(), mine)
+        self.assertFalse(self.installed().exists())
+
+    def test_setup_into_a_fresh_root_and_project_scope(self):
+        self.setup('claude')
+        self.assertIn('statusline', self.settings()['statusLine']['command'])
+        project = self.base / 'project'
+        project.mkdir()
+        self.command('setup', '--harness', 'claude', '--scope', 'project', '--root', project)
+        local = self.settings(project / '.claude/settings.local.json')['statusLine']
+        self.assertIn(str(project / '.claude/skills/fleet/bin/fleet'), local['command'])
+        self.command('uninstall', '--harness', 'claude', '--scope', 'project', '--root', project)
+        self.assertEqual(self.settings(project / '.claude/settings.local.json'), {})
+
+    def test_no_statusline_and_other_harnesses_leave_claude_settings_alone(self):
+        self.command('setup', '--harness', 'claude', '--root', self.root, '--no-statusline')
+        self.assertTrue(self.installed().exists())
+        self.assertFalse((self.root / '.claude/settings.json').exists())
+        self.command('setup', '--harness', 'codex', '--root', self.base / 'other')
+        self.assertFalse((self.base / 'other/.claude').exists())
+
+    def test_a_failing_status_line_install_only_warns(self):
+        (self.root / '.claude').mkdir(parents=True)
+        (self.root / '.claude/settings.json').write_text('{not json')
+        result = self.setup('claude')
+        self.assertTrue((self.installed() / 'SKILL.md').is_file())
+        self.assertIn("warning: Fleet is installed, but Claude Code's status line was not set", result.stderr)
+        self.assertIn('is not valid JSON', result.stderr)
+        self.assertIn(f'Retry with: CLAUDE_CONFIG_DIR={json.dumps(str(self.root / ".claude"))} ', result.stderr)
+        self.assertIn('statusline --install', result.stderr)
+        self.assertEqual((self.root / '.claude/settings.json').read_text(), '{not json')
+        no_python = dict(self.env, FLEET_PYTHON=str(self.base / 'missing-python'))
+        result = self.command('setup', '--harness', 'claude', '--root', self.base / 'second', env=no_python)
+        self.assertIn("status line was not set", result.stderr)
 
     def test_unowned_conflict_preflight_prevents_partial_install(self):
         conflict = self.installed('.cursor')

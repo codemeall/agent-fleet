@@ -527,7 +527,9 @@ class Statusline(WatchCase):
         with patch.object(fleet, "load_config", side_effect=fleet.FleetError("broken config")):
             self.assertIn("● 01", self.statusline())
         with patch.object(fleet, "repo_root", side_effect=fleet.FleetError("not a git repository")):
-            self.assertEqual(self.statusline(b"{}", "--then", "echo mine"), "mine\n")
+            # Outside any checkout, the active ones (this test's, registered at launch) still show, summed.
+            self.assertEqual(self.statusline(b"{}", "--then", "echo mine"),
+                             "mine\n+1 worker in 1 other repo (fleet status --brief --all)\n")
         with patch.object(fleet, "brief_runs", side_effect=RuntimeError("anything at all")):
             self.assertEqual(self.statusline(b"{}", "--then", "echo mine"), "mine\n")
 
@@ -800,7 +802,10 @@ class Dashboard(WatchCase):
         code, headers, body = self.request("/api/status")
         self.assertEqual((code, headers["Content-Type"]), (200, "application/json"))
         data = json.loads(body)
-        [run] = data["runs"]
+        [group] = data["checkouts"]
+        self.assertEqual(set(group), {"checkout", "label", "current", "runs", "skipped"})
+        self.assertEqual((group["checkout"], group["label"], group["current"]), (str(self.repo), self.repo.name, True))
+        [run] = group["runs"]
         [row] = run["workers"]
         self.assertEqual(set(row), {"run", "id", "live", "state", "worker", "provider", "model", "effort", "activity",
                                     "doing", "report", "elapsed_s", "tokens", "title"})
@@ -837,7 +842,7 @@ class Dashboard(WatchCase):
         code, _, body = self.request("/api/status")
         self.assertNotIn(b"<", body)
         self.assertNotIn(b">", body)
-        row = json.loads(body)["runs"][0]["workers"][0]
+        row = json.loads(body)["checkouts"][0]["runs"][0]["workers"][0]
         self.assertEqual(row["doing"], 'blocked: "</script><script>alert(1)</script> & more"')
         self.assertEqual(row["title"], "<img src=x onerror=alert(1)>")
 

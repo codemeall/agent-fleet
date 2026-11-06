@@ -234,8 +234,10 @@ def add_tokens(a: dict | None, b: dict | None) -> dict | None:
 # ---------- one arm ----------
 
 def clean_env(base: dict) -> dict:
-    """The owner's environment without a lead's session markers or a Fleet config of theirs."""
-    return {k: v for k, v in base.items() if k not in fleet.LEAD_ENV and not k.startswith("FLEET_")}
+    """The owner's environment without a lead's session markers or a Fleet config of theirs, and with no
+    background dashboard started for a throwaway arm."""
+    env = {k: v for k, v in base.items() if k not in fleet.LEAD_ENV and not k.startswith("FLEET_")}
+    return dict(env, FLEET_NO_DASHBOARD="1")
 
 
 def git(*args: str, cwd: Path | None = None, timeout: int = 600) -> str:

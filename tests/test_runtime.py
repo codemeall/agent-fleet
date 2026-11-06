@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # The suite may run inside a Claude Code or Codex session; its own context must not leak into Fleet output.
 for _var in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"):
     os.environ.pop(_var, None)
+os.environ["FLEET_NO_DASHBOARD"] = "1"  # init and launch start no background dashboard; tests that want one ask
 loader = importlib.machinery.SourceFileLoader("fleet_runtime_tests", str(ROOT / "skill/bin/fleet"))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 fleet = importlib.util.module_from_spec(spec)
