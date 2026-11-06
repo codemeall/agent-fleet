@@ -174,6 +174,31 @@ class Brief(WatchCase):
                          [call_line(f"n{n}", at + 3, 1, 1) for n in range(40)])  # m1 settles in the cache
         self.assertEqual(self.rows()["01"]["tokens"], {"input": 140, "output": 70, "cache_read": 0, "cache_write": 0})
 
+    def test_a_log_rewritten_in_place_is_counted_again(self):
+        self.claude_writer()
+        self.start()
+        self.launch()
+        w = self.state()["workers"]["01"]
+        log = self.session_log(w["session"], [call_line("m1", w["launched_at"] + 1, 100, 20)])
+        self.assertEqual(self.rows()["01"]["tokens"]["output"], 20)
+        st = log.stat()
+        with log.open("r+b") as fh:  # same inode, same size, other numbers
+            fh.write(log.read_bytes().replace(b'"output_tokens": 20', b'"output_tokens": 30'))
+        os.utime(log, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+        self.assertEqual(log.stat().st_size, st.st_size)
+        self.assertEqual(self.rows()["01"]["tokens"]["output"], 30)
+
+    def test_a_long_log_is_read_a_bounded_slice_per_refresh_and_unknown_until_read_through(self):
+        self.claude_writer()
+        self.start()
+        self.launch()
+        w = self.state()["workers"]["01"]
+        log = self.session_log(w["session"], [call_line(f"m{n}", w["launched_at"] + 1, 1, 1) for n in range(20)])
+        with patch.object(fleet, "TOKEN_READ_MAX", 600):
+            seen = [self.rows()["01"]["tokens"] for _ in range(log.stat().st_size // 200)]  # a slice ends at a line
+        self.assertGreater(seen.count(None), 2)  # never a partial count while the log is being read through
+        self.assertEqual(seen[-1], {"input": 20, "output": 20, "cache_read": 0, "cache_write": 0})
+
     def test_handed_back_blocked_and_plan_ready(self):
         self.start()
         self.launch()
@@ -310,8 +335,117 @@ class Brief(WatchCase):
         self.assertIn("running 2/4", self.call("status", "demo"))  # locked commands still pass the control check
 
     def test_status_without_a_run_needs_brief(self):
+        self.assertIn("status needs a run; fleet status --brief", self.call("status", expected=1))
+        self.assertFalse((self.repo / ".fleet").exists())  # refused before the lock, so nothing was made
         self.start()
         self.assertIn("status needs a run; fleet status --brief", self.call("status", expected=1))
+
+    def test_a_prompt_still_pending_after_the_leads_message_still_shows(self):
+        self.start()
+        self.launch()
+        self.hook("Notification", notification("permission_prompt", "Claude needs your permission to use Bash"))
+        self.call("send", "demo", "01", "While you wait: the docs too.")  # a message, a gate round, a supervise step
+        self.assertRegex(self.line("01"), r"permission prompt \d+s ago: Claude needs your permission to use Bash")
+        self.hook("Stop", stop("Done with that."))  # the turn the prompt held up ended: it was answered
+        self.assertIn('turn ended, no hand-back: "Done with that."', self.line("01"))
+        self.hook("Notification", notification("permission_prompt", "Claude needs your permission to use Edit"))
+        self.write_report("01", "needs-verification")
+        self.call("send", "demo", "01", "--changes", "Rename it.")  # a report written after the prompt answers it
+        self.assertIn("working", self.line("01"))
+
+    def test_bad_numbers_and_deep_nesting_never_take_the_rows_down(self):
+        self.start(tickets=[{"id": f"0{n}", "files": [f"f{n}.txt"]} for n in range(1, 5)])
+        for n in range(1, 5):
+            self.launch(f"0{n}")
+
+        def damage(state):
+            state["ledger"][0]["tokens"] = {"input": float("inf"), "output": 7}
+            state["ledger"][1].update(wall_s=float("nan"), tokens={"output": 1e300})
+            state["workers"]["03"]["launched_at"] = -1e308
+        self.edit_state(damage)
+        Path(self.state()["workers"]["04"]["exit_file"]).write_text(
+            '{"token": "%s", "returncode": 1e999}' % self.state()["workers"]["04"]["token"])
+        self.write_report("02", "blocked", "## Decisions and blockers\n- Which?\n", questions=[])
+        f = self.repo / ".fleet/runs/demo/reports/02.md"
+        f.write_text(f.read_text().replace('"questions": []', '"questions": ' + "[" * 200_000))
+        out = self.brief()
+        rows = {line.split()[1]: line for line in out.splitlines()[1:]}
+        self.assertEqual(set(rows), {"01", "02", "03", "04"})
+        self.assertIn("· 7 out", rows["01"])  # the infinite count is left out, the real one stays
+        self.assertIn('blocked: "Which?"', rows["02"])
+        self.assertNotIn("out", rows["02"])  # a count past any real one is junk, left out
+        self.assertIn("exited, no hand-back", rows["04"])
+        data = json.loads(self.call("status", "--brief", "--json"), parse_constant=lambda c: self.fail(f"{c} in JSON"))
+        self.assertEqual(len(data["runs"][0]["workers"]), 4)
+        self.assertIn("● 01", self.statusline())
+
+    def test_the_token_cache_never_lands_in_the_checkout(self):
+        self.claude_writer()
+        self.start()
+        self.launch()
+        w = self.state()["workers"]["01"]
+        self.session_log(w["session"], [call_line("m1", w["launched_at"] + 1, 1, 2)])
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": str(self.repo / ".cache")}):  # as when the checkout is ~
+            self.assertEqual(self.rows()["01"]["tokens"]["output"], 2)
+            self.statusline()
+        self.assertFalse((self.repo / ".cache").exists())
+
+
+class UnsafeFiles(WatchCase):
+    """Files a worker can write, swapped for a FIFO or a device: the views read them without hanging or flooding.
+    Each check runs the real CLI in a child with a timeout and a memory cap, so a regression fails, never hangs."""
+
+    def brief_child(self) -> subprocess.CompletedProcess:
+        import resource
+
+        def cap():
+            resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))
+        env = dict(os.environ, FLEET_CONFIG=str(Path(self.temp.name) / "none.toml"))
+        try:
+            return subprocess.run([sys.executable, str(FLEET), "status", "--brief", "--json"], cwd=self.repo,
+                                  env=env, capture_output=True, text=True, timeout=30, preexec_fn=cap)
+        except subprocess.TimeoutExpired:
+            self.fail("status --brief hung on a file a worker can write")
+
+    def swap(self, path: Path, kind: str) -> None:
+        path.unlink(missing_ok=True)
+        os.mkfifo(path) if kind == "fifo" else path.symlink_to(kind)
+
+    def test_a_fifo_report_events_file_or_run_json_never_hangs_the_views(self):
+        self.start()
+        self.launch()
+        self.launch("02")
+        self.swap(self.repo / ".fleet/runs/demo/reports/01.md", "fifo")
+        self.swap(Path(self.worker_rec("02")["hooks"]["events"]), "fifo")
+        stuck = self.repo / ".fleet/runs/stuck"
+        stuck.mkdir()
+        self.swap(stuck / "run.json", "fifo")
+        res = self.brief_child()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual({w["id"]: w["activity"] for w in data["runs"][0]["workers"]},
+                         {"01": "working", "02": "working"})
+        self.assertIn("not a regular file", data["skipped"][0]["reason"])
+
+    def test_a_report_linked_to_an_endless_device_is_never_read_whole(self):
+        self.start()
+        self.launch()
+        self.swap(self.repo / ".fleet/runs/demo/reports/01.md", "/dev/zero")
+        res = self.brief_child()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(json.loads(res.stdout)["runs"][0]["workers"][0]["activity"], "working")
+
+    def test_bounded_reads_refuse_what_is_not_a_regular_file_and_cap_the_rest(self):
+        f = Path(self.temp.name) / "big.txt"
+        f.write_bytes(b"x" * 5000 + b"END")
+        self.assertEqual(fleet.read_bounded(f, 100)[0], b"x" * 100)
+        self.assertEqual(fleet.read_bounded(f, 3, None)[0], b"END")
+        self.assertEqual(fleet.read_bounded(f, 10, 4998)[0], b"xxEND")
+        fifo = Path(self.temp.name) / "pipe"
+        os.mkfifo(fifo)
+        for odd in (fifo, Path("/dev/zero"), Path(self.temp.name)):
+            with self.subTest(odd=odd), self.assertRaisesRegex(OSError, "not a regular file"):
+                fleet.read_bounded(odd, 100)
 
 
 class BriefText(unittest.TestCase):
@@ -349,7 +483,8 @@ class Statusline(WatchCase):
                    "model": {"id": "claude-opus-5-5", "display_name": "Opus"}}
         out = self.statusline(payload)
         self.assertEqual(out.splitlines()[0], "fleet demo · 1 live")
-        self.assertRegex(out.splitlines()[1], r"\A  ● 01  writer:writer-model@high  working · \d+s\Z")
+        self.assertRegex(out.splitlines()[1], r"\A● 01  writer:writer-model@high  working · \d+s\Z")
+        self.assertEqual([x for x in out.splitlines() if x != x.strip()], [])  # Claude Code trims each line
         for garbage in (b"", b"\xff\xfe not json", b"[1, 2]", b'{"workspace": "x", "cwd": 7}', b"null"):
             with self.subTest(garbage=garbage):
                 self.assertEqual(self.statusline(garbage), out)
@@ -396,11 +531,36 @@ class Statusline(WatchCase):
         for n in range(1, 4):
             self.launch(f"0{n}")
         lines = self.statusline(b"{}", "--rows", "2").splitlines()
-        self.assertEqual(lines[-1], "  +1 more: fleet status --brief")
+        self.assertEqual(lines[-1], "+1 more: fleet status --brief")
         self.assertEqual(len(lines), 4)
+
+    def test_inside_a_fleet_worker_only_the_owners_line_shows(self):
+        self.start()
+        self.launch()
+        with patch.dict(os.environ, {"FLEET_WORKER": "demo/01"}):  # set by the worker's runner, inherited by Claude
+            self.assertEqual(self.statusline(b"{}", "--then", "echo mine"), "mine\n")
+            self.assertEqual(self.statusline(), "")
+        self.assertEqual(self.statusline(b"{}", "--then", "echo mine").splitlines()[:2],
+                         ["mine", "fleet demo · 1 live"])  # the lead's own line still lists its workers
+
+    def test_the_runners_mark_their_workers_environment(self):
+        d = Path(self.temp.name) / "runs" / "demo"
+        (d / "exits").mkdir(parents=True)
+        out = Path(self.temp.name) / "seen.txt"
+        show = f'printf %s "$FLEET_WORKER" >> {shlex.quote(str(out))}; echo'
+        env = {k: v for k, v in os.environ.items() if k != "FLEET_WORKER"}
+        for runner, args in (("_run", [str(d / "exits/01.tok.json"), "tok", show]),
+                             ("_headless", [str(d / "exits/rev-2.tok.json"), "tok", str(d / "rev-2.md"),
+                                            str(d / "rev-2.usage.json"), show])):
+            subprocess.run([sys.executable, str(FLEET), runner, *args], env=env, capture_output=True, timeout=60)
+            self.assertTrue(out.read_text().endswith({"_run": "demo/01", "_headless": "demo/rev-2"}[runner]))
 
     def test_the_session_directory_comes_from_the_json(self):
         here = Path.cwd()
+        tree = self.claude_home  # another folder: a worker's tree the lead cd'd into
+        self.assertNotEqual(tree, self.repo)
+        self.assertEqual(fleet.statusline_dir({"workspace": {"project_dir": str(self.repo), "current_dir": str(tree)},
+                                               "cwd": str(tree)}), self.repo)
         self.assertEqual(fleet.statusline_dir({"workspace": {"current_dir": str(self.repo)}, "cwd": "/"}), self.repo)
         self.assertEqual(fleet.statusline_dir({"cwd": str(self.repo)}), self.repo)
         for data in ({}, {"cwd": "relative/dir"}, {"cwd": "/no/such/dir"}, {"workspace": [1]}, {"cwd": None}):
@@ -466,7 +626,7 @@ class Install(unittest.TestCase):
         line = data["statusLine"]
         self.assertEqual((line["padding"], line["refreshInterval"]), (1, 2))
         words = shlex.split(line["command"])
-        self.assertEqual(words[-3:], ["statusline", "--then", mine])
+        self.assertEqual(words[-7:], ["statusline", "--then", mine, "||", "sh", "-c", mine])
         self.assertEqual(stat.S_IMODE(self.settings.stat().st_mode), 0o640)
         [backup] = self.backups()
         self.assertEqual(backup.read_bytes(), raw)
@@ -514,14 +674,45 @@ class Install(unittest.TestCase):
         self.assertEqual(json.loads((dotfiles / "settings.json").read_text())["theme"], "dark")
         self.assertIn("statusLine", json.loads((dotfiles / "settings.json").read_text()))
 
+    def test_a_line_that_merely_runs_fleet_is_the_owners_and_is_chained_whole(self):
+        self.claude.mkdir()
+        for mine in ("~/bin/mystatus.sh; fleet statusline", "fleet statusline | head -3",
+                     f"{FLEET} statusline --rows 2 > /dev/null; echo hi", f"{FLEET} statusline --bogus"):
+            with self.subTest(mine=mine):
+                original = {"statusLine": {"type": "command", "command": mine}}
+                self.settings.write_text(json.dumps(original))
+                self.run_fleet("--install")
+                self.assertEqual(fleet.fleet_statusline(self.line()), (True, mine))
+                self.run_fleet("--uninstall")
+                self.assertEqual(json.loads(self.settings.read_text()), original)
+
+    def test_the_owners_line_survives_a_deleted_fleet(self):
+        copy = self.root / "plugin-1.2.3" / "fleet"  # a plugin update deletes the old version's folder
+        copy.parent.mkdir()
+        shutil.copy2(FLEET, copy)
+        self.claude.mkdir()
+        mine = {"type": "command", "command": "echo mine; cat >/dev/null"}
+        self.settings.write_text(json.dumps({"statusLine": mine}))
+        with patch.object(fleet, "__file__", str(copy)):
+            self.run_fleet("--install")
+        command = self.line()["command"]
+        self.assertIn(str(copy), command)
+
+        def show() -> str:
+            return subprocess.run(["/bin/sh", "-c", command], input="{}", text=True, capture_output=True, timeout=60,
+                                  cwd=self.root, env=dict(os.environ, XDG_CACHE_HOME=str(self.root))).stdout
+        self.assertEqual(show(), "mine\n")
+        shutil.rmtree(copy.parent)
+        self.assertEqual(show(), "mine\n")
+
     def test_a_moved_fleet_is_repointed_and_its_chain_kept(self):
         self.claude.mkdir()
         self.settings.write_text(json.dumps({"statusLine": {
             "type": "command", "command": "/old/place/fleet statusline --then 'my-line --fast'"}}))
         self.run_fleet("--install")
         words = shlex.split(self.line()["command"])
-        self.assertEqual(Path(words[-4]).resolve(), FLEET.resolve())
-        self.assertEqual(words[-2:], ["--then", "my-line --fast"])
+        self.assertEqual(Path(words[-8]).resolve(), FLEET.resolve())
+        self.assertEqual(words[-7:], ["statusline", "--then", "my-line --fast", "||", "sh", "-c", "my-line --fast"])
         self.run_fleet("--uninstall")  # no record of its own: the chained command comes back
         self.assertEqual(self.line(), {"type": "command", "command": "my-line --fast"})
 
@@ -568,8 +759,8 @@ class Dashboard(WatchCase):
         self.addCleanup(self.server.shutdown)
         self.token = self.server.board.token
 
-    def request(self, path, method="GET", host="default", token=True):
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+    def request(self, path, method="GET", host="default", token=True, timeout=30):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         self.addCleanup(conn.close)
         if token:
             path += ("&" if "?" in path else "?") + f"t={self.token}"
@@ -662,6 +853,40 @@ class Dashboard(WatchCase):
         self.assertEqual(self.request("/api/screen?run=demo&id=nobody")[0], 404)
         self.assertEqual(self.request("/api/screen?run=nosuch&id=01")[0], 404)
 
+    def test_a_stuck_request_never_holds_up_the_next(self):
+        self.start()
+        self.launch()
+        real, stuck, release = fleet.brief_state, threading.Event(), threading.Event()
+
+        def slow(repo, run):
+            if not stuck.is_set():  # the first read hangs, as a file a worker swapped for something odd might
+                stuck.set()
+                release.wait(60)
+            return real(repo, run)
+        with patch.object(fleet, "brief_state", side_effect=slow):
+            first = threading.Thread(target=self.request, args=("/api/status",), daemon=True)
+            first.start()
+            self.addCleanup(release.set)
+            self.assertTrue(stuck.wait(10))
+            self.assertEqual(self.request("/api/status", timeout=10)[0], 200)
+            release.set()
+            first.join(30)
+
+    def test_open_is_refused_on_linux_and_opens_the_link_elsewhere(self):
+        import http.server
+        import webbrowser
+        opened = []
+        with patch.object(webbrowser, "open", side_effect=opened.append), \
+                patch.object(http.server.ThreadingHTTPServer, "serve_forever", lambda *a, **k: None):
+            with patch.object(fleet.sys, "platform", "linux"):
+                self.assertIn("--open is off on Linux", self.call("dashboard", "--open", expected=1))
+            self.assertEqual(opened, [])
+            with patch.object(fleet.sys, "platform", "darwin"):
+                out = self.call("dashboard", "--open")
+        [url] = opened
+        self.assertIn(url, out)
+        self.assertRegex(url, r"\Ahttp://127\.0\.0\.1:\d+/\?t=")
+
     def test_it_takes_no_lock_and_writes_nothing(self):
         self.start()
         self.launch()
@@ -746,7 +971,7 @@ class LiveTmux(unittest.TestCase):
         self.assertRegex(brief.splitlines()[1], r"\A  ● 01  fake:fake-1  working · \d+s\Z")
         shown = self.statusline()
         self.assertEqual(shown.splitlines()[:2], ["mine", "fleet demo · 1 live"])
-        self.assertRegex(shown.splitlines()[2], r"\A  ● 01  fake:fake-1  working · \d+s\Z")
+        self.assertRegex(shown.splitlines()[2], r"\A● 01  fake:fake-1  working · \d+s\Z")
         self.call("send", "demo", "01", "report")
         self.assertIn("REPORT 01 [needs-verification]", self.call("wait", "demo", "--timeout", "10", "--settle", "0"))
         self.assertRegex(self.call("status", "--brief"), r"fleet demo · 1 live · 1 handed back\n"
