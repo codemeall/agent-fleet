@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.0-preview.32
+
+See your Fleet workers from wherever you talk to the lead, and let the lead start Fleet when you ask it to.
+
+- **The lead can start Fleet itself.** The skill no longer blocks model invocation (`disable-model-invocation` in Claude Code, `allow_implicit_invocation` in Codex), so a lead you ask to delegate work starts `/fleet` without asking you to type it. Its description says when: the owner asks to run tickets or delegate work with Fleet. The owner-only rules inside the skill are unchanged.
+- **`fleet status --brief`:** one line per worker, with what it is doing (working, waiting at a permission prompt, idle, handed back, blocked, in review), elapsed time and tokens when known. It prints nothing when no worker is live, takes no lock and writes nothing in the checkout. `--json` gives the same rows to other tools.
+- **`fleet statusline`:** your workers live under Claude Code's prompt, where it lists its own subagents. Install it with `fleet statusline --install [--scope user|project]`. That keeps your existing status line above Fleet's rows (`--then`), backs up the settings file, and refreshes every 2 seconds. `--uninstall` restores the old line. This is Claude Code only: Codex's status line accepts built-in items only.
+- **`fleet dashboard`:** a local, read-only web page with every worker's row and live screen, for Codex and for desktop apps (ChatGPT/Codex desktop, Claude desktop, T3 Code, Antigravity, Cursor). It serves `127.0.0.1` only, with a per-start token in the link, refuses other Host headers and any write, and sends a CSP. Worker text is shown as text, never as HTML.
+- **Native agent panels:** Claude Code's agent panel, Codex's subagent view and Antigravity's Agent Manager list only agents the host itself started, and none offers a way to add others. So Fleet shows its workers beside them; the README says which view to use from which host.
+
 ## 0.1.0-preview.31
 
 The final whole-product review, after release 7. Five independent reviewers, one per area, reproduced each defect before reporting it. Every fix has a regression test that fails on the code before it, and an end-to-end run covers every feature.
@@ -59,7 +69,6 @@ The final whole-product review, after release 7. Five independent reviewers, one
   - **Checks:** investigators must report their planned checks.
   - **Best of two:** under strict, `VERDICT` names the pick's own `accept --pick`, and says that keeping another writer, or dropping the ticket, needs the owner's words.
   - **The owner's say:** `CONFLICT` handling and a `grant` that widens scope are decided with the owner. A dozen smaller mismatches between the docs and the code are fixed.
-- **The lead can start Fleet itself.** The skill no longer blocks model invocation (`disable-model-invocation` in Claude Code, `allow_implicit_invocation` in Codex), so a lead you ask to delegate work starts `/fleet` without asking you to type it. Its description says when: the owner asks to run tickets or delegate work with Fleet. The owner-only rules inside the skill are unchanged.
 - **README.** It covers releases 4–7 at last: a teamwork features table, worktree isolation, `fleet import`, strict acceptance, Fleet's own files, Codex turn signals and `fleet usage`. It drops two claims that were no longer true: that Fleet does not fetch issues, and that all workers share one checkout.
 - **Benchmarks.** A simulated `--fake` run of three cases, one per size class, is in `benchmarks/results/simulated/`. It shows that the kit and the pipeline work, not quality; the paid runs remain the owner's.
 - **Decisions.** TEAM-REVIEW.md records why neither optional item (P21, an MCP front door, and P15's writer half, structured transports) is built now, and what would reopen each.

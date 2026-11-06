@@ -4,7 +4,7 @@ Run a fleet of coding-agent CLIs (Claude Code, Codex, Cursor) led by the agent y
 
 The lead turns approved tickets into a saved execution plan, picks a worker model and effort for each ticket, watches progress, and verifies every result before dependents start. Workers share one Git checkout with explicit file ownership, or each work in their own Git worktree when you ask. **You keep control of commits and publishing.**
 
-> **Preview `0.1.0-preview.31`.** Bundled adapters exist for Claude Code, Codex and Cursor, plus Antigravity and OpenCode (disabled by default). Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
+> **Preview `0.1.0-preview.32`.** Bundled adapters exist for Claude Code, Codex and Cursor, plus Antigravity and OpenCode (disabled by default). Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
 
 - [Quick start](#quick-start)
 - [Installation](#installation)
@@ -305,12 +305,15 @@ The lead drives Fleet through the `fleet` CLI; you rarely need to, but you can r
 | `fleet release` | Lift the hold so launches continue |
 | `fleet resume <run>` | Show a run's plan, workers and reports; a fresh lead starts here |
 | `fleet status <run>` | Table of workers and their report status |
+| `fleet status --brief` | One line per live worker: what it's doing, how long, tokens (prints nothing when none is live) |
 | `fleet stop <run> --all` | Quit every worker and confirm it exited; do this before shutting down |
 | `fleet context` | How full the lead's context is |
 | `fleet usage [<run>] [--by provider]` | How each provider, model or tier performed: rework and first-pass rate |
 | `fleet doctor` | Check the terminal backend, logins, models and installed skills |
 | `fleet agents [<run>]` | Browse the workers, watch any one live, attach to it (yours; the lead never runs it) |
 | `fleet attach <run> <id>` | Open one worker's terminal (headless runs) |
+| `fleet statusline --install` | Show live workers in Claude Code's status line, below your own line (`--uninstall` undoes it) |
+| `fleet dashboard [--open]` | A local, read-only web page of the workers and their screens, for desktop apps |
 | `fleet provider enable\|disable <name>` | Turn a provider on or off in your config |
 
 More: [safe first run](examples/README.md) · [agent workflow](skill/SKILL.md) · [commands](skill/references/commands.md) · [routing](skill/references/routing.md) · [host setup](skill/references/harnesses.md) · [providers](skill/references/providers.md) · [lead context](skill/references/lead-context.md) · [worked examples](skill/references/examples.md)
@@ -437,6 +440,26 @@ Run `fleet agents` in any terminal in the repository (it opens the run changed m
 Typing into a worker bypasses the lead. Tell the lead what you said, or ask it to `send` the message for you. The view only reads run state, so it's safe to keep open while the lead works.
 
 A headless worker's window stays open after it exits, so the lead (and you) can still read its last screen; `fleet stop <run> <id> --close` removes it. If the tmux server stops (a reboot, `tmux kill-server`), its workers die without an exit receipt and show as `UNREACHABLE`: confirm they're gone and record it with `fleet recover`, exactly as for a closed cmux pane.
+
+#### Where you see your workers
+
+The agent panels hosts build in (Claude Code's agent panel, Codex's, Antigravity's Agent Manager) list only the agents that host started itself, and none offers a public way to add others. So Fleet shows its workers beside them, wherever you talk to the lead:
+
+| You lead from | See the workers with |
+| --- | --- |
+| Claude Code | `fleet statusline --install`: a row per live worker under the prompt, below your own status line, refreshed every 2 seconds |
+| Codex CLI | `fleet agents` in a split, or `fleet dashboard`. Codex's status line takes its built-in items only, so it can't run Fleet's |
+| A desktop app: ChatGPT or Codex desktop, Claude desktop, T3 Code, Antigravity, the Cursor IDE | `fleet dashboard`: open the link it prints in any browser |
+| Any terminal | `fleet agents`, or `fleet status --brief` for one look |
+
+```text
+fleet checkout · 2 live · 1 handed back
+  ● api-client   claude:claude-opus-5-5@high  permission prompt 2m 4s ago: Claude needs your permission to use Bash · 12m 40s · 2.1M in, 41.2K out
+  ● settings-ui  codex:gpt-6-sol@high         working · 9m 3s
+  ○ copy         cursor:auto                  handed back: needs-verification · gate passed · 31m 5s
+```
+
+Each row is a worker: `●` live or `○` stopped, its provider and model, what it is doing (working, a Claude worker's permission prompt or idle from its hooks, handed back, blocked with its question), its wall time and its tokens when Fleet knows them. Codex reports only the end of a turn, so a Codex worker waiting at an approval prompt shows `working`: open its screen with `fleet agents` or the dashboard. The status line keeps yours: `--install` backs up your settings file, then makes your current status line run first with Fleet's rows after it, and `--uninstall` puts it back. The dashboard listens on 127.0.0.1 only and needs the token in its link; on Linux, copy the link it prints rather than using `--open`, which would show the token to other users of the computer. All three only read run state, without the lock. See [status --brief](skill/references/commands.md#the-brief-view), [statusline](skill/references/commands.md#statusline) and [dashboard](skill/references/commands.md#dashboard).
 
 ## Keeping the lead sharp
 
