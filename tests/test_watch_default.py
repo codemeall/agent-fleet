@@ -402,8 +402,8 @@ class Background(Machine):
 
     def setUp(self):
         super().setUp()
-        self.env = patch.dict(os.environ, {k: v for k, v in os.environ.items() if k != "FLEET_NO_DASHBOARD"},
-                              clear=True)
+        # every variable that stops init's dashboard goes, CI's own CI=true included
+        self.env = patch.dict(os.environ, {k: v for k, v in os.environ.items() if k not in HOST_ENV}, clear=True)
         self.env.start()
         self.addCleanup(self.env.stop)
         self.addCleanup(fleet.dashboard_stop)
