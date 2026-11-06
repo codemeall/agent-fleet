@@ -445,7 +445,8 @@ class Packaging(unittest.TestCase):
     def test_the_readme_links_the_kit_and_makes_no_claim(self):
         readme = (ROOT / "README.md").read_text()
         self.assertIn("[benchmark kit](benchmarks/README.md)", readme)
-        self.assertIn("it has no results yet", readme)
+        self.assertIn("It has no paid results yet", readme)  # a simulated run is no result, and the README says so
+        self.assertIn("so this README makes no performance claim", readme)
 
 
 if __name__ == "__main__":
