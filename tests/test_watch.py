@@ -399,7 +399,12 @@ class UnsafeFiles(WatchCase):
         import resource
 
         def cap():
-            resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))
+            # A memory cap where the platform allows one: macOS refuses RLIMIT_AS, and there the 30-second timeout
+            # alone still turns an unbounded read into a failure instead of a hang.
+            try:
+                resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))
+            except (ValueError, OSError):
+                pass
         env = dict(os.environ, FLEET_CONFIG=str(Path(self.temp.name) / "none.toml"))
         try:
             return subprocess.run([sys.executable, str(FLEET), "status", "--brief", "--json"], cwd=self.repo,
