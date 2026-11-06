@@ -1,0 +1,73 @@
+{
+  "size": "medium-multi-file",
+  "ticket": "SIMULATED CASE (fake CLIs, no model). Add `tools/count_headings.py`, which prints how many `### ` headings `skill/references/commands.md` has, a shared helper `tools/doc_lines.py` it imports, and `tests/test_count_headings.py`, a unittest that runs it and checks the count is a positive integer.",
+  "criteria": [
+    {
+      "id": "count",
+      "text": "The script prints a positive integer",
+      "checks": [
+        "count"
+      ]
+    },
+    {
+      "id": "helper",
+      "text": "The helper is shared and imported",
+      "checks": [
+        "unit"
+      ]
+    },
+    {
+      "id": "test",
+      "text": "A unit test covers it",
+      "checks": [
+        "unit"
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "id": "count",
+      "run": "python3 tools/count_headings.py | grep -Eqx '[1-9][0-9]*'",
+      "timeout": 60
+    },
+    {
+      "id": "unit",
+      "run": "python3 -m unittest tests.test_count_headings",
+      "timeout": 120
+    }
+  ],
+  "fake": {
+    "edits": {
+      "tools/doc_lines.py": "from pathlib import Path\n\nROOT = Path(__file__).resolve().parent.parent\n\n\ndef doc_lines(rel: str) -> list[str]:\n    return (ROOT / rel).read_text().splitlines()\n",
+      "tools/count_headings.py": "import sys\nfrom pathlib import Path\n\nsys.path.insert(0, str(Path(__file__).resolve().parent))\nfrom doc_lines import doc_lines  # noqa: E402\n\nif __name__ == \"__main__\":\n    print(sum(1 for line in doc_lines(\"skill/references/commands.md\") if line.startswith(\"### \")))\n",
+      "tests/test_count_headings.py": "import subprocess\nimport sys\nimport unittest\nfrom pathlib import Path\n\nROOT = Path(__file__).resolve().parent.parent\n\n\nclass CountHeadings(unittest.TestCase):\n    def test_it_prints_a_positive_count(self):\n        out = subprocess.run([sys.executable, str(ROOT / \"tools\" / \"count_headings.py\")], capture_output=True,\n                             text=True, check=True).stdout.strip()\n        self.assertGreater(int(out), 0)\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n"
+    },
+    "usage": {
+      "input_tokens": 12000,
+      "output_tokens": 3000
+    },
+    "lead_usage": {
+      "input_tokens": 9000,
+      "output_tokens": 2500
+    },
+    "worker_usage": {
+      "input_tokens": 8000,
+      "output_tokens": 2000
+    },
+    "review_findings": [
+      {
+        "severity": "low",
+        "file": "tools/count_headings.py",
+        "confidence": "suspected",
+        "text": "Fenced code containing ### would be counted."
+      }
+    ]
+  },
+  "repo": "../../..",
+  "commit": "e73f146b111be6741531bb1fd57a4f604a234e06",
+  "model": {
+    "cli": "claude",
+    "model": "opus",
+    "effort": "high"
+  }
+}
