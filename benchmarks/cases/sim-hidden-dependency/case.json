@@ -1,0 +1,56 @@
+{
+  "size": "hidden-dependency",
+  "ticket": "SIMULATED CASE (fake CLIs, no model). Add `tools/version_check.py`, which exits 0 when `package.json`'s version equals the `VERSION` in `skill/bin/fleet`, and prints both. The obvious regex on `skill/bin/fleet` also matches other assignments; read only the line that starts with `VERSION = `.",
+  "criteria": [
+    {
+      "id": "agrees",
+      "text": "It exits 0 on this commit, where both versions agree",
+      "checks": [
+        "agrees"
+      ]
+    },
+    {
+      "id": "exact",
+      "text": "It reads only the VERSION line",
+      "checks": [
+        "prints"
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "id": "agrees",
+      "run": "python3 tools/version_check.py",
+      "timeout": 60
+    },
+    {
+      "id": "prints",
+      "run": "python3 tools/version_check.py | grep -q 'package.json'",
+      "timeout": 60
+    }
+  ],
+  "fake": {
+    "edits": {
+      "tools/version_check.py": "import json\nimport re\nimport sys\nfrom pathlib import Path\n\nROOT = Path(__file__).resolve().parent.parent\npkg = json.loads((ROOT / \"package.json\").read_text())[\"version\"]\nline = next(l for l in (ROOT / \"skill\" / \"bin\" / \"fleet\").read_text().splitlines() if l.startswith(\"VERSION = \"))\ncli = re.search(r'\"([^\"]+)\"', line).group(1)\nprint(f\"package.json {pkg}, skill/bin/fleet {cli}\")\nsys.exit(0 if pkg == cli else 1)\n"
+    },
+    "usage": {
+      "input_tokens": 12000,
+      "output_tokens": 3000
+    },
+    "lead_usage": {
+      "input_tokens": 9000,
+      "output_tokens": 2500
+    },
+    "worker_usage": {
+      "input_tokens": 8000,
+      "output_tokens": 2000
+    }
+  },
+  "repo": "../../..",
+  "commit": "e73f146b111be6741531bb1fd57a4f604a234e06",
+  "model": {
+    "cli": "claude",
+    "model": "opus",
+    "effort": "high"
+  }
+}

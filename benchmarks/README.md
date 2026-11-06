@@ -2,7 +2,9 @@
 
 Does Fleet beat one agent on the same ticket? This kit is how the owner finds out ([#16](https://github.com/codemeall/agent-fleet/issues/16)). It runs one ticket twice from the same commit: once with Fleet, and once with one agent of the same model. Then it runs the same checks on both results and writes a table.
 
-There are no results yet, so Fleet makes no claim. When there are, they are in [results/](results/README.md), losses included.
+There are no paid results yet, so Fleet makes no speed, cost or quality claim. When there are, they are in [results/](results/README.md), losses included.
+
+**Simulated run (2026-11-06).** [results/simulated/](results/simulated/README.md) holds one `--fake` run of three simulated cases, one per size class ([`sim-small`](cases/sim-small/case.json), [`sim-medium-multi-file`](cases/sim-medium-multi-file/case.json), [`sim-hidden-dependency`](cases/sim-hidden-dependency/case.json)), against `0.1.0-preview.31`. Each Fleet arm ran the real Fleet runtime (plan, launch, gate, cross-family review, accept) with scripted CLIs, and every check passed on both arms. It shows that the kit and Fleet's pipeline work end to end. It is not a benchmark: no model wrote the code, so it says nothing about quality, and its wall times are scripted. The three real tickets and the paid runs that answer #16 remain the owner's.
 
 The kit is a repository tool. It is not part of the npm package.
 

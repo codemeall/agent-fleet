@@ -1,0 +1,44 @@
+{
+  "size": "small",
+  "ticket": "SIMULATED CASE (fake CLIs, no model). Add `tools/hello_fleet.py`, which prints `fleet ok`, and nothing else.",
+  "criteria": [
+    {
+      "id": "prints",
+      "text": "The script prints fleet ok",
+      "checks": [
+        "prints"
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "id": "prints",
+      "run": "python3 tools/hello_fleet.py | grep -qx 'fleet ok'",
+      "timeout": 60
+    }
+  ],
+  "fake": {
+    "edits": {
+      "tools/hello_fleet.py": "print(\"fleet ok\")\n"
+    },
+    "usage": {
+      "input_tokens": 12000,
+      "output_tokens": 3000
+    },
+    "lead_usage": {
+      "input_tokens": 9000,
+      "output_tokens": 2500
+    },
+    "worker_usage": {
+      "input_tokens": 8000,
+      "output_tokens": 2000
+    }
+  },
+  "repo": "../../..",
+  "commit": "e73f146b111be6741531bb1fd57a4f604a234e06",
+  "model": {
+    "cli": "claude",
+    "model": "opus",
+    "effort": "high"
+  }
+}

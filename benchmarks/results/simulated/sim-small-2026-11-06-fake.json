@@ -1,0 +1,193 @@
+{
+  "schema": 1,
+  "arms": {
+    "single": {
+      "arm": "single",
+      "commit": "e73f146b111be6741531bb1fd57a4f604a234e06",
+      "exit": 0,
+      "timed_out": false,
+      "wall_s": 0.0,
+      "command": [
+        "claude",
+        "-p",
+        "--output-format",
+        "json",
+        "--allowedTools",
+        "Bash(python3 tools/hello_fleet.py),Bash(grep -qx 'fleet ok')",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+        "--permission-mode",
+        "acceptEdits",
+        "--permission-prompts",
+        "none",
+        "You are working alone on one ticket in this repository. Make the change in the working tree and test it. Do not commit, push or change Git history. Nobody can answer questions during this run: decide, and say what you decided in your final message.\n\nThe ticket:\n\nSIMULATED CASE (fake CLIs, no model). Add `tools/hello_fleet.py`, which prints `fleet ok`, and nothing else.\n\nThe result is judged by these checks, run from the repository root:\n- `python3 tools/hello_fleet.py | grep -qx 'fleet ok'`\n"
+      ],
+      "agent": {
+        "tokens": {
+          "input": 12000,
+          "output": 3000
+        },
+        "message": "Applied the case edits: tools/hello_fleet.py",
+        "errors": [],
+        "denials": [],
+        "stderr_tail": ""
+      },
+      "tokens": {
+        "agent": {
+          "input": 12000,
+          "output": 3000
+        },
+        "workers": null,
+        "workers_unknown": null,
+        "workers_count": null
+      },
+      "review_findings": null,
+      "review_note": "no review: one agent",
+      "cost": {
+        "usd": null,
+        "complete": false,
+        "missing": [
+          "no price file"
+        ],
+        "prices": null
+      },
+      "checks": [
+        {
+          "id": "prints",
+          "run": "python3 tools/hello_fleet.py | grep -qx 'fleet ok'",
+          "passed": true,
+          "exit": 0,
+          "seconds": 0.0,
+          "tail": ""
+        }
+      ],
+      "criteria": [
+        {
+          "id": "prints",
+          "text": "The script prints fleet ok",
+          "checks": [
+            "prints"
+          ],
+          "passed": true,
+          "by": "checks"
+        }
+      ],
+      "diffstat": "",
+      "untracked": [
+        "tools/hello_fleet.py"
+      ],
+      "manual_fixes": null,
+      "notes": []
+    },
+    "fleet": {
+      "arm": "fleet",
+      "commit": "e73f146b111be6741531bb1fd57a4f604a234e06",
+      "exit": 0,
+      "timed_out": false,
+      "wall_s": 4.5,
+      "command": [
+        "claude",
+        "-p",
+        "--output-format",
+        "json",
+        "--allowedTools",
+        "Bash(/tmp/fleet-bench-fleet-gt0n9jh0/repo/.claude/skills/fleet/bin/fleet *),Bash(python3 /tmp/fleet-bench-fleet-gt0n9jh0/repo/.claude/skills/fleet/bin/fleet *),Bash(.claude/skills/fleet/bin/fleet *),Bash(python3 .claude/skills/fleet/bin/fleet *),Bash(python3 tools/hello_fleet.py),Bash(grep -qx 'fleet ok')",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+        "--permission-mode",
+        "acceptEdits",
+        "--permission-prompts",
+        "none",
+        "You are the lead for one benchmark ticket in this repository. Deliver it with Fleet: read the Fleet skill at `/tmp/fleet-bench-fleet-gt0n9jh0/repo/.claude/skills/fleet/SKILL.md` and follow it. The Fleet runtime is `/tmp/fleet-bench-fleet-gt0n9jh0/repo/.claude/skills/fleet/bin/fleet`.\n\nThe owner approved this ticket, its plan and its budget before this run. Do not stop to ask for confirmation; nobody can answer questions during this run. Decide, and record your decisions in the run.\n- Name the run `bench` and use the tmux backend: `/tmp/fleet-bench-fleet-gt0n9jh0/repo/.claude/skills/fleet/bin/fleet init bench --backend tmux`.\n- Workers use the providers in FLEET_CONFIG. The run's caps are max_workers 4 and max_wall_minutes 10; do not work around them.\n- Do not commit, push or change Git history. Leave the change in the working tree.\n- When the work is accepted, run `/tmp/fleet-bench-fleet-gt0n9jh0/repo/.claude/skills/fleet/bin/fleet stop bench --all` and reply with a short summary.\n\nThe ticket:\n\nSIMULATED CASE (fake CLIs, no model). Add `tools/hello_fleet.py`, which prints `fleet ok`, and nothing else.\n\nThe result is judged by these checks, run from the repository root:\n- `python3 tools/hello_fleet.py | grep -qx 'fleet ok'`\n"
+      ],
+      "agent": {
+        "tokens": {
+          "input": 9000,
+          "output": 2500
+        },
+        "message": "Delivered t1 with Fleet.\nfleet init bench --backend tmux --review cross-heavy --routing agents=claude,codex -> 0\nfleet plan bench --file /tmp/fleet-bench-fleet-gt0n9jh0/tmp/plan.json -> 0\nfleet launch bench --ready -> 0\nfleet wait bench --gate --timeout 5 --interval 1 --settle 0 --stall 0 -> 0\nfleet review bench t1 --settle 0 -> 0\nfleet wait bench --gate --timeout 5 --interval 1 --settle 0 --stall 0 -> 0\nfleet accept bench t1 --gate --evidence /tmp/fleet-bench-fleet-gt0n9jh0/tmp/evidence.md -> 0\nfleet stop bench --all --timeout 10 -> 0\nfleet cost bench --json -> 0",
+        "errors": [],
+        "denials": [],
+        "stderr_tail": ""
+      },
+      "tokens": {
+        "agent": {
+          "input": 9000,
+          "output": 2500
+        },
+        "workers": {
+          "input": 8000,
+          "output": 2000
+        },
+        "workers_unknown": 1,
+        "workers_count": 2
+      },
+      "review_findings": 0,
+      "review_note": "from 1 review report",
+      "fleet_runs": [
+        "bench"
+      ],
+      "worker_wall_s": 2.6,
+      "cost": {
+        "usd": null,
+        "complete": false,
+        "missing": [
+          "no price file"
+        ],
+        "prices": null
+      },
+      "checks": [
+        {
+          "id": "prints",
+          "run": "python3 tools/hello_fleet.py | grep -qx 'fleet ok'",
+          "passed": true,
+          "exit": 0,
+          "seconds": 0.0,
+          "tail": ""
+        }
+      ],
+      "criteria": [
+        {
+          "id": "prints",
+          "text": "The script prints fleet ok",
+          "checks": [
+            "prints"
+          ],
+          "passed": true,
+          "by": "checks"
+        }
+      ],
+      "diffstat": "",
+      "untracked": [
+        "tools/hello_fleet.py"
+      ],
+      "manual_fixes": null,
+      "notes": []
+    }
+  },
+  "case": "sim-small",
+  "size": "small",
+  "date": "2026-11-06",
+  "fake": true,
+  "repo": "https://github.com/codemeall/agent-fleet.git",
+  "commit": "e73f146b111be6741531bb1fd57a4f604a234e06",
+  "model": {
+    "cli": "claude",
+    "model": "opus",
+    "effort": "high"
+  },
+  "ticket": "SIMULATED CASE (fake CLIs, no model). Add `tools/hello_fleet.py`, which prints `fleet ok`, and nothing else.",
+  "kit": {
+    "fleet_version": "0.1.0-preview.31",
+    "kit_commit": "e73f146b111be6741531bb1fd57a4f604a234e06",
+    "cli_version": null
+  },
+  "budget": {
+    "minutes": 10,
+    "max_workers": 4
+  }
+}
