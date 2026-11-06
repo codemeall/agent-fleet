@@ -125,9 +125,6 @@ function buildPluginSkills() {
   assertParents(root, target);
   if (exists(target)) assertOwned(target);
   install(target, inventory(source, true), true);
-  // Codex represents explicit invocation in agents/openai.yaml, not this Claude field.
-  const skillFile = path.join(target, 'SKILL.md');
-  fs.writeFileSync(skillFile, fs.readFileSync(skillFile, 'utf8').replace(/^disable-model-invocation: true\r?\n/m, ''));
   const markerFile = path.join(target, MARKER);
   const record = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
   record.files = inventory(target);

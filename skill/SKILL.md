@@ -1,8 +1,7 @@
 ---
 name: fleet
-description: Plan, launch, resume and verify a local fleet of coding-agent CLIs in cmux panes or headless tmux for approved tickets, with saved dependencies and explicit file ownership.
+description: Plan, launch, resume and verify a local fleet of coding-agent CLIs in cmux panes or headless tmux for approved tickets, with saved dependencies and explicit file ownership. Use when the owner asks to run tickets or delegate work with Fleet.
 argument-hint: "[auto|single:<provider>|agents=...] [backend=cmux|tmux] [workspace=<ref>] [review=<mode>] -- <tickets dir or tasks>"
-disable-model-invocation: true
 ---
 
 # Fleet
@@ -27,7 +26,7 @@ Companion skills are optional ([host setup](references/harnesses.md)): run `gril
 
 - Read repository instructions, `.fleet/rules.md`, the agreed spec and the full tickets. Bring GitHub issues in with read-only `fleet import <owner/repo#N|URL> --dir <dir>` ([import](references/commands.md#import)) and export other remote content to local files; a URL is not a `--ticket` input. Preserve original IDs and source links, using safe slug IDs for Fleet (`settings-copy`, not a path or URL).
 - Verify the active machine's absolute repository path. Run `fleet doctor` from it. Turn a provider on or off only when the owner asks: `fleet provider enable|disable <name>` ([rules](references/providers.md#agent-rules)). Never sign in for the owner. `fleet smoke` is the owner's live check (it spends usage): run it only when asked, showing its plan first. Route only to adapters whose checks pass. `fleet models <provider> [filter]` lists the models you may choose; propose only those, and ask the owner rather than silently substituting one.
-- If the named run exists, use `fleet resume <run>` (one line per ticket; `--json` for full records), then inspect the reports, decisions, any `notes.md` and reconciled process states. Do not initialize a replacement or relaunch a worker whose exit is unconfirmed.
+- If the named run exists, use `fleet resume <run>`, then inspect the reports, decisions, any `notes.md` and reconciled process states. Do not initialize a replacement or relaunch a worker whose exit is unconfirmed.
 - Otherwise use `fleet init <run> [--backend cmux|tmux] [--workspace <ref>] [--routing <mode>] [--review <mode>]`, mapping `backend=`, `workspace=`, routing and `review=` to these flags. Init defaults to cmux inside cmux, else headless tmux, and validates a cmux workspace (never fall back to an unrelated one); relay its `fleet agents` line. Init, plan and add refuse a required cross-family review the pool could never give: relay the owner's options. `--review off` against the config's review needs `--reason "<owner's words>"`. `--isolation worktree`, only when the owner asks, gives each implementation ticket its own worktree of the current checkout (uncommitted edits included), so overlapping tickets may run together and workers may build; `accept` applies the work ([worktrees](references/commands.md#worktree-isolation)).
 
 ### Steering routing

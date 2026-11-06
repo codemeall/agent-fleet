@@ -139,10 +139,7 @@ class InstallTests(unittest.TestCase):
         for source_file in (self.base / 'package/skill').rglob('*'):
             if source_file.is_file():
                 generated = self.base / 'package/dist/codex/agent-fleet/skills/fleet' / source_file.relative_to(self.base / 'package/skill')
-                expected = source_file.read_bytes()
-                if source_file.name == 'SKILL.md':
-                    expected = expected.replace(b'disable-model-invocation: true\n', b'')
-                self.assertEqual(expected, generated.read_bytes())
+                self.assertEqual(source_file.read_bytes(), generated.read_bytes())
         npm_root = self.base / 'npm-install'
         installed = subprocess.run([NPM, 'install', '--prefix', str(npm_root), '--ignore-scripts',
                                     '--no-audit', '--no-fund', '--cache', str(self.base / 'npm-cache'), str(tar_path)],
