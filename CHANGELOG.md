@@ -59,6 +59,8 @@ The final whole-product review, after release 7. Five independent reviewers, one
   - **Checks:** investigators must report their planned checks.
   - **Best of two:** under strict, `VERDICT` names the pick's own `accept --pick`, and says that keeping another writer, or dropping the ticket, needs the owner's words.
   - **The owner's say:** `CONFLICT` handling and a `grant` that widens scope are decided with the owner. A dozen smaller mismatches between the docs and the code are fixed.
+- **README.** It covers releases 4–7 at last: a teamwork features table, worktree isolation, `fleet import`, strict acceptance, Fleet's own files, Codex turn signals and `fleet usage`. It drops two claims that were no longer true: that Fleet does not fetch issues, and that all workers share one checkout.
+- **Benchmarks.** A simulated `--fake` run of three cases, one per size class, is in `benchmarks/results/simulated/`. It shows that the kit and the pipeline work, not quality; the paid runs remain the owner's.
 - **Decisions.** TEAM-REVIEW.md records why neither optional item (P21, an MCP front door, and P15's writer half, structured transports) is built now, and what would reopen each.
 
 ## 0.1.0-preview.30
