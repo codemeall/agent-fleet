@@ -33,7 +33,7 @@ import time
 import tomllib
 from pathlib import Path
 
-VERSION = "0.1.0-preview.33"  # bump with package.json on release; tests/test_install.py checks they match
+VERSION = "0.1.0-preview.34"  # bump with package.json on release; tests/test_install.py checks they match
 SKILL_DIR = Path(__file__).resolve().parent.parent
 USER_CONFIG = Path(os.environ.get("FLEET_CONFIG", "~/.config/agent-fleet/config.toml")).expanduser()
 HARNESS_SKILL_DIRS = {
@@ -5077,6 +5077,27 @@ OWNER_VIEWS = ("agents", "attach", "track")
 AGENT_REFRESH_S = 1.0
 STATE_MARKS = {"running": "running", "launching": "starting", "stop-failed": "stop failed", "unknown": "unknown",
                "exited": "exited", "recovered": "recovered", "closed": "closed"}
+# Variables a coding agent sets in the shell it runs commands in, read by name only (some values hold a session ID):
+# Fleet's own workers, Claude Code, Codex, Gemini CLI, Cursor's agent, and the shared AI_AGENT convention. An agent
+# that runs commands without a terminal needs none of them: that alone marks its shell.
+AGENT_SHELL_ENV = (FLEET_WORKER_ENV, "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SANDBOX",
+                   "GEMINI_CLI", "CURSOR_AGENT", "AI_AGENT")
+
+
+def agent_shell(env=None) -> str | None:
+    """Why what an owner view prints here goes to an agent, and so into its context, rather than to a person: stdout
+    is not a terminal, or an agent's shell variable is set (an agent can run commands on a terminal too). None in a
+    person's own terminal, where the views stay live. Elsewhere track and agents print once and end, and attach
+    refuses, so none of them keeps streaming into an agent."""
+    env = os.environ if env is None else env
+    try:
+        tty = sys.stdout is not None and sys.stdout.isatty()
+    except (OSError, ValueError, AttributeError):  # closed, or replaced by something with no isatty
+        tty = False
+    if not tty:
+        return "not a terminal"
+    marker = next((k for k in AGENT_SHELL_ENV if env.get(k)), None)
+    return f"an agent's shell ({marker} is set)" if marker else None
 
 
 def latest_run(repo: Path) -> str:
@@ -5135,6 +5156,10 @@ def cmd_attach(a, cfg):
     if argv is None:
         print(f"{a.id} runs in {term.locate(w)}; switch to it there. `fleet agents {a.run}` shows its screen here.")
         return 0
+    if why := agent_shell():
+        raise FleetError(f"fleet attach is for your own terminal, and this is {why}: attached here, {a.id}'s screen "
+                         f"would stream to whatever reads this output. Run it in a terminal of your own; fleet agents "
+                         f"{a.run} lists the workers here")
     env = None if "switch-client" in argv else {k: v for k, v in os.environ.items() if k != "TMUX"}
     return subprocess.call(argv, env=env)
 
@@ -5143,7 +5168,7 @@ def cmd_agents(a, cfg):
     repo = repo_root()
     run = a.run or latest_run(repo)
     valid_id(run)
-    if a.list or not (sys.stdin.isatty() and sys.stdout.isatty()):
+    if a.list or not sys.stdin.isatty() or agent_shell():  # the live view only for a person at a terminal
         state, rows = agent_rows(repo, run, {})
         term = terminal(state)
         print(f"run {run}  {term.where()}  {len(active(state))} running")
@@ -12699,10 +12724,11 @@ def track_frame(repo: Path | None, a, cfg: dict | None, cache: TokenCache) -> tu
 
 
 def track_view(a, cfg) -> int:
-    """Redraw the frame every --interval seconds. On a terminal it draws on the alternate screen, each frame over
-    the last, and puts the terminal back however it ends: Ctrl-C, SIGTERM or SIGHUP (each ends it as Ctrl-C does),
-    or at exit; elsewhere it prints the frames one after another. It ends on its own only with --exit-when-idle,
-    after that many minutes with no live worker (an unreachable one counts as none)."""
+    """Redraw the frame every --interval seconds on the owner's terminal, on the alternate screen, each frame over
+    the last, and put the terminal back however it ends: Ctrl-C, SIGTERM or SIGHUP (each ends it as Ctrl-C does),
+    or at exit. It ends on its own only with --exit-when-idle, after that many minutes with no live worker (an
+    unreachable one counts as none). Where what it prints goes to an agent rather than a person (agent_shell), it
+    prints one frame and ends, so it never keeps streaming into an agent's context."""
     try:
         repo = repo_root()
     except (FleetError, OSError):
@@ -12710,12 +12736,23 @@ def track_view(a, cfg) -> int:
     if a.run and repo is None:
         raise FleetError("--run names a run of this checkout; run fleet track from inside it")
     cache, out = TokenCache(), sys.stdout  # the token cache stays in memory
-    tty = out.isatty()
+
+    def frame_lines() -> tuple[list[str], bool]:
+        try:
+            return track_frame(repo, a, cfg, cache)
+        except Exception as e:  # noqa: BLE001 - a frame Fleet cannot read says so, and the view goes on
+            return [f"cannot read Fleet's runs now: {brief_reason(e)}"], True
+    if why := agent_shell():
+        lines = frame_lines()[0]
+        out.write("\n".join([f"fleet track · {time.strftime('%H:%M:%S')} · printed once: {why}. The live view is "
+                             "for your own terminal: fleet track there, or fleet track --pane", "", *lines]) + "\n")
+        out.flush()
+        return 0
     idle_since = time.monotonic()
     restored = []
 
     def restore() -> None:  # once, whichever way the view ends
-        if tty and not restored:
+        if not restored:
             restored.append(True)
             try:
                 out.write("\x1b[?25h\x1b[?1049l")
@@ -12732,25 +12769,18 @@ def track_view(a, cfg) -> int:
         except ValueError:  # not the main thread: the default handlers stay
             pass
     atexit.register(restore)
-    if tty:
-        out.write("\x1b[?1049h\x1b[?25l")  # the alternate screen, the cursor hidden
+    out.write("\x1b[?1049h\x1b[?25l")  # the alternate screen, the cursor hidden
     try:
         while True:
-            try:
-                lines, live = track_frame(repo, a, cfg, cache)
-            except Exception as e:  # noqa: BLE001 - a frame Fleet cannot read says so, and the view goes on
-                lines, live = [f"cannot read Fleet's runs now: {brief_reason(e)}"], True
+            lines, live = frame_lines()
             now = time.monotonic()
             idle_since = now if live else idle_since
             head = f"fleet track · {time.strftime('%H:%M:%S')} · every {a.interval:g}s · Ctrl-C quits"
             if a.exit_when_idle is not None and not live:
                 head += f" · ends after {a.exit_when_idle:g} min with none live"
             frame = [head, "", *lines]
-            if tty:
-                cols, rows = shutil.get_terminal_size()
-                out.write("\x1b[H" + "".join(line[:cols] + "\x1b[K\n" for line in frame[:max(1, rows - 1)]) + "\x1b[J")
-            else:
-                out.write("\n".join(frame) + "\n\n")
+            cols, rows = shutil.get_terminal_size()
+            out.write("\x1b[H" + "".join(line[:cols] + "\x1b[K\n" for line in frame[:max(1, rows - 1)]) + "\x1b[J")
             out.flush()
             if a.exit_when_idle is not None and not live and now - idle_since >= a.exit_when_idle * 60:
                 return 0
@@ -12818,11 +12848,12 @@ TRACK_ENV = ("XDG_CACHE_HOME", "FLEET_CONFIG")  # where Fleet finds the registry
 
 def track_command(a, env=None) -> str:
     """The pane's command. A tmux pane gets its server's environment, not this shell's, so the variables that say
-    where Fleet's files are go with it, set as here or unset as here (FLEET_WORKER never: track is the owner's)."""
+    where Fleet's files are go with it, set as here or unset as here. An agent's shell variables never do (a tmux
+    server an agent started holds them): the pane is the owner's terminal, so its view stays live."""
     env = os.environ if env is None else env
     idle = a.exit_when_idle if a.exit_when_idle is not None else TRACK_PANE_IDLE_MIN
-    names = sorted({*TRACK_ENV, *(k for k in env if k.startswith("FLEET_") and k != FLEET_WORKER_ENV)})
-    unset = [x for k in [*(k for k in names if k not in env), FLEET_WORKER_ENV] for x in ("-u", k)]
+    names = sorted({*TRACK_ENV, *(k for k in env if k.startswith("FLEET_") and k not in AGENT_SHELL_ENV)})
+    unset = [x for k in [*(k for k in names if k not in env), *AGENT_SHELL_ENV] for x in ("-u", k)]
     pins = [f"{k}={env[k]}" for k in names if k in env]
     return shlex.join(["env", *unset, *pins, sys.executable, str(Path(__file__).resolve()), "track", "--interval",
                        f"{a.interval:g}", "--exit-when-idle", f"{idle:g}", *(["--run", a.run] if a.run else [])])
