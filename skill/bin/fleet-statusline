@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Claude Code's status-line command for Fleet, as `fleet statusline --install` writes it:
+
+    fleet-statusline [--then COMMAND] [--rows N]
+
+Claude Code runs it every refreshInterval seconds in every session, Fleet's own workers' too, so it does as little
+as it can. Inside a Fleet worker (FLEET_WORKER) it runs only the owner's own command, without loading Fleet. Elsewhere
+it loads `fleet` beside it with its bytecode kept under the user's cache, never in this folder (the installer owns
+it), and runs `fleet statusline`. It always exits 0; if Fleet cannot load, the owner's command still runs."""
+import os
+import sys
+
+THEN_S = 5  # as fleet's STATUSLINE_THEN_S: seconds the owner's command may take
+STDIN_MAX = 1 << 20  # as fleet's STATUSLINE_STDIN_MAX
+
+
+def then_of(args):
+    """The owner's command from --then COMMAND or --then=COMMAND; None without one."""
+    then, i = None, 0
+    while i < len(args):
+        flag, sep, value = args[i].partition("=")
+        if flag == "--then":
+            if sep:
+                then = value
+            elif i + 1 < len(args):
+                then, i = args[i + 1], i + 1
+        i += 1
+    return then
+
+
+def own_line(then):
+    """The owner's command alone, with the session's JSON on stdin, its output as it printed it: what fleet
+    statusline prints inside a worker."""
+    if not then:
+        return
+    import subprocess
+    import signal
+    try:
+        raw = b"" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.buffer.read(STDIN_MAX)
+    except (OSError, ValueError, AttributeError):
+        raw = b""
+    try:
+        p = subprocess.Popen(then, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        return
+    try:
+        out, _ = p.communicate(raw, timeout=THEN_S)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            out, _ = p.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            out = b""
+    text = (out or b"").decode("utf-8", "replace").rstrip("\n")
+    if text:
+        sys.stdout.write(text + "\n")
+        sys.stdout.flush()
+
+
+def in_checkout(path):
+    """Whether a folder is inside a Git checkout (a home folder kept in Git): no bytecode is written there."""
+    path = os.path.abspath(path)
+    while True:
+        if os.path.exists(os.path.join(path, ".git")):
+            return True
+        parent = os.path.dirname(path)
+        if parent == path:
+            return False
+        path = parent
+
+
+def load_fleet():
+    """`fleet` beside this file as a module, its bytecode cached under the user's cache (XDG_CACHE_HOME when it is
+    absolute, else ~/.cache), so a refresh skips compiling Fleet's source."""
+    import importlib.machinery
+    import importlib.util
+    source = os.path.join(os.path.dirname(os.path.realpath(__file__)), "fleet")
+    cache = os.environ.get("XDG_CACHE_HOME", "")
+    cache = cache if os.path.isabs(cache) else os.path.join(os.path.expanduser("~"), ".cache")
+    prefix = os.path.join(cache, "agent-fleet", "pycache")
+    loader = importlib.machinery.SourceFileLoader("fleet", source)
+    spec = importlib.util.spec_from_loader("fleet", loader)
+    module = importlib.util.module_from_spec(spec)
+    kept, no_write = sys.pycache_prefix, sys.dont_write_bytecode
+    try:  # the prefix applies to Fleet's own code only, not the standard modules it imports
+        sys.pycache_prefix = prefix
+        sys.dont_write_bytecode = no_write or in_checkout(cache)
+        code = loader.get_code("fleet")
+    finally:
+        sys.pycache_prefix, sys.dont_write_bytecode = kept, no_write
+    sys.modules["fleet"] = module
+    exec(code, module.__dict__)
+    return module
+
+
+def main(args):
+    if os.environ.get("FLEET_WORKER"):  # a worker's status line: the owner's command alone, Fleet never loaded
+        own_line(then_of(args))
+        return
+    try:  # fleet statusline prints all its lines at once, at its end: one that raised has printed nothing
+        load_fleet().main(["statusline", *args])
+    except BaseException:  # noqa: BLE001 - no Fleet (a Python too old, a folder half-updated): the owner's line
+        own_line(then_of(args))
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    finally:
+        try:
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            pass
+        os._exit(0)

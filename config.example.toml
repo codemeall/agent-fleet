@@ -82,7 +82,8 @@ review = "cross-heavy"
 # accept_checks = [{run = "npm test", cwd = ".", timeout = 900}, {run = "npm run typecheck"}]
 # Where you see the workers once a run starts: "auto" (the default) has init print a WATCH line the lead relays,
 # with Claude Code's status line when your lead runs in it with Fleet's line set, else the background dashboard,
-# started then (fleet dashboard --stop ends it). "off" starts nothing and only names fleet agents.
+# started then (fleet dashboard --stop ends it until a run starts one). "off" starts nothing and only names
+# fleet agents.
 # watch = "off"
 # Set only when you intentionally target a validated cmux workspace:
 # workspace = "workspace:3"

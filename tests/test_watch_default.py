@@ -2,16 +2,20 @@
 dashboard (one per user, reused, stopped, idle exit), and every active Fleet session on the machine: the registry
 of active checkouts, status --brief --all, the status line's summary of the other checkouts and the dashboard's list
 of them. Background dashboards started here are real processes; each test that starts one stops it on cleanup."""
+import argparse
 import contextlib
+import fcntl
 import io
 import json
 import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -21,7 +25,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_watch import FLEET, WatchCase  # noqa: E402
 from test_runtime import fleet  # noqa: E402
 
-REC = {"pid": 4242, "port": 50505, "token": "tok", "url": "http://127.0.0.1:50505/?t=tok", "started": 1.0}
+REC = {"pid": 4242, "port": 50505, "token": "tok", "nonce": "n", "url": "http://127.0.0.1:50505/?t=tok",
+       "started": 1.0}
+FOREIGN_SERVER = """import json, os, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"pid": os.getpid(), "nonce": "n"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    do_HEAD = do_GET
+    def log_message(self, *a):
+        pass
+server = HTTPServer(("127.0.0.1", 0), H)
+print(server.server_address[1], flush=True)
+server.serve_forever()
+"""  # any process's server, here one that even answers /api/id with its own pid and the record's nonce
 # What the suite inherits from a lead it may run under, and the switches these tests set themselves.
 HOST_ENV = ("FLEET_NO_DASHBOARD", "CI", "FLEET_WORKER", "CLAUDE_CODE_ENTRYPOINT")
 
@@ -188,6 +209,25 @@ class Watch(Machine):
             self.assertTrue(fleet.statusline_installed(self.repo))
 
 
+    def test_the_line_claude_code_shows_decides_in_its_order(self):
+        ours, mine = {"type": "command", "command": fleet.statusline_command(None)}, {"type": "command", "command": "x"}
+        project = self.repo / ".claude"
+        project.mkdir()
+        with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.claude_home)}):
+            (self.claude_home / "settings.json").write_text(json.dumps({"statusLine": ours}))
+            (project / "settings.json").write_text(json.dumps({"statusLine": mine}))
+            self.assertFalse(fleet.statusline_installed(self.repo))  # the project's own line hides Fleet's user line
+            (project / "settings.local.json").write_text(json.dumps({"statusLine": ours}))
+            self.assertTrue(fleet.statusline_installed(self.repo))  # settings.local.json comes first
+            (project / "settings.local.json").write_text(json.dumps({"statusLine": mine}))
+            (project / "settings.json").write_text(json.dumps({"statusLine": ours}))
+            self.assertFalse(fleet.statusline_installed(self.repo))
+            (project / "settings.local.json").write_text(json.dumps({"model": "opus"}))  # sets none: the next decides
+            self.assertTrue(fleet.statusline_installed(self.repo))
+            (project / "settings.json").write_text("{}")
+            self.assertTrue(fleet.statusline_installed(self.repo))  # down to the user's
+
+
 REAL_LOAD = fleet.load_config  # RuntimeCase patches it per test
 
 
@@ -231,6 +271,15 @@ class Registry(Machine):
         self.assertTrue((home / "garbage.json").exists())  # damaged: skipped, never removed or fatal
 
 
+    def test_an_entry_unseen_for_a_week_is_dropped_even_while_its_run_says_running(self):
+        self.start()
+        other = self.other_checkout()
+        e = json.loads(self.entry(other).read_text())
+        self.entry(other).write_text(json.dumps(dict(e, seen=time.time() - 8 * 86400)))
+        self.assertNotIn(str(other), [x["checkout"] for x in fleet.active_entries()])
+        self.assertFalse(self.entry(other).exists())
+
+
 class AllCheckouts(Machine):
     def test_all_groups_by_checkout_this_one_first(self):
         self.start()
@@ -257,6 +306,17 @@ class AllCheckouts(Machine):
                   json.loads(self.call("status", "--brief", "--all", "--json"))["checkouts"]}
         self.assertEqual(labels[str(one)], f"app ({one})")
         self.assertEqual(labels[str(two)], f"app ({two})")
+
+    def test_a_folder_name_never_reaches_the_terminal_raw(self):
+        self.start()
+        self.other_checkout("ev\x1b[31mil\u202e")
+        out = self.brief("--all")
+        self.assertNotRegex(out, "[\x1b\u202e]")
+        self.assertIn("fleet ev [31mil/api · 1 live", out)
+        lines, _ = fleet.track_frame(self.repo, argparse.Namespace(run=None), None, fleet.TokenCache())
+        self.assertNotRegex("\n".join(lines), "[\x1b\u202e]")
+        [group] = json.loads(self.call("status", "--brief", "--all", "--json"))["checkouts"]
+        self.assertEqual(group["label"], "ev [31mil")
 
     def test_the_current_checkout_without_live_workers_is_left_out(self):
         self.start()
@@ -285,7 +345,7 @@ class StatuslineSummary(Machine):
         self.launch()
         self.other_checkout()
         real, counted = fleet.live_workers, []
-        with patch.object(fleet, "live_workers", side_effect=lambda r: counted.append(r) or real(r)):
+        with patch.object(fleet, "live_workers", side_effect=lambda r, *rest: counted.append(r) or real(r, *rest)):
             self.statusline()
             first = len(counted)
             self.statusline()
@@ -384,6 +444,73 @@ class Background(Machine):
         self.assertIn(f"in a desktop app: {url} (live", self.last_init)  # the other checkout's init: the same one
         self.assertEqual(fleet.read_dashboard()["pid"], pid)
 
+    def foreign(self, *cmd) -> subprocess.Popen:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self.addCleanup(p.wait)
+        self.addCleanup(p.kill)
+        return p
+
+    def test_a_record_naming_another_process_is_never_trusted_or_signalled(self):
+        """After an unclean exit the record's pid and port can belong to anything: a sleep, someone's dev server."""
+        sleeper = self.foreign("sleep", "60")
+        server = self.foreign(sys.executable, "-c", FOREIGN_SERVER)
+        port = int(server.stdout.readline())
+        for pid in (sleeper.pid, server.pid):
+            with self.subTest(pid=pid):
+                rec = {"pid": pid, "port": port, "token": "tok", "nonce": "n", "url": f"http://127.0.0.1:{port}/?t=tok",
+                       "started": 1.0}
+                fleet.write_private(fleet.private_dir(fleet.dashboard_home()) / "dashboard.json", json.dumps(rec))
+                self.assertFalse(fleet.dashboard_answers(rec))
+                out = self.call("dashboard", "--stop")
+                self.assertIn(f"its record (pid {pid}) named a process that is gone or not Fleet's, so it was "
+                              "dropped and nothing was signalled", out)
+                self.assertIsNone(fleet.read_dashboard())
+                self.assertEqual((sleeper.poll(), server.poll()), (None, None))  # both still running
+        fleet.write_private(fleet.dashboard_home() / "dashboard.json", json.dumps(dict(rec, pid=server.pid)))
+        new = fleet.dashboard_background(self.repo)  # init starts a dashboard of its own, never trusts that one
+        self.assertNotIn(new["pid"], (sleeper.pid, server.pid))
+        self.assertTrue(fleet.dashboard_answers(new))
+
+    def test_another_start_or_a_reused_pid_is_told_apart(self):
+        rec = fleet.dashboard_background(self.repo)
+        self.assertTrue(fleet.dashboard_answers(rec))
+        self.assertEqual(rec["proc_start"], fleet.process_start(rec["pid"]))
+        self.assertFalse(fleet.dashboard_answers(dict(rec, nonce="an earlier start")))
+        self.assertFalse(fleet.dashboard_answers(dict(rec, proc_start="1")))  # the pid, reused by a newer process
+
+    def test_a_dashboard_too_slow_to_answer_is_stopped_not_left_running(self):
+        started, real = [], subprocess.Popen
+
+        def popen(*args, **kwargs):
+            p = real(*args, **kwargs)
+            started.append(p)
+            self.addCleanup(p.wait)
+            self.addCleanup(lambda: p.poll() is None and p.kill())
+            return p
+        with patch.object(fleet.subprocess, "Popen", side_effect=popen), patch.object(fleet, "DASHBOARD_START_S", 0.01):
+            with self.assertRaisesRegex(fleet.FleetError, "did not answer within 0.01s"):
+                fleet.dashboard_background(self.repo)
+        [child] = started
+        self.assertIsNotNone(child.poll())
+        self.assertIsNone(fleet.read_dashboard())
+
+    def test_no_dashboard_file_lands_inside_a_home_checkout(self):
+        self.start()
+        inside = {"XDG_CACHE_HOME": str(self.repo / ".cache")}  # as when the checkout is the home folder
+
+        def stop():  # only a Fleet that started one there leaves anything to stop
+            with patch.dict(os.environ, inside):
+                fleet.dashboard_stop()
+        self.addCleanup(stop)
+        with patch.dict(os.environ, inside), patch.object(fleet, "watch_host", return_value="codex"):
+            lines = fleet.watch_lines(self.repo, self.cfg, "demo", True)
+            with self.assertRaisesRegex(fleet.FleetError, "no dashboard: its files"):
+                fleet.dashboard_background(self.repo)
+            self.assertIn("no background dashboard is running", self.call("dashboard", "--stop"))
+        self.assertEqual(lines, [f"WATCH {fleet.TRACK_HINT} (no dashboard: its files would land inside this "
+                                 "checkout)"])
+        self.assertFalse((self.repo / ".cache").exists())
+
     def test_it_stops_itself_once_no_active_checkout_has_a_live_worker(self):
         with patch.dict(os.environ, {"FLEET_NO_DASHBOARD": "1"}):  # so these inits start none with the defaults
             self.start()
@@ -397,6 +524,57 @@ class Background(Machine):
         self.assertTrue(self.wait(lambda: not fleet.dashboard_answers(rec)), log.read_text())
         self.assertTrue(self.wait(lambda: fleet.read_dashboard() is None))
         self.assertIn("no live worker in any active checkout; stopping", log.read_text())
+
+
+class StopRaces(Machine):
+    """--stop against a dashboard served in this process: its pid is this test's, so the signal is caught here."""
+
+    def serve(self) -> dict:
+        server = fleet.dashboard_server(self.repo, 0, None)
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        b = server.board
+        rec = {"pid": os.getpid(), "proc_start": fleet.process_start(os.getpid()), "port": b.port, "token": b.token,
+               "nonce": b.nonce, "url": b.url, "started": time.time()}
+        fleet.write_private(fleet.private_dir(fleet.dashboard_home()) / "dashboard.json", json.dumps(rec))
+        return rec
+
+    def test_a_dashboard_still_shutting_down_keeps_its_record(self):
+        rec = self.serve()
+        sent, real = [], os.kill
+
+        def kill(pid, sig):
+            return real(pid, sig) if sig == 0 else sent.append((pid, sig))
+        with patch.object(fleet.os, "kill", side_effect=kill), patch.object(fleet, "DASHBOARD_STOP_S", 0.3):
+            out = fleet.dashboard_stop()
+        self.assertEqual(sent, [(os.getpid(), signal.SIGTERM)])
+        self.assertEqual(out, f"asked the background dashboard (pid {os.getpid()}) to stop; it is still shutting down")
+        self.assertEqual(fleet.read_dashboard(), rec)  # so the next init reuses it rather than start a second one
+
+    def test_stop_waits_for_the_dashboard_lock(self):
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        rec = {"pid": dead.pid, "port": 9, "token": "t", "nonce": "n", "url": "http://127.0.0.1:9/?t=t", "started": 1}
+        fleet.write_private(fleet.private_dir(fleet.dashboard_home()) / "dashboard.json", json.dumps(rec))
+        held = open(fleet.dashboard_home() / "dashboard.lock", "a")
+        fcntl.flock(held, fcntl.LOCK_EX)  # a start in progress
+        said = []
+        stopper = threading.Thread(target=lambda: said.append(fleet.dashboard_stop()))
+        stopper.start()
+        time.sleep(0.5)
+        self.assertEqual(said, [])
+        held.close()
+        stopper.join(10)
+        self.assertIn("nothing was signalled", said[0])
+
+    def test_a_record_is_dropped_only_while_it_names_that_dashboard(self):
+        rec = self.serve()
+        fleet.forget_dashboard(dict(rec, nonce="an earlier start"))
+        fleet.forget_dashboard(dict(rec, pid=rec["pid"] + 1))
+        self.assertEqual(fleet.read_dashboard(), rec)  # a newer dashboard's record stays
+        fleet.forget_dashboard(rec)
+        self.assertIsNone(fleet.read_dashboard())
 
 
 class TtyIO(io.StringIO):
@@ -457,6 +635,95 @@ class Track(Machine):
         self.assertEqual(out.count("\x1b[H"), 2)  # each frame drawn over the last, never a scroll of frames
         self.assertNotIn("\x1b[2J", out)  # no full clear between frames: no flicker
 
+    def in_pty(self, sig) -> tuple[int, bytes]:
+        """fleet track on a real terminal, sent `sig` once it has drawn a frame: its exit code and all it wrote."""
+        import pty
+        import select
+        master, slave = pty.openpty()
+        p = subprocess.Popen([sys.executable, str(FLEET), "track", "--interval", "0.2"], cwd=self.repo, stdin=slave,
+                             stdout=slave, stderr=slave, start_new_session=True)
+        os.close(slave)
+        self.addCleanup(os.close, master)
+        self.addCleanup(lambda: p.poll() is None and p.kill())
+        out = bytearray()
+
+        def read(until, timeout) -> None:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and not until():
+                if select.select([master], [], [], 0.1)[0]:
+                    try:
+                        chunk = os.read(master, 1 << 16)
+                    except OSError:  # the terminal's other end closed
+                        return
+                    if not chunk:
+                        return
+                    out.extend(chunk)
+        read(lambda: "fleet track ·".encode() in out, 60)
+        p.send_signal(sig)
+        read(lambda: p.poll() is not None, 30)
+        read(lambda: False, 0.3)
+        return p.wait(10), bytes(out)
+
+    def test_a_terminal_gets_the_screen_back_on_sigterm_and_sighup(self):
+        self.start()
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(sig=sig.name):
+                code, out = self.in_pty(sig)
+                self.assertTrue(out.startswith(b"\x1b[?1049h\x1b[?25l"), out[:80])
+                self.assertEqual(code, 0, out[-200:])
+                self.assertTrue(out.endswith(b"\x1b[?25h\x1b[?1049l"), out[-80:])
+                self.assertEqual(out.count(b"\x1b[?1049l"), 1)  # put back once
+
+    def test_the_pane_carries_the_callers_fleet_environment(self):
+        a = argparse.Namespace(interval=2.0, exit_when_idle=None, run="demo")
+        words = shlex.split(fleet.track_command(a, env={"XDG_CACHE_HOME": "/my cache", "FLEET_NO_DASHBOARD": "1",
+                                                        "FLEET_WORKER": "demo/01", "HOME": "/h"}))
+        self.assertEqual(words[:words.index(sys.executable)], ["env", "-u", "FLEET_CONFIG", "-u", "FLEET_WORKER",
+                                                               "FLEET_NO_DASHBOARD=1", "XDG_CACHE_HOME=/my cache"])
+        self.assertEqual(words[words.index(sys.executable) + 2:], ["track", "--interval", "2", "--exit-when-idle", "30",
+                                                                   "--run", "demo"])
+
+    def test_pane_records_of_panes_that_are_gone_are_dropped(self):
+        self.start()
+        sock, record = "/tmp/tmux-1000/mine", self.cache / "agent-fleet" / "track-panes.json"
+        fleet.private_dir(record.parent)
+        record.write_text(json.dumps({f"tmux:{sock}:999:%2": {"kind": "tmux", "pane": "%5"},  # its pane closed
+                                      f"tmux:{sock}:888:%3": {"kind": "tmux", "pane": "%9"},  # an earlier server's
+                                      "tmux:/other:1:%1": {"kind": "tmux", "pane": "%1"}}))  # not this server's
+
+        def run(socket, *args):
+            if args[0] == "split-window":
+                return subprocess.CompletedProcess(args, 0, "%11\n", "")
+            if args[0] == "list-panes":
+                return subprocess.CompletedProcess(args, 0, "%7\n%9\n%11\n", "")
+            return subprocess.CompletedProcess(args, 1, "", "can't find pane")
+        with patch.dict(os.environ, {"TMUX": f"{sock},999,0", "TMUX_PANE": "%7"}), \
+                patch.object(fleet, "lead_tmux", side_effect=run):
+            self.assertIn("opened fleet track in the pane below (%11)", self.track("--pane"))
+        self.assertEqual(sorted(json.loads(record.read_text())), ["tmux:/other:1:%1", f"tmux:{sock}:999:%7"])
+
+    def test_stale_cmux_records_never_keep_a_pane_from_a_worker(self):
+        record = self.cache / "agent-fleet" / "track-panes.json"
+        fleet.private_dir(record.parent)
+        record.write_text(json.dumps({
+            "cmux:workspace:1:surface:2": {"kind": "cmux", "workspace": "workspace:1", "surface": "surface:3",
+                                           "surface_id": "uuid-gone"},  # closed; surface:3 is someone else's now
+            "cmux:workspace:1:surface:9": {"kind": "cmux", "workspace": "workspace:1", "surface": "surface:1",
+                                           "surface_id": "uuid-mine"},  # still open, its ref changed since
+            "cmux:workspace:2:surface:1": {"kind": "cmux", "workspace": "workspace:2", "surface": "surface:1"}}))
+        panes = [{"ref": "pane:1", "surface_refs": ["surface:3", "surface:7"], "surface_ids": ["uuid-x", "uuid-mine"]}]
+        self.assertEqual(fleet.track_surfaces("workspace:1", panes), {"surface:7"})
+        self.assertEqual(sorted(json.loads(record.read_text())), ["cmux:workspace:1:surface:9",
+                                                                  "cmux:workspace:2:surface:1"])
+
+    def test_no_pane_record_lands_inside_a_home_checkout(self):
+        self.start()
+        calls, run = self.lead_tmux()
+        env = {"TMUX": "/tmp/tmux-1000/mine,999,0", "TMUX_PANE": "%7", "XDG_CACHE_HOME": str(self.repo / ".cache")}
+        with patch.dict(os.environ, env), patch.object(fleet, "lead_tmux", side_effect=run):
+            self.assertIn("opened fleet track", self.track("--pane"))
+        self.assertFalse((self.repo / ".cache").exists())
+
     def lead_tmux(self, alive=True):
         calls = []
 
@@ -482,8 +749,10 @@ class Track(Machine):
         self.assertEqual(socket, "/tmp/tmux-1000/mine")  # the owner's server, not Fleet's -L fleet one
         self.assertEqual(args[:12], ["split-window", "-v", "-d", "-l", "8", "-t", "%7", "-c", str(self.repo),
                                      "-P", "-F", "#{pane_id}"])
-        self.assertEqual(shlex.split(args[12]), [sys.executable, str(FLEET.resolve()), "track", "--interval", "2",
-                                                 "--exit-when-idle", "30"])
+        words = shlex.split(args[12])
+        self.assertEqual(words[0], "env")  # the pane gets the tmux server's environment, so Fleet's go with it
+        self.assertEqual(words[words.index(sys.executable):], [sys.executable, str(FLEET.resolve()), "track",
+                                                               "--interval", "2", "--exit-when-idle", "30"])
         record = self.cache / "agent-fleet" / "track-panes.json"
         self.assertEqual(stat.S_IMODE(record.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(record.parent.stat().st_mode), 0o700)
@@ -502,8 +771,8 @@ class Track(Machine):
         self.assertEqual(split[:6], ("new-split", "down", "--workspace", "workspace:1", "--surface", "surface:lead"))
         self.assertEqual(split[-2:], ("--focus", "false"))
         self.assertIn(" track --interval 2 --exit-when-idle 30", split[split.index("--command") + 1])
-        self.assertEqual(fleet.track_surfaces("workspace:1"), {"surface:1", "uuid-surface:1"})
-        self.assertEqual(fleet.track_surfaces("workspace:2"), set())
+        self.assertEqual(fleet.track_surfaces("workspace:1", fleet.list_panes("workspace:1")), {"surface:1"})
+        self.assertEqual(fleet.track_surfaces("workspace:2", fleet.list_panes("workspace:1")), set())
 
     def test_pane_outside_tmux_or_cmux_says_to_use_another_tab(self):
         env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE", "CMUX_WORKSPACE_ID",
@@ -524,9 +793,12 @@ class TrackPaneLive(Machine):
     def test_the_pane_opens_below_shows_the_rows_and_is_reused(self):
         self.start()
         self.launch()
+        other = self.other_checkout()  # found through this test's registry only
         sock = f"fleetlead{os.getpid()}"
         self.addCleanup(subprocess.run, ["tmux", "-L", sock, "kill-server"], capture_output=True)
-        subprocess.run(["tmux", "-L", sock, "new-session", "-d", "-s", "lead", "-x", "160", "-y", "40"], check=True)
+        elsewhere = Path(self.temp.name) / "server-cache"  # the owner's server started with another cache
+        subprocess.run(["tmux", "-L", sock, "new-session", "-d", "-s", "lead", "-x", "160", "-y", "40"], check=True,
+                       env=dict(os.environ, XDG_CACHE_HOME=str(elsewhere)))
         socket, pid, pane = subprocess.run(["tmux", "-L", sock, "display-message", "-p", "-t", "lead",
                                             "#{socket_path}\t#{pid}\t#{pane_id}"], capture_output=True, text=True,
                                            check=True).stdout.strip().split("\t")
@@ -540,12 +812,13 @@ class TrackPaneLive(Machine):
         self.assertIn(f"{pane} 1", panes)  # the owner's pane keeps the focus
         self.assertIn(f"{new} 0", panes)
         deadline, screen = time.monotonic() + 20, ""
-        while time.monotonic() < deadline and "● 01" not in screen:
+        while time.monotonic() < deadline and not ("● 01" in screen and "● 07" in screen):
             real_sleep(0.2)
             screen = subprocess.run(["tmux", "-L", sock, "capture-pane", "-p", "-t", new], capture_output=True,
                                     text=True).stdout
         self.assertIn("fleet track ·", screen)
         self.assertIn(f"fleet {self.repo.name}/demo · 1 live", screen)
+        self.assertIn(f"fleet {other.name}/api · 1 live", screen)  # the pane read the caller's registry
         again = subprocess.run(run, cwd=self.repo, env=env, capture_output=True, text=True, timeout=60)
         self.assertIn(f"already runs in the pane below ({new})", again.stdout)
         count = subprocess.run(["tmux", "-L", sock, "list-panes", "-t", "lead"], capture_output=True, text=True)

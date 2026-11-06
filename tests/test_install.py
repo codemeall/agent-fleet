@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tarfile
@@ -70,8 +71,8 @@ class InstallTests(unittest.TestCase):
         out = self.setup('claude').stdout
         line = self.settings()['statusLine']
         runtime = str(self.installed() / 'bin/fleet')
-        self.assertIn(runtime, line['command'])  # the installed copy, never npx's cache
-        self.assertIn("statusline --then 'echo mine'", line['command'])
+        self.assertIn(runtime + "-statusline' --then 'echo mine' || sh -c 'echo mine'", line['command'])  # the
+        # installed copy's launcher, never npx's cache
         self.assertNotIn('_npx', line['command'])
         self.assertEqual((line['refreshInterval'], line['padding'], self.settings()['theme']), (2, 1, 'dark'))
         self.assertIn('statusLine in', out)
@@ -109,12 +110,52 @@ class InstallTests(unittest.TestCase):
         self.assertTrue((self.installed() / 'SKILL.md').is_file())
         self.assertIn("warning: Fleet is installed, but Claude Code's status line was not set", result.stderr)
         self.assertIn('is not valid JSON', result.stderr)
-        self.assertIn(f'Retry with: CLAUDE_CONFIG_DIR={json.dumps(str(self.root / ".claude"))} ', result.stderr)
-        self.assertIn('statusline --install', result.stderr)
+        runtime, settings = self.installed() / 'bin/fleet', self.root / '.claude/settings.json'
+        self.assertIn(f'Retry with: python3 {json.dumps(str(runtime))} statusline --install --settings '
+                      f'{json.dumps(str(settings))}', result.stderr)
         self.assertEqual((self.root / '.claude/settings.json').read_text(), '{not json')
         no_python = dict(self.env, FLEET_PYTHON=str(self.base / 'missing-python'))
         result = self.command('setup', '--harness', 'claude', '--root', self.base / 'second', env=no_python)
         self.assertIn("status line was not set", result.stderr)
+
+    def test_a_failing_status_line_restore_keeps_the_claude_install(self):
+        self.setup()
+        settings = self.root / '.claude/settings.json'
+        good = settings.read_text()
+        settings.write_text('{not json')
+        result = self.remove(ok=False)
+        self.assertTrue((self.installed() / 'bin/fleet').is_file())  # kept: the command it names still runs
+        self.assertFalse(self.installed('.agents').exists())  # the other harnesses' copies go as asked
+        self.assertIn(f'kept {self.installed()}', result.stdout)
+        self.assertIn("Claude Code's status line was not restored", result.stderr)
+        self.assertIn('then run this uninstall again', result.stderr)
+        settings.write_text(good)
+        retry = re.search(r'^Retry with: (.+)$', result.stderr, re.M).group(1)
+        res = subprocess.run(['/bin/sh', '-c', retry], text=True, capture_output=True, env=self.env, timeout=60)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.remove()
+        self.assertFalse(self.installed().exists())
+        self.assertEqual(self.settings(), {})
+
+    def test_project_setup_from_a_subdirectory_keeps_the_line_beside_the_skill(self):
+        project = self.base / 'project'
+        sub = project / 'src' / 'app'
+        sub.mkdir(parents=True)
+        subprocess.run(['git', 'init', '-q'], cwd=project, check=True)
+        sub = sub.resolve()
+
+        def run(action):
+            result = subprocess.run([NODE, str(REPO / 'bin/fleet.js'), action, '--harness', 'claude', '--scope',
+                                     'project'], cwd=sub, text=True, capture_output=True, env=self.env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        run('setup')
+        self.assertTrue((sub / '.claude/skills/fleet/SKILL.md').is_file())
+        line = self.settings(sub / '.claude/settings.local.json')['statusLine']
+        self.assertIn(str(sub / '.claude/skills/fleet/bin/fleet-statusline'), line['command'])
+        self.assertFalse((project / '.claude').exists())  # never split from the skill, into the Git root
+        run('uninstall')
+        self.assertEqual(self.settings(sub / '.claude/settings.local.json'), {})
+        self.assertFalse((sub / '.claude/skills/fleet').exists())
 
     def test_unowned_conflict_preflight_prevents_partial_install(self):
         conflict = self.installed('.cursor')

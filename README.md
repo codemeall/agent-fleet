@@ -314,7 +314,7 @@ The lead drives Fleet through the `fleet` CLI; you rarely need to, but you can r
 | `fleet agents [<run>]` | Browse the workers, watch any one live, attach to it (yours; the lead never runs it) |
 | `fleet attach <run> <id>` | Open one worker's terminal (headless runs) |
 | `fleet statusline --install` | Show live workers in Claude Code's status line, below your own line; `fleet setup` does it for you (`--uninstall` undoes it) |
-| `fleet dashboard [--background\|--stop]` | A local, read-only web page of every repo's workers and their screens, for desktop apps; it starts on its own with a run |
+| `fleet dashboard [--background\|--stop]` | A local, read-only web page of every repo's workers and their screens, for desktop apps; it starts on its own with a run, and `--stop` ends it until the next run starts one |
 | `fleet provider enable\|disable <name>` | Turn a provider on or off in your config |
 
 More: [safe first run](examples/README.md) · [agent workflow](skill/SKILL.md) · [commands](skill/references/commands.md) · [routing](skill/references/routing.md) · [host setup](skill/references/harnesses.md) · [providers](skill/references/providers.md) · [lead context](skill/references/lead-context.md) · [worked examples](skill/references/examples.md)
