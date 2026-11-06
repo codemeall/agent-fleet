@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.0-preview.33
+
+Your workers, and every Fleet session running on your machine, are in view by default.
+
+- **Claude Code shows them by default.** `fleet setup` installs the status line, so your workers appear under the prompt. Your existing line stays above Fleet's rows, `--no-statusline` opts out, and uninstall restores the old line.
+  - It now runs through a small launcher that loads Fleet from cached bytecode: about 62 ms per refresh, down from about 225 ms. Inside Fleet's own workers it doesn't load Fleet at all, so it costs about 23 ms there.
+  - Plugin and `npx skills add` installs need `fleet statusline --install` once: Claude Code plugins can't ship a status line.
+- **`fleet track`:** the live list in any terminal, refreshing in place. `--pane` opens it in a slim pane below yours in tmux or cmux, on request only; nothing ever splits your terminal by itself. This is the view for Codex CLI, whose status line accepts built-in items only.
+- **Every active session on the machine.**
+  - `status --brief --all`, `track` and the dashboard list every repo with live Fleet workers, this one first. The status line adds a line such as `+3 workers in 2 other repos`.
+  - A machine-wide registry outside every checkout keeps track of them. Workers whose tmux server is gone, and repos not seen for a week, drop out.
+- **A `WATCH` line when a run starts.** `init` and `launch` say where to look. Claude Code points to its status line. Codex and other leads get the `fleet track` hint, plus a dashboard Fleet starts in the background for desktop apps (one per user, local only, stopping by itself when idle). `[defaults] watch = "off"` turns all of it off.
+- **Safety:**
+  - The background dashboard must prove it is Fleet's own (pid, a per-start code and the process start time) before Fleet trusts it or stops it, so a reused pid or another local server is never signalled.
+  - `--stop` is lock-safe. Nothing is ever written inside a checkout, not even a home-folder one.
+  - `track` restores your terminal on Ctrl-C, SIGTERM and SIGHUP, and repo names are flattened before they print.
+
 ## 0.1.0-preview.32
 
 See your Fleet workers from wherever you talk to the lead, and let the lead start Fleet when you ask it to.

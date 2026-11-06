@@ -62,7 +62,7 @@ class BenchCase(unittest.TestCase):
         self.config.write_text('[defaults]\nreview = "cross-heavy"\n')
         self.env = {k: v for k, v in os.environ.items() if not SCRUB.match(k)}
         self.env.update(HOME=str(self.home), TMPDIR=str(self.tmp), FLEET_CONFIG=str(self.config),
-                        GIT_CONFIG_NOSYSTEM="1")
+                        GIT_CONFIG_NOSYSTEM="1", XDG_CACHE_HOME=str(self.root / "cache"))  # Fleet's registry too
         self.before = self.owner_state()
 
     def git(self, *args: str) -> str:

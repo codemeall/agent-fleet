@@ -7,6 +7,7 @@ Standard library only (Python 3.11+), so any harness with a shell can drive it.
 from __future__ import annotations
 
 import argparse
+import atexit
 import base64
 import difflib
 import fcntl
@@ -32,7 +33,7 @@ import time
 import tomllib
 from pathlib import Path
 
-VERSION = "0.1.0-preview.32"  # bump with package.json on release; tests/test_install.py checks they match
+VERSION = "0.1.0-preview.33"  # bump with package.json on release; tests/test_install.py checks they match
 SKILL_DIR = Path(__file__).resolve().parent.parent
 USER_CONFIG = Path(os.environ.get("FLEET_CONFIG", "~/.config/agent-fleet/config.toml")).expanduser()
 HARNESS_SKILL_DIRS = {
@@ -96,6 +97,9 @@ DEFAULTS = {
     # Combined-tree checks fleet accept runs in the checkout, after a worktree ticket's merge and before anything is
     # verified: commands in a ticket check's shape ({run, cwd, timeout}). A run keeps the list it started with.
     "accept_checks": [],
+    # Where the owner sees the workers once a run starts (init's WATCH line): "auto" picks Claude Code's status
+    # line, or starts the background dashboard, by the lead's host; "off" only names fleet agents.
+    "watch": "auto",
 }
 ACCEPTANCE_MODES = ("strict", "warn")
 CHECK_POLICIES = ("refuse", "warn")
@@ -274,6 +278,8 @@ def load_config(user_path: Path | None = None) -> dict:
         raise FleetError(f"defaults.permission_ceiling must be one of {', '.join(PERMISSION_LEVELS)} (narrowest first)")
     if cfg["defaults"]["review_transport"] not in TRANSPORTS:
         raise FleetError(f"defaults.review_transport must be {' or '.join(TRANSPORTS)}")
+    if cfg["defaults"]["watch"] not in WATCH_MODES:
+        raise FleetError('defaults.watch must be "auto" (the default) or "off"')
     if cfg["defaults"]["backend"] not in ("auto", *BACKENDS):
         raise FleetError(f"defaults.backend must be auto, {' or '.join(BACKENDS)}")
     if not isinstance(cfg["defaults"]["tmux_socket"], str) or not re.fullmatch(r"[A-Za-z0-9_-]*", cfg["defaults"]["tmux_socket"]):
@@ -3100,6 +3106,8 @@ def cmd_init(a, cfg):
     control_new(repo, a.run)  # every control file from here on is copied outside the checkout
     atomic_json(d / "tree.json", tree_state(repo, options["scope_ignore"]))  # fleet check lists what changed outside every ticket since
     save_run(repo, a.run, state)
+    register_checkout(repo, a.run)
+    then_watch(a, cfg, first=True)
     if backend == "cmux":
         print(f"run dir: {d}\nworkspace: {workspace}{'' if given == workspace else f' ({given})'}")
     else:
@@ -4415,6 +4423,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         print(f"could not record {surface}'s UUID ({why}); it is addressed by its ref and its pane will not "
               "be replaced", file=sys.stderr)
     save_run(repo, a.run, state)
+    register_checkout(repo, a.run)  # every active Fleet session on the machine, for the views
     if term.retire(state, place):
         save_run(repo, a.run, state)
     if meta["role"] == "implementation" and stale:
@@ -4558,6 +4567,12 @@ def launch_ready(a, cfg):
 
 
 def cmd_launch(a, cfg):
+    code = launch_command(a, cfg)
+    then_watch(a, cfg, first=False)
+    return code
+
+
+def launch_command(a, cfg):
     if a.ready:
         return launch_ready(a, cfg)
     if a.id is not None and (load_run(repo_root(), a.run)["tickets"].get(a.id) or {}).get("fanout"):
@@ -4669,6 +4684,7 @@ def worker_placement(state: dict, want: str | None) -> tuple[str, str, str | Non
     retired = {w["surface_id"] for w in state["workers"].values()
                if w.get("state") in RETIRED_STATES and w.get("verified") and w.get("surface_id")}
     busy = {w["surface"] for w in state["workers"].values() if w.get("state") in ACTIVE_STATES}
+    busy |= track_surfaces(state["workspace"], panes)  # the owner's fleet track pane is never a worker's
     lead_pane = None
     if os.environ.get("CMUX_SURFACE_ID"):
         lead_pane = json.loads(cmux("--json", "identify")).get("caller", {}).get("pane_ref")
@@ -5057,7 +5073,7 @@ def cmd_board(a, cfg):
 # For the owner, not the lead: browse a run's workers, watch any one live and attach to it. They only read run
 # state (no lock, nothing saved), so they can stay open beside a running lead.
 
-OWNER_VIEWS = ("agents", "attach")
+OWNER_VIEWS = ("agents", "attach", "track")
 AGENT_REFRESH_S = 1.0
 STATE_MARKS = {"running": "running", "launching": "starting", "stop-failed": "stop failed", "unknown": "unknown",
                "exited": "exited", "recovered": "recovered", "closed": "closed"}
@@ -11458,7 +11474,7 @@ class Smoke:
         self.root = Path(tempfile.mkdtemp(prefix="fleet-smoke-")).resolve()
         self.repo = self.root / "repo"
         self.config = self.root / "config.toml"
-        self.env = dict(os.environ, FLEET_CONFIG=str(self.config))
+        self.env = dict(os.environ, FLEET_CONFIG=str(self.config), **{NO_DASHBOARD_ENV: "1"})
         self.steps: list[dict] = []
         self.reported: dict[str, str] = {}  # worker -> the status its last REPORT line gave
         self.ended: dict[str, str] = {}     # worker -> the wait line that ended it without a hand-back
@@ -12094,15 +12110,19 @@ class TokenCache:
             pass  # the next refresh reads the logs in full
 
 
-def brief_cache(repo: Path) -> TokenCache:
-    """The token cache of one command: kept on disk, unless that would put it inside the checkout (a checkout that
-    is the home folder, or a cache folder inside it), where it stays in memory."""
-    path = token_cache_file()
+def inside_checkout(path: Path, repo: Path | None) -> bool:
+    """Whether a file of Fleet's own under the cache would land inside the checkout (a checkout that is the home
+    folder, or a cache folder inside it): the views then keep it in memory, or skip it, rather than write there."""
     try:
-        inside = path.resolve().is_relative_to(repo.resolve())
+        return repo is not None and path.resolve().is_relative_to(repo.resolve())
     except OSError:
-        inside = True
-    return TokenCache(None if inside else path)
+        return True
+
+
+def brief_cache(repo: Path) -> TokenCache:
+    """The token cache of one command: kept on disk unless that would be inside the checkout."""
+    path = token_cache_file()
+    return TokenCache(None if inside_checkout(path, repo) else path)
 
 
 def is_live(w: dict) -> bool:
@@ -12214,13 +12234,22 @@ def brief_signal(repo: Path, state: dict, w: dict, now: float, handed_at: float)
     return "idle", ("idle, no hand-back" if end["event"] == "idle" else "turn ended, no hand-back") + said
 
 
-def brief_windows(state: dict) -> set[str] | None:
-    """The `pid window` pairs a tmux run's server lists, in one call per run; None when it cannot be asked or there
-    is nothing to ask (a cmux run, no live worker). A stopped server lists none: its workers' windows are gone."""
+def brief_windows(state: dict, listings: dict | None = None) -> set[str] | None:
+    """The `pid window` pairs a tmux run's server lists, in one call per server: `listings` keeps each server's
+    across the runs of one pass. None when it cannot be asked or there is nothing to ask (a cmux run, no live
+    worker). A stopped server lists none: its workers' windows are gone."""
     socket = state.get("tmux_socket", "fleet")
     if state.get("backend") != "tmux" or not isinstance(socket, str) \
             or not any(isinstance(w, dict) and is_live(w) for w in state["workers"].values()):
         return None
+    if listings is None:
+        return tmux_windows(socket)
+    if socket not in listings:
+        listings[socket] = tmux_windows(socket)
+    return listings[socket]
+
+
+def tmux_windows(socket: str) -> set[str] | None:
     try:
         res = subprocess.run([*Tmux.base(socket), "list-windows", "-a", "-F", "#{pid} #{window_id}"],
                              capture_output=True, text=True, timeout=BRIEF_TMUX_S)
@@ -12337,10 +12366,11 @@ def brief_reason(e: Exception) -> str:
     return one_line(e if isinstance(e, (FleetError, OSError)) else f"{type(e).__name__}: {e}", 160)
 
 
-def brief_rows(repo: Path, state: dict, now: float, cfg, cache, everyone: bool) -> list[dict]:
+def brief_rows(repo: Path, state: dict, now: float, cfg, cache, everyone: bool,
+               listings: dict | None = None) -> list[dict]:
     """A run's rows in launch order: every worker, or (everyone False) those brief_listed keeps. A record that
     cannot be read still gets a row that says so."""
-    ctx = {"now": now, "cfg": cfg, "cache": cache, "titles": {}, "windows": brief_windows(state)}
+    ctx = {"now": now, "cfg": cfg, "cache": cache, "titles": {}, "windows": brief_windows(state, listings)}
     rows = []
     items = [(wid, w) for wid, w in state["workers"].items() if isinstance(w, dict)]
     for wid, w in sorted(items, key=lambda item: number(item[1].get("launched_at")) or 0):
@@ -12368,7 +12398,7 @@ def brief_runs(repo: Path, run: str | None = None, every: bool = False, cfg: dic
         names = [run] if run else sorted(f.parent.name for f in root.glob("*/run.json"))
     except OSError:
         names = []
-    live, recent = set(), {}
+    live, recent, listings = set(), {}, {}
     for name in names if not run else ():
         try:
             recent[name] = (run_dir(repo, name) / "run.json").stat().st_mtime
@@ -12383,7 +12413,7 @@ def brief_runs(repo: Path, run: str | None = None, every: bool = False, cfg: dic
     for name in names:
         try:
             state = brief_state(repo, name)
-            rows = brief_rows(repo, state, now, cfg, cache, everyone=bool(run) or every)
+            rows = brief_rows(repo, state, now, cfg, cache, everyone=bool(run) or every, listings=listings)
         except Exception as e:  # noqa: BLE001 - as above
             data["skipped"].append({"run": one_line(name, 64), "reason": brief_reason(e)})
             continue
@@ -12402,16 +12432,18 @@ def brief_line(r: dict, idw: int, ww: int, indent: str) -> str:
             + " · ".join([one_line(r["doing"], BRIEF_DOING), *tail]))
 
 
-def brief_lines(data: dict, rows: int | None = None, indent: str = "  ") -> list[str]:
+def brief_lines(data: dict, rows: int | None = None, indent: str = "  ", label: str | None = None) -> list[str]:
     """The brief view as text: a line per run, then one per worker; past `rows` worker lines, a "+k more" line.
-    The status line passes no indent: Claude Code trims each line it shows."""
+    The status line passes no indent: Claude Code trims each line it shows. With a checkout's label (--all), each
+    run's line names it: fleet <label>/<run>."""
     out, shown = [], 0
     total = sum(len(r["workers"]) for r in data["runs"])
     for r in data["runs"]:
         if rows is not None and shown >= rows:
             break
         back = sum(w["activity"] in ("handed-back", "blocked", "plan-ready") for w in r["workers"])
-        out.append(f"fleet {r['run']} · {r['live']} live" + (f" · {back} handed back" if back else ""))
+        out.append(f"fleet {one_line(label, 120) + '/' if label else ''}{one_line(r['run'], 64)} · {r['live']} live"
+                   + (f" · {back} handed back" if back else ""))
         idw = min(16, max(len(w["id"]) for w in r["workers"]))
         ww = min(30, max(len(w["worker"]) for w in r["workers"]))
         for w in r["workers"]:
@@ -12425,7 +12457,9 @@ def brief_lines(data: dict, rows: int | None = None, indent: str = "  ") -> list
 
 
 def status_brief(a, cfg) -> int:
-    """`fleet status [<run>] --brief`: lockless; prints nothing when no worker is live (no run named)."""
+    """`fleet status [<run>] --brief [--all]`: lockless; prints nothing when no worker is live (no run named)."""
+    if a.all:
+        return status_all(a, cfg)
     repo = repo_root()
     cache = brief_cache(repo)
     data = brief_runs(repo, a.run, cfg=cfg, cache=cache)
@@ -12440,9 +12474,464 @@ def status_brief(a, cfg) -> int:
     return 1 if a.run and data["skipped"] else 0
 
 
+def status_all(a, cfg) -> int:
+    """`fleet status --brief --all`: every active checkout on the machine with a live worker, this one first, from
+    anywhere (outside a checkout too)."""
+    if a.run:
+        raise FleetError("--all lists every active checkout's runs; name no run with it")
+    try:
+        repo = repo_root()
+    except (FleetError, OSError):
+        repo = None
+    cache = brief_cache(repo) if repo else TokenCache(token_cache_file())
+    data = brief_all(repo, cfg=cfg, cache=cache)
+    cache.save()
+    if a.json:
+        print(json.dumps(data, indent=2, allow_nan=False))
+        return 0
+    lines = []
+    for g in data["checkouts"]:
+        lines += brief_lines(g, label=g["label"])
+    if lines:
+        print("\n".join(lines))
+    return 0
+
+
+# ---------- every active checkout ----------
+# Developers run Fleet in several checkouts at once, so the views show every active Fleet session on the machine,
+# not only this checkout's. init and each launch record the checkout in a registry outside every checkout,
+# cache_home()/agent-fleet/active/<checkout key>.json (its path, its runs, when last seen), written atomically and
+# owner-only; the views read it without any lock. A reader drops an entry whose checkout or .fleet/runs is gone, or
+# that has had no live worker for a day, and skips a damaged one. The status line sums the other checkouts in one
+# line, from counts kept a few seconds, so a refresh every 2 s never scans them all.
+
+ACTIVE_STALE_S = 86400  # an entry with no live worker for longer than this is dropped when read
+ACTIVE_MAX_S = 7 * 86400  # an entry no init or launch has seen for longer than this is dropped, live or not
+OTHERS_MAX = 8  # other checkouts the status line's summary counts, the most recently seen first
+OTHERS_TTL_S = 10  # seconds those counts are reused before they are counted again
+REGISTRY_MAX = 1 << 16  # bytes of one registry entry read
+
+
+def active_home() -> Path:
+    return cache_home() / "agent-fleet" / "active"
+
+
+def private_dir(d: Path) -> Path:
+    """A folder of Fleet's own under the cache, which only its owner can open."""
+    d.mkdir(parents=True, exist_ok=True)
+    d.chmod(0o700)
+    return d
+
+
+def write_private(path: Path, text: str) -> None:
+    """Replace a file atomically with one only its owner can read (a dashboard record holds its token)."""
+    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+    try:
+        with os.fdopen(os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as fh:
+            fh.write(text)
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def register_checkout(repo: Path, run: str) -> None:
+    """Record this checkout as active, `run` among its runs, for every view on the machine. Never fails the command it
+    rides on: the registry only informs the views."""
+    try:
+        repo = repo.resolve()
+        if inside_checkout(active_home(), repo):  # never inside the checkout: such a one goes unlisted
+            return
+        f = private_dir(active_home()) / f"{checkout_key(repo)}.json"
+        try:
+            old = dict_of(json.loads(read_bounded(f, REGISTRY_MAX)[0]))
+        except (OSError, ValueError, RecursionError):
+            old = {}
+        runs = old.get("runs") if isinstance(old.get("runs"), list) else []
+        runs = sorted({*(r for r in runs if isinstance(r, str) and ID_RE.fullmatch(r)), run})
+        write_private(f, json.dumps({"checkout": str(repo), "runs": runs, "seen": time.time()}) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def run_names(repo: Path) -> list[str]:
+    root = repo / ".fleet" / "runs"
+    try:
+        return sorted(f.parent.name for f in root.glob("*/run.json")) if root.is_dir() else []
+    except OSError:
+        return []
+
+
+def live_workers(repo: Path, listings: dict | None = None) -> int:
+    """How many workers are live in a checkout, each run reconciled in memory (an exit receipt counts), and not gone
+    as the brief view tells it (a tmux window its server no longer lists, one listing per server): what the status
+    line's summary, the background dashboard's idle check and the registry count. A run it cannot read counts none."""
+    n, listings = 0, {} if listings is None else listings
+    for run in run_names(repo):
+        try:
+            if run_has_live(repo, run):
+                state = brief_state(repo, run)
+                windows = brief_windows(state, listings)
+                n += sum(is_live(w) and not brief_gone(w, windows) for w in state["workers"].values()
+                         if isinstance(w, dict))
+        except Exception:  # noqa: BLE001 - as brief_runs: a run Fleet cannot read is left out
+            continue
+    return n
+
+
+def active_entries(now: float | None = None) -> list[dict]:
+    """The registry's checkouts, the most recently seen first. An entry whose checkout or .fleet/runs is gone, not
+    seen for ACTIVE_STALE_S with no reachable live worker, or not seen for ACTIVE_MAX_S at all, is removed on the
+    way; a damaged one is skipped."""
+    now = time.time() if now is None else now
+    out, listings = [], {}
+    try:
+        files = sorted(active_home().glob("*.json"))
+    except OSError:
+        return []
+    for f in files:
+        try:
+            e = json.loads(read_bounded(f, REGISTRY_MAX)[0])
+            checkout, seen = Path(e["checkout"]), number(e.get("seen"))
+            if not (checkout.is_absolute() and seen is not None and f.stem == checkout_key(checkout)):
+                continue
+            gone = not (checkout / ".fleet" / "runs").is_dir()
+            old = now - seen > ACTIVE_MAX_S
+            idle = now - seen > ACTIVE_STALE_S and not live_workers(checkout, listings)
+            if gone or old or idle:
+                f.unlink(missing_ok=True)
+                continue
+        except Exception:  # noqa: BLE001 - a damaged entry is skipped, never fatal
+            continue
+        runs = [r for r in e.get("runs") or [] if isinstance(r, str)] if isinstance(e.get("runs"), list) else []
+        out.append({"checkout": str(checkout), "runs": runs, "seen": seen})
+    return sorted(out, key=lambda x: -x["seen"])
+
+
+def checkout_labels(paths: list[str]) -> dict[str, str]:
+    """A short label for each checkout: its folder's name, with its path (~ for the home folder) when another
+    checkout shares the name."""
+    home = str(Path.home())
+    names = [Path(p).name or p for p in paths]
+
+    def shown(p: str) -> str:
+        return "~" + p[len(home):] if p == home or p.startswith(home + os.sep) else p
+    return {p: one_line(n if names.count(n) == 1 else f"{n} ({shown(p)})", 120) for p, n in zip(paths, names)}
+
+
+def brief_all(repo: Path | None, cfg: dict | None = None, cache: TokenCache | None = None,
+              every: bool = False) -> dict:
+    """Every active checkout on the machine with its runs, as brief_runs gives them: by default those with a live
+    worker, this one first; `every` (the dashboard) each one's live and recent runs. Each has its label."""
+    me = str(repo.resolve()) if repo else None
+    paths = list(dict.fromkeys(([me] if me else []) + [e["checkout"] for e in active_entries()]))
+    labels = checkout_labels(paths)
+    groups = []
+    for p in paths:
+        try:
+            data = brief_runs(Path(p), every=every, cfg=cfg, cache=cache)
+        except Exception as e:  # noqa: BLE001 - one checkout Fleet cannot read never hides the others
+            data = {"runs": [], "skipped": [{"run": "-", "reason": brief_reason(e)}]}
+        if data["runs"]:
+            groups.append({"checkout": p, "label": labels[p], "current": p == me, "runs": data["runs"],
+                           "skipped": data["skipped"]})
+    groups.sort(key=lambda g: (not g["current"], g["label"]))
+    return {"checkouts": groups}
+
+
+def others_live(repo: Path | None) -> list[tuple[str, int]]:
+    """(checkout, live workers) for the other active checkouts with any, for the status line's summary: at most
+    OTHERS_MAX of them, counted at most every OTHERS_TTL_S seconds and kept between refreshes beside the registry."""
+    f, now = cache_home() / "agent-fleet" / "active-counts.json", time.time()
+    try:
+        kept = dict_of(json.loads(read_bounded(f, 1 << 20)[0]))
+        fresh = 0 <= now - (number(kept.get("at")) or 0) < OTHERS_TTL_S
+        counts = dict_of(kept.get("counts")) if fresh else None
+    except (OSError, ValueError, RecursionError):
+        counts = None
+    if counts is None:
+        listings = {}
+        counts = {e["checkout"]: live_workers(Path(e["checkout"]), listings)
+                  for e in active_entries(now)[:OTHERS_MAX + 1]}
+        try:
+            if not inside_checkout(f, repo):  # else counted again next time
+                private_dir(f.parent)
+                write_private(f, json.dumps({"at": now, "counts": counts}))
+        except OSError:
+            pass
+    me = str(repo.resolve()) if repo else None
+    return [(c, n) for c, n in counts.items() if c != me and type(n) is int and n > 0][:OTHERS_MAX]
+
+
+def plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def others_line(others: list[tuple[str, int]]) -> str:
+    return (f"+{plural(sum(n for _, n in others), 'worker')} in {plural(len(others), 'other repo')} "
+            "(fleet status --brief --all)")
+
+
+# ---------- fleet track ----------
+# The live view in a terminal, for a lead whose host has no status line Fleet can use (Codex's takes built-in items
+# only): every active Fleet session on the machine, redrawn in place every couple of seconds from the same rows as
+# status --brief and the status line. Lockless, and nothing is written in the checkout. Nothing ever splits the
+# owner's terminal on its own: `track --pane` opens it in a short pane below theirs, on their own tmux server (the
+# socket in their TMUX, never Fleet's worker server) or in cmux, without focus, and reuses the one it opened there.
+
+TRACK_PANE_LINES = 8  # rows of the pane track --pane opens
+TRACK_PANE_IDLE_MIN = 30  # minutes with no live worker after which that pane's track ends and the pane closes
+
+
+def reachable(run: dict) -> bool:
+    """Whether a brief run has a worker live and still there: an unreachable one never keeps a view going."""
+    return any(w["live"] and w["activity"] != "unreachable" for w in run["workers"])
+
+
+def track_frame(repo: Path | None, a, cfg: dict | None, cache: TokenCache) -> tuple[list[str], bool]:
+    """One frame of fleet track, and whether any worker in it is live: every active checkout's runs, or with
+    --run that one run of this checkout."""
+    if a.run:
+        data = brief_runs(repo, a.run, cfg=cfg, cache=cache) if repo else {"runs": []}
+        return brief_lines(data) or ["no Fleet workers live"], any(reachable(r) for r in data["runs"])
+    groups = brief_all(repo, cfg=cfg, cache=cache)["checkouts"]
+    lines = [line for g in groups for line in brief_lines(g, label=g["label"])]
+    return lines or ["no Fleet workers live"], any(reachable(r) for g in groups for r in g["runs"])
+
+
+def track_view(a, cfg) -> int:
+    """Redraw the frame every --interval seconds. On a terminal it draws on the alternate screen, each frame over
+    the last, and puts the terminal back however it ends: Ctrl-C, SIGTERM or SIGHUP (each ends it as Ctrl-C does),
+    or at exit; elsewhere it prints the frames one after another. It ends on its own only with --exit-when-idle,
+    after that many minutes with no live worker (an unreachable one counts as none)."""
+    try:
+        repo = repo_root()
+    except (FleetError, OSError):
+        repo = None  # outside every checkout: the active ones still show
+    if a.run and repo is None:
+        raise FleetError("--run names a run of this checkout; run fleet track from inside it")
+    cache, out = TokenCache(), sys.stdout  # the token cache stays in memory
+    tty = out.isatty()
+    idle_since = time.monotonic()
+    restored = []
+
+    def restore() -> None:  # once, whichever way the view ends
+        if tty and not restored:
+            restored.append(True)
+            try:
+                out.write("\x1b[?25h\x1b[?1049l")
+                out.flush()
+            except (OSError, ValueError):  # a hung-up terminal takes nothing more
+                pass
+
+    def interrupt(*_) -> None:
+        raise KeyboardInterrupt
+    kept = {}
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            kept[sig] = signal.signal(sig, interrupt)
+        except ValueError:  # not the main thread: the default handlers stay
+            pass
+    atexit.register(restore)
+    if tty:
+        out.write("\x1b[?1049h\x1b[?25l")  # the alternate screen, the cursor hidden
+    try:
+        while True:
+            try:
+                lines, live = track_frame(repo, a, cfg, cache)
+            except Exception as e:  # noqa: BLE001 - a frame Fleet cannot read says so, and the view goes on
+                lines, live = [f"cannot read Fleet's runs now: {brief_reason(e)}"], True
+            now = time.monotonic()
+            idle_since = now if live else idle_since
+            head = f"fleet track · {time.strftime('%H:%M:%S')} · every {a.interval:g}s · Ctrl-C quits"
+            if a.exit_when_idle is not None and not live:
+                head += f" · ends after {a.exit_when_idle:g} min with none live"
+            frame = [head, "", *lines]
+            if tty:
+                cols, rows = shutil.get_terminal_size()
+                out.write("\x1b[H" + "".join(line[:cols] + "\x1b[K\n" for line in frame[:max(1, rows - 1)]) + "\x1b[J")
+            else:
+                out.write("\n".join(frame) + "\n\n")
+            out.flush()
+            if a.exit_when_idle is not None and not live and now - idle_since >= a.exit_when_idle * 60:
+                return 0
+            time.sleep(a.interval)
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        restore()
+        atexit.unregister(restore)
+        for sig, handler in kept.items():
+            signal.signal(sig, handler)
+
+
+def lead_terminal(env=None) -> tuple[str, dict] | None:
+    """The terminal pane this command runs in, from the variables its shell carries: a tmux pane on the owner's
+    own server, or a cmux surface. None in a plain terminal or an app."""
+    env = os.environ if env is None else env
+    socket, _, rest = env.get("TMUX", "").partition(",")
+    if socket and env.get("TMUX_PANE"):
+        return "tmux", {"socket": socket, "server": rest.split(",")[0], "pane": env["TMUX_PANE"]}
+    if env.get("CMUX_WORKSPACE_ID") and env.get("CMUX_SURFACE_ID"):
+        return "cmux", {"workspace": env["CMUX_WORKSPACE_ID"], "surface": env["CMUX_SURFACE_ID"]}
+    return None
+
+
+def lead_tmux(socket: str, *args: str) -> subprocess.CompletedProcess:
+    """A tmux command on the owner's own server, by the socket their TMUX names: never Fleet's worker server."""
+    return subprocess.run(["tmux", "-S", socket, *args], capture_output=True, text=True, timeout=10)
+
+
+def track_panes_file() -> Path:
+    return cache_home() / "agent-fleet" / "track-panes.json"
+
+
+def track_panes() -> dict:
+    try:
+        return dict_of(json.loads(read_bounded(track_panes_file(), 1 << 20)[0]))
+    except (OSError, ValueError, RecursionError):
+        return {}
+
+
+def track_pane_key(kind: str, where: dict) -> str:
+    if kind == "tmux":
+        return f"tmux:{where['socket']}:{where['server']}:{where['pane']}"
+    return f"cmux:{where['workspace']}:{where['surface']}"
+
+
+def track_pane_alive(kind: str, where: dict, rec: dict) -> bool:
+    """Whether the pane --pane opened for this pane still runs fleet track."""
+    if kind == "tmux":
+        pane = rec.get("pane")
+        if not isinstance(pane, str):
+            return False
+        res = lead_tmux(where["socket"], "display-message", "-p", "-t", pane,
+                        "#{pane_id}\t#{pane_dead}\t#{pane_start_command}")
+        fields = res.stdout.rstrip("\n").split("\t")
+        return res.returncode == 0 and len(fields) == 3 and fields[:2] == [pane, "0"] and " track" in fields[2]
+    target = rec.get("surface_id") or rec.get("surface")
+    return isinstance(target, str) and any(target in p.get("surface_ids", []) + p.get("surface_refs", [])
+                                           for p in list_panes(where["workspace"]))
+
+
+TRACK_ENV = ("XDG_CACHE_HOME", "FLEET_CONFIG")  # where Fleet finds the registry and the config
+
+
+def track_command(a, env=None) -> str:
+    """The pane's command. A tmux pane gets its server's environment, not this shell's, so the variables that say
+    where Fleet's files are go with it, set as here or unset as here (FLEET_WORKER never: track is the owner's)."""
+    env = os.environ if env is None else env
+    idle = a.exit_when_idle if a.exit_when_idle is not None else TRACK_PANE_IDLE_MIN
+    names = sorted({*TRACK_ENV, *(k for k in env if k.startswith("FLEET_") and k != FLEET_WORKER_ENV)})
+    unset = [x for k in [*(k for k in names if k not in env), FLEET_WORKER_ENV] for x in ("-u", k)]
+    pins = [f"{k}={env[k]}" for k in names if k in env]
+    return shlex.join(["env", *unset, *pins, sys.executable, str(Path(__file__).resolve()), "track", "--interval",
+                       f"{a.interval:g}", "--exit-when-idle", f"{idle:g}", *(["--run", a.run] if a.run else [])])
+
+
+def track_pane(a) -> int:
+    """`fleet track --pane`: open fleet track in a short pane below this one, without focus, or name the one it
+    opened here before while it still runs."""
+    lead = lead_terminal()
+    if lead is None:
+        raise FleetError("fleet track --pane splits a tmux or cmux pane, and this terminal is neither (no TMUX and "
+                         "TMUX_PANE, or CMUX_WORKSPACE_ID and CMUX_SURFACE_ID): run fleet track in a second tab or "
+                         "window instead")
+    kind, where = lead
+    key, records = track_pane_key(kind, where), track_panes()
+    rec = dict_of(records.get(key))
+    if rec and track_pane_alive(kind, where, rec):
+        print(f"fleet track already runs in the pane below ({rec.get('pane') or rec.get('surface')}); nothing opened")
+        return 0
+    records.pop(key, None)
+    try:  # drop the records of panes that are gone: an earlier server's on this socket, or ones it no longer lists
+        if kind == "tmux":
+            res = lead_tmux(where["socket"], "list-panes", "-a", "-F", "#{pane_id}")
+            mine, now = f"tmux:{where['socket']}:", f"tmux:{where['socket']}:{where['server']}:"
+            if res.returncode == 0:
+                records = {k: r for k, r in records.items() if not (k.startswith(mine) and (
+                    not k.startswith(now) or dict_of(r).get("pane") not in res.stdout.split()))}
+        else:
+            track_surfaces(where["workspace"], list_panes(where["workspace"]))
+            records = {k: r for k, r in track_panes().items() if k != key}
+    except (FleetError, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        pass
+    try:
+        cwd = repo_root()
+    except (FleetError, OSError):
+        cwd = Path.cwd()
+    if kind == "tmux":
+        res = lead_tmux(where["socket"], "split-window", "-v", "-d", "-l", str(TRACK_PANE_LINES), "-t", where["pane"],
+                        "-c", str(cwd), "-P", "-F", "#{pane_id}", track_command(a))
+        if res.returncode != 0:
+            raise FleetError(f"tmux could not split this pane: {one_line(res.stderr, 200)}")
+        rec = {"pane": res.stdout.strip()}
+    else:
+        out = cmux("--id-format", "both", "new-split", "down", "--workspace", where["workspace"], "--surface",
+                   where["surface"], "--command", f"cd {shlex.quote(str(cwd))} && exec {track_command(a)}",
+                   "--focus", "false")
+        m = SURFACE_RE.search(out)
+        if not m:
+            raise FleetError(f"cmux did not say which surface it opened: {one_line(out, 200)}")
+        rec = {"surface": m.group(1), "surface_id": m.group(2)}
+    records[key] = {**rec, "kind": kind, "workspace": where.get("workspace"), "started": time.time()}
+    if not inside_checkout(track_panes_file(), cwd):  # else unrecorded: the next --pane opens another
+        private_dir(track_panes_file().parent)
+        write_private(track_panes_file(), json.dumps(records, indent=2) + "\n")
+    print(f"opened fleet track in the pane below ({rec.get('pane') or rec.get('surface')}), without focus; it ends "
+          f"after {a.exit_when_idle if a.exit_when_idle is not None else TRACK_PANE_IDLE_MIN:g} minutes with no live "
+          "worker, or press Ctrl-C in it")
+    return 0
+
+
+def surface_ref(panes: list[dict], sid: str) -> str | None:
+    """A surface's ref as cmux lists it now, from its UUID."""
+    return next((ref for p in panes for ref, i in zip(p.get("surface_refs", []), p.get("surface_ids", []))
+                 if i == sid), None)
+
+
+def track_surfaces(workspace: str, panes: list[dict]) -> set[str]:
+    """The refs, as cmux lists them now, of the surfaces --pane opened in a workspace: never a pane to put a
+    worker's tab in. Each is found by the UUID recorded when it opened (by its ref only when cmux gave none), since
+    refs restart with cmux and an old one can name another terminal. Records of surfaces no longer listed are
+    dropped."""
+    refs, gone = set(), []
+    for key, r in track_panes().items():
+        if not (isinstance(r, dict) and r.get("kind") == "cmux" and r.get("workspace") == workspace):
+            continue
+        sid, ref = r.get("surface_id"), r.get("surface")
+        if isinstance(sid, str):
+            found = surface_ref(panes, sid)
+        else:
+            found = ref if isinstance(ref, str) and any(ref in p.get("surface_refs", []) for p in panes) else None
+        if found:
+            refs.add(found)
+        else:
+            gone.append(key)
+    if gone:
+        forget_track_panes(gone)
+    return refs
+
+
+def forget_track_panes(keys: list[str]) -> None:
+    """Drop the track --pane records whose pane or surface is gone; a file Fleet cannot write keeps them."""
+    records = track_panes()
+    if [records.pop(k) for k in keys if k in records]:
+        try:
+            write_private(track_panes_file(), json.dumps(records, indent=2) + "\n")
+        except OSError:
+            pass
+
+
+def cmd_track(a, cfg):
+    if a.exit_when_idle is not None and a.exit_when_idle < 0:  # main checks --interval, as for wait
+        raise FleetError("--exit-when-idle takes minutes, 0 or more")
+    return track_pane(a) if a.pane else track_view(a, cfg)
+
+
 # ---------- Claude Code status line ----------
-# `fleet statusline` is the command Claude Code's statusLine setting runs: it gets the session's JSON on stdin and
-# prints each line as a row under the prompt, every refreshInterval seconds. With --then it runs the owner's own
+# `fleet statusline` is what Claude Code's statusLine setting runs, through fleet-statusline beside this file (a
+# launcher that never loads Fleet inside a worker and keeps its bytecode cached): it gets the session's JSON on stdin
+# and prints each line as a row under the prompt, every refreshInterval seconds. With --then it runs the owner's own
 # command first, with the same stdin, and prints that output above Fleet's rows, so Fleet never takes their line
 # away. It always exits 0 and never reads the config: whatever goes wrong only leaves Fleet's rows out. --install
 # writes it into a Claude Code settings file, backing that up first under Fleet's config folder and remembering the
@@ -12500,46 +12989,71 @@ def statusline_show(a) -> int:
     except (OSError, ValueError, AttributeError):
         raw = b""
     lines = statusline_then(a.then, raw) if a.then else []
-    try:
-        if not os.environ.get(FLEET_WORKER_ENV):
-            repo = repo_root(statusline_dir(statusline_input(raw)))
-            cache = brief_cache(repo)
-            data = brief_runs(repo, cache=cache)
-            cache.save()
-            lines += brief_lines(data, max(0, a.rows), indent="")
-    except Exception:  # noqa: BLE001 - a status line never shows an error in place of the owner's line
-        pass
+    if not os.environ.get(FLEET_WORKER_ENV):
+        lines += statusline_rows(raw, max(0, a.rows))
     if lines:
         sys.stdout.write("\n".join(lines) + "\n")
         sys.stdout.flush()
     return 0
 
 
+def statusline_rows(raw: bytes, rows: int) -> list[str]:
+    """Fleet's part of the status line: this checkout's rows, at most `rows` of them, then one line summing the
+    workers live in the other active checkouts. Each part that fails is left out on its own."""
+    out, repo = [], None
+    try:
+        repo = repo_root(statusline_dir(statusline_input(raw)))
+        cache = brief_cache(repo)
+        data = brief_runs(repo, cache=cache)
+        cache.save()
+        out += brief_lines(data, rows, indent="")
+    except Exception:  # noqa: BLE001 - a status line never shows an error in place of the owner's line
+        pass
+    try:
+        if others := others_live(repo):
+            out.append(others_line(others))
+    except Exception:  # noqa: BLE001 - as above
+        pass
+    return out
+
+
 def claude_settings_file(scope: str) -> Path:
     """The Claude Code settings file --install edits: the user's (CLAUDE_CONFIG_DIR, else ~/.claude), or this
     checkout's .claude/settings.local.json."""
     if scope == "project":
-        return repo_root() / ".claude" / "settings.local.json"
+        try:
+            base = repo_root()
+        except (FleetError, OSError):  # not a Git checkout (an installer's --root): no run can be here
+            base = Path.cwd()
+        return base / ".claude" / "settings.local.json"
     return Path(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude").expanduser() / "settings.json"
 
 
+STATUSLINE_LAUNCHER = "fleet-statusline"  # beside fleet: the small command Claude Code's statusLine runs
+
+
 def statusline_command(then: str | None) -> str:
-    """This Fleet's status-line command: its absolute path, or the interpreter and path when `python3` on PATH is
-    not the Python running it (its shebang could find an older one). An owner's command it chains also runs on its
-    own after `||`, so their line survives this Fleet's folder going away (a plugin update deletes the old one)."""
+    """This Fleet's status-line command: the launcher beside it (fleet-statusline, which skips loading Fleet inside
+    a worker and keeps Fleet's bytecode cached), by its absolute path, or the interpreter and path when `python3`
+    on PATH is not the Python running it (its shebang could find an older one); `fleet statusline` itself when
+    there is no launcher. An owner's command it chains also runs on its own after `||`, so their line survives this
+    Fleet's folder going away (a plugin update deletes the old one)."""
     here = Path(__file__).resolve()
+    launcher = here.parent / STATUSLINE_LAUNCHER
+    run, sub = (launcher, []) if launcher.is_file() else (here, ["statusline"])
     python3 = shutil.which("python3")
-    plain = os.access(here, os.X_OK) and python3 and Path(python3).resolve() == Path(sys.executable).resolve()
-    base = shlex.quote(str(here)) if plain else shlex.join([sys.executable, str(here)])
+    plain = os.access(run, os.X_OK) and python3 and Path(python3).resolve() == Path(sys.executable).resolve()
+    base = shlex.join([str(run), *sub]) if plain else shlex.join([sys.executable, str(run), *sub])
     if not then:
-        return f"{base} statusline"
-    return f"{base} statusline --then {shlex.quote(then)} || sh -c {shlex.quote(then)}"
+        return base
+    return f"{base} --then {shlex.quote(then)} || sh -c {shlex.quote(then)}"
 
 
 def fleet_statusline(value) -> tuple[bool, str | None]:
     """(True, the owner's command it chains, if any) when a statusLine is exactly a Fleet status line as --install
-    writes it: `[<python>] <.../fleet> statusline [--then Q] [--rows N] [|| sh -c Q]`. Anything else, even a command
-    that runs `fleet statusline` among others, is (False, None): the owner's own, which --install chains whole."""
+    writes it, now or before the launcher: `[<python>] <.../fleet-statusline> [--then Q] [--rows N] [|| sh -c Q]`,
+    or the same with `<.../fleet> statusline`. Anything else, even a command that runs `fleet statusline` among
+    others, is (False, None): the owner's own, which --install chains whole."""
     command = dict_of(value).get("command")
     try:
         words = shlex.split(command) if isinstance(command, str) else []
@@ -12547,9 +13061,13 @@ def fleet_statusline(value) -> tuple[bool, str | None]:
         return False, None
     if words and Path(words[0]).name.startswith("python"):
         words = words[1:]
-    if len(words) < 2 or Path(words[0]).name != "fleet" or words[1] != "statusline":
+    if words and Path(words[0]).name == STATUSLINE_LAUNCHER:
+        rest = words[1:]
+    elif len(words) >= 2 and Path(words[0]).name == "fleet" and words[1] == "statusline":
+        rest = words[2:]
+    else:
         return False, None
-    rest, then = words[2:], None
+    then = None
     while rest and rest[0] != "||":
         flag, sep, inline = rest[0].partition("=")
         if flag not in ("--then", "--rows") or (not sep and len(rest) < 2):
@@ -12639,9 +13157,14 @@ def remembered_statusline(path: Path, then: str | None) -> dict | None:
 
 def statusline_project_check(path: Path) -> None:
     """A project install changes a file in the checkout: refuse while workers run unless Git ignores it, since the
-    scope check would count it against them."""
-    repo = repo_root()
-    rel = path.relative_to(repo).as_posix()
+    scope check would count it against them. The checkout is the one the file is in (its nearest folder that
+    exists), wherever this runs from."""
+    near = next((d for d in path.parents if d.is_dir()), Path("/"))
+    try:
+        repo = repo_root(near)
+        rel = path.relative_to(repo).as_posix()
+    except (FleetError, OSError, ValueError):  # outside a Git checkout: no run, no scope check
+        return
     if subprocess.run(["git", "check-ignore", "-q", "--", rel], cwd=repo, capture_output=True).returncode == 0:
         return
     live = [r["run"] for r in brief_runs(repo)["runs"]]
@@ -12653,7 +13176,7 @@ def statusline_project_check(path: Path) -> None:
           "running workers", file=sys.stderr)
 
 
-def statusline_install(path: Path) -> None:
+def statusline_install(path: Path, undo: str = "") -> None:
     data, raw = read_settings(path)
     old = data.get("statusLine")
     ours, then = fleet_statusline(old)  # already Fleet's: keep what it chains, and point it at this Fleet
@@ -12674,8 +13197,8 @@ def statusline_install(path: Path) -> None:
     backup = write_settings(path, data, raw)
     statusline_said(path, old, new, backup)
     print("Claude Code shows it from its next refresh: one row per live Fleet worker in the session's checkout, below "
-          f"{'your own line' if then else 'the prompt'}. Undo with: fleet statusline --uninstall"
-          + (" --scope project" if path.name == "settings.local.json" else ""))
+          f"{'your own line' if then else 'the prompt'}, and a line for your other active repos. Undo with: fleet "
+          f"statusline --uninstall{undo}")
 
 
 def statusline_uninstall(path: Path) -> None:
@@ -12705,17 +13228,24 @@ def statusline_said(path: Path, old, new, backup: Path | None) -> None:
 def cmd_statusline(a, cfg):
     if a.install and a.uninstall:
         raise FleetError("--install or --uninstall, not both")
-    path = claude_settings_file(a.scope)
-    if a.scope == "project":
+    if a.settings is not None and not os.path.isabs(a.settings):
+        raise FleetError("--settings takes an absolute path")
+    path = Path(a.settings) if a.settings else claude_settings_file(a.scope)
+    if a.scope == "project" or a.settings:
         statusline_project_check(path)
-    statusline_install(path) if a.install else statusline_uninstall(path)
+    undo = f" --settings {shlex.quote(str(path))}" if a.settings else " --scope project" if a.scope == "project" else ""
+    statusline_install(path, undo) if a.install else statusline_uninstall(path)
 
 
 # ---------- dashboard ----------
-# `fleet dashboard` serves the brief view and a worker's screen to a browser, for the owner in a desktop app or
-# without a terminal. It binds 127.0.0.1 only and needs a random token minted at each start in every request; a
-# request whose Host header is not this server's own (DNS rebinding) or that is not a GET or HEAD is refused before
-# any run is read, and no response carries CORS headers. Like status --brief it reads only, holding no lock.
+# `fleet dashboard` serves the brief view of every active Fleet checkout on the machine, and a worker's screen, to
+# a browser, for the owner in a desktop app or without a terminal. It binds 127.0.0.1 only and needs a random token
+# minted at each start in every request; a request whose Host header is not this server's own (DNS rebinding) or
+# that is not a GET or HEAD is refused before any run is read, and no response carries CORS headers. A screen is
+# served only for a checkout the registry lists, matched exactly, never for a path the query names. Like status
+# --brief it reads only, holding no lock. `--background` starts one detached dashboard per user, recorded under the
+# cache, which every checkout's init and launch reuse; it stops itself after DASHBOARD_IDLE_S with no live worker in
+# any active checkout.
 
 DASHBOARD_PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -12728,17 +13258,19 @@ DASHBOARD_PAGE = r"""<!doctype html>
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
 header{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;padding:12px 16px;
 border-bottom:1px solid var(--line)}
-h1{font-size:16px;margin:0}h2{font-size:13px;margin:18px 0 6px;color:var(--dim);font-weight:600}
+h1{font-size:16px;margin:0}h2{font-size:15px;margin:22px 0 0}h3{font-size:13px;margin:12px 0 6px;color:var(--dim);
+font-weight:600}.path{margin:0;font-size:12px}
 .dim{color:var(--dim)}main{padding:0 16px 24px}
 table{border-collapse:collapse;width:100%}td{padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top;
 white-space:nowrap}td.doing{white-space:normal;width:100%}tr{cursor:pointer}tr:hover{background:var(--pre)}
 tr.sel{background:var(--sel)}.live{color:var(--live)}.blocked,.permission,.idle,.unreadable{color:var(--warn)}
-.exited,.stop-failed,.unknown{color:var(--bad)}
+.exited,.stop-failed,.unknown,.unreachable{color:var(--bad)}
 pre{margin:0;background:var(--pre);border:1px solid var(--line);border-radius:6px;padding:12px;overflow:auto;
 max-height:65vh;font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre}
 </style></head><body>
-<header><h1>Fleet workers</h1><span class="dim" id="where"></span><span class="dim" id="when"></span></header>
-<main><div id="runs"></div><div id="pane" hidden><h2 id="pane-title"></h2><pre id="screen"></pre></div></main>
+<header><h1>Fleet workers</h1><span class="dim">every active Fleet session on this computer</span>
+<span class="dim" id="when"></span></header>
+<main><div id="runs"></div><div id="pane" hidden><h3 id="pane-title"></h3><pre id="screen"></pre></div></main>
 <script nonce="__NONCE__">
 "use strict";
 const token = new URLSearchParams(location.search).get("t") || "";
@@ -12765,41 +13297,49 @@ function tokens(t) {
   if ("output" in t) parts.push(count(t.output) + " out");
   return parts.join(", ");
 }
+function same(a, b) { return a && b && a.checkout === b.checkout && a.run === b.run && a.id === b.id; }
+function row(repo, run, w) {
+  const here = {checkout: repo.checkout, run: run.run, id: w.id, label: repo.label};
+  const tr = document.createElement("tr");
+  if (same(picked, here)) tr.className = "sel";
+  tr.addEventListener("click", () => {
+    picked = here;
+    for (const old of document.querySelectorAll("tr.sel")) old.className = "";
+    tr.className = "sel";
+    poll();
+  });
+  const kind = String(w.activity || "").replace(/[^a-z-]/g, "");
+  tr.append(cell("td", w.live ? "live" : "dim", w.live ? "●" : "○"), cell("td", "", w.id),
+            cell("td", "dim", w.worker), cell("td", "doing " + kind, w.doing),
+            cell("td", "dim", w.elapsed_s == null ? "" : clock(w.elapsed_s)), cell("td", "dim", tokens(w.tokens)),
+            cell("td", "dim", w.title));
+  return tr;
+}
 function render(data) {
-  $("where").textContent = data.checkout;
   const root = $("runs");
   root.replaceChildren();
-  if (!data.runs.length) root.append(cell("p", "dim", "No Fleet workers in this checkout yet; this page refreshes."));
-  for (const run of data.runs) {
-    const n = run.workers.length;
-    const head = ["run " + run.run, run.live + " live", n + (n === 1 ? " worker" : " workers"), run.backend];
-    root.append(cell("h2", "", head.join(" · ")));
-    const table = document.createElement("table");
-    for (const w of run.workers) {
-      const tr = document.createElement("tr");
-      if (picked && picked.run === run.run && picked.id === w.id) tr.className = "sel";
-      tr.addEventListener("click", () => {
-        picked = {run: run.run, id: w.id};
-        for (const old of document.querySelectorAll("tr.sel")) old.className = "";
-        tr.className = "sel";
-        poll();
-      });
-      const kind = String(w.activity || "").replace(/[^a-z-]/g, "");
-      tr.append(cell("td", w.live ? "live" : "dim", w.live ? "●" : "○"), cell("td", "", w.id),
-                cell("td", "dim", w.worker), cell("td", "doing " + kind, w.doing),
-                cell("td", "dim", w.elapsed_s == null ? "" : clock(w.elapsed_s)), cell("td", "dim", tokens(w.tokens)),
-                cell("td", "dim", w.title));
-      table.append(tr);
+  if (!data.checkouts.length) root.append(cell("p", "dim", "No active Fleet session here; this page refreshes."));
+  for (const repo of data.checkouts) {
+    root.append(cell("h2", "", repo.label + (repo.current ? " · this checkout" : "")),
+                cell("p", "dim path", repo.checkout));
+    for (const run of repo.runs) {
+      const n = run.workers.length;
+      const head = ["run " + run.run, run.live + " live", n + (n === 1 ? " worker" : " workers"), run.backend];
+      root.append(cell("h3", "", head.join(" · ")));
+      const table = document.createElement("table");
+      for (const w of run.workers) table.append(row(repo, run, w));
+      root.append(table);
     }
-    root.append(table);
+    for (const s of repo.skipped) root.append(cell("p", "dim", "run " + s.run + " could not be read: " + s.reason));
   }
-  for (const s of data.skipped) root.append(cell("p", "dim", "run " + s.run + " could not be read: " + s.reason));
 }
 async function screen() {
-  const r = await fetch(api("/api/screen", picked), {cache: "no-store"});
+  const r = await fetch(api("/api/screen", {checkout: picked.checkout, run: picked.run, id: picked.id}),
+                        {cache: "no-store"});
   const data = await r.json();
   $("pane").hidden = false;
-  $("pane-title").textContent = picked.id + "'s screen (run " + picked.run + "), the worker's own output";
+  $("pane-title").textContent = picked.id + "'s screen (" + picked.label + ", run " + picked.run + "), " +
+    "the worker's own output";
   $("screen").textContent = data.error ? data.error : data.screen;
 }
 async function poll() {
@@ -12823,23 +13363,31 @@ setInterval(poll, 2000);
 """
 DASHBOARD_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
                      "X-Frame-Options": "DENY"}
+DASHBOARD_IDLE_S = 1800  # a background dashboard stops after this long with no live worker in any active checkout
+DASHBOARD_CHECK_S = 60  # how often it looks, without any lock
+DASHBOARD_START_S = 8  # how long --background waits for a new one to answer
+NO_DASHBOARD_ENV = "FLEET_NO_DASHBOARD"  # set (the tests, the smoke and benchmark kits): init and launch start none
 
 
 class DashboardBoard:
-    """What the dashboard's request threads share: the checkout, the token, the hosts it answers to, and the token
-    cache, which locks only its own records, never a file read: a request that is slow to read never holds up the
-    next."""
+    """What the dashboard's request threads share: the checkout it started in, the token, the hosts it answers to,
+    and the token cache, which locks only its own records, never a file read: a request that is slow to read never
+    holds up the next."""
 
     def __init__(self, repo: Path, port: int, cfg: dict | None):
         import secrets
-        self.repo, self.cfg, self.port = repo, cfg, port
-        self.token = secrets.token_urlsafe(24)
+        self.repo, self.cfg, self.port = repo.resolve(), cfg, port
+        self.token, self.nonce = secrets.token_urlsafe(24), secrets.token_urlsafe(16)
         self.hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
         self.cache = TokenCache()
 
     @property
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}/?t={self.token}"
+
+    def checkouts(self) -> list[str]:
+        """The checkouts it serves: the one it started in, and every one the registry lists."""
+        return list(dict.fromkeys([str(self.repo), *(e["checkout"] for e in active_entries())]))
 
 
 def page_json(data) -> bytes:
@@ -12856,19 +13404,24 @@ def screen_text(text: str) -> str:
     return "\n".join(NOTE_CONTROL_RE.sub(" ", line).rstrip() for line in lines)[-DASHBOARD_SCREEN_CHARS:]
 
 
-def dashboard_screen(repo: Path, run: str, wid: str) -> tuple[int, dict]:
+def dashboard_screen(board: DashboardBoard, checkout: str, run: str, wid: str) -> tuple[int, dict]:
+    """A worker's screen. `checkout` must be one the board serves, compared as an exact string (default: its own);
+    no path from the query is ever opened."""
+    checkout = checkout or str(board.repo)
+    if checkout not in board.checkouts():
+        return 403, {"error": "refused: not an active Fleet checkout on this computer"}
     try:
         valid_id(run), valid_id(wid)
     except FleetError as e:
         return 400, {"error": str(e)}
     try:
-        state = brief_state(repo, run)
-    except (FleetError, OSError, ValueError, KeyError, TypeError, AttributeError) as e:
-        return 404, {"error": f"cannot read run {run}: {one_line(e, 200)}"}
+        state = brief_state(Path(checkout), run)
+    except Exception as e:  # noqa: BLE001 - as brief_runs
+        return 404, {"error": f"cannot read run {run}: {brief_reason(e)}"}
     w = state["workers"].get(wid)
     if not isinstance(w, dict):
         return 404, {"error": f"no worker {wid} in run {run}"}
-    out = {"run": run, "id": wid, "screen": "", "error": None}
+    out = {"checkout": checkout, "run": run, "id": wid, "screen": "", "error": None}
     if w.get("surface", "unknown") == "unknown":
         out["error"] = "no terminal recorded for this worker"
         return 200, out
@@ -12901,11 +13454,13 @@ def dashboard_reply(board: DashboardBoard, method: str, target: str, hosts: list
         return 200, "text/html; charset=utf-8", DASHBOARD_PAGE.replace("__NONCE__", nonce).encode(), \
             {"Content-Security-Policy": policy}
     json_type, policy = "application/json", {"Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'"}
+    if url.path == "/api/id":  # who this dashboard is: a record names a dashboard only while these match
+        return 200, json_type, page_json({"pid": os.getpid(), "nonce": board.nonce}), policy
     if url.path == "/api/status":
-        data = brief_runs(board.repo, every=True, cfg=board.cfg, cache=board.cache)
+        data = brief_all(board.repo, cfg=board.cfg, cache=board.cache, every=True)
         return 200, json_type, page_json(data), policy
     if url.path == "/api/screen":
-        code, data = dashboard_screen(board.repo, *((query.get(k) or [""])[0] for k in ("run", "id")))
+        code, data = dashboard_screen(board, *((query.get(k) or [""])[0] for k in ("checkout", "run", "id")))
         return code, json_type, page_json(data), policy
     return 404, text, b"not found\n", {}
 
@@ -12915,7 +13470,7 @@ def dashboard_server(repo: Path, port: int, cfg: dict | None):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     class Handler(BaseHTTPRequestHandler):
-        server_version, sys_version = "fleet-dashboard", ""
+        server_version, sys_version = DASHBOARD_SERVER, ""
 
         def log_message(self, *args) -> None:
             pass  # a request line carries the token
@@ -12942,29 +13497,230 @@ def dashboard_server(repo: Path, port: int, cfg: dict | None):
     class Server(ThreadingHTTPServer):
         daemon_threads = True
 
+        def server_bind(self) -> None:
+            """HTTPServer's own looks up this host's name (socket.getfqdn), which stalls for seconds where reverse DNS
+            is slow, as on many Macs: long enough that init's dashboard never answered in time. It serves 127.0.0.1
+            only, so no name is needed."""
+            import socketserver
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+
     server = Server(("127.0.0.1", port), Handler)
     server.board = DashboardBoard(repo, server.server_address[1], cfg)
     return server
 
 
+def dashboard_home() -> Path:
+    return cache_home() / "agent-fleet" / "dashboard"
+
+
+DASHBOARD_SERVER = "fleet-dashboard"  # its Server header, one of the marks that tell it from any other server
+DASHBOARD_STOP_S = 5  # seconds --stop waits for the dashboard to go before it says it is still shutting down
+
+
+def read_dashboard() -> dict | None:
+    """The background dashboard's record (pid, its start time, port, token, nonce, url), or None when there is none
+    to read."""
+    try:
+        rec = json.loads(read_bounded(dashboard_home() / "dashboard.json", REGISTRY_MAX)[0])
+    except (OSError, ValueError, RecursionError):
+        return None
+    ok = (isinstance(rec, dict) and type(rec.get("pid")) is int and rec["pid"] > 1 and type(rec.get("port")) is int
+          and all(isinstance(rec.get(k), str) for k in ("token", "nonce", "url")))
+    return rec if ok else None
+
+
+def process_start(pid: int) -> str | None:
+    """When a process started, where the system says (Linux's /proc, else ps), so a pid reused since never passes
+    for the process a record names; None when it cannot be told."""
+    try:  # field 22 of /proc/<pid>/stat, counted after the command name, which is in parentheses
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        pass
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+        return out.stdout.strip() or None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def dashboard_answers(rec: dict) -> bool:
+    """Whether the recorded dashboard is alive and is that very one, never just whatever holds its pid or port: the
+    process exists and started when the record says, and /api/id with its token answers from a Fleet dashboard
+    with the same pid and the record's nonce."""
+    import http.client
+    try:
+        os.kill(rec["pid"], 0)
+    except OSError:  # gone, or no process of this user's
+        return False
+    started = process_start(rec["pid"])
+    if rec.get("proc_start") and started and started != rec["proc_start"]:
+        return False
+    conn = http.client.HTTPConnection("127.0.0.1", rec["port"], timeout=2)
+    try:
+        conn.request("GET", f"/api/id?t={rec['token']}", headers={"Host": f"127.0.0.1:{rec['port']}"})
+        r = conn.getresponse()
+        data = dict_of(json.loads(r.read(4096))) if r.status == 200 else {}
+        return ((r.getheader("Server") or "").startswith(DASHBOARD_SERVER) and data.get("pid") == rec["pid"]
+                and data.get("nonce") == rec["nonce"])
+    except (OSError, ValueError, http.client.HTTPException):
+        return False
+    finally:
+        conn.close()
+
+
+def dashboard_lock():
+    home = private_dir(dashboard_home())
+    lock = open(home / "dashboard.lock", "a")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    return lock
+
+
+def forget_dashboard(rec: dict) -> None:
+    """Remove the record, only while it still names that very dashboard: never a newer one's."""
+    now = read_dashboard()
+    if now and (now["pid"], now["nonce"]) == (rec["pid"], rec["nonce"]):
+        (dashboard_home() / "dashboard.json").unlink(missing_ok=True)
+
+
+def dashboard_background(repo: Path) -> dict:
+    """The machine's background dashboard: the live one its record names, else a new one started detached (its own
+    session, its output in dashboard.log beside the record). One at a time, under a lock file of its own in the
+    cache; nothing here takes the checkout's lock. A new one that does not answer in time is stopped. Its files
+    never go inside a checkout: with no other place for them, there is no dashboard."""
+    if inside_checkout(dashboard_home(), repo):
+        raise FleetError("no dashboard: its files (and token) would land inside this checkout")
+    log = dashboard_home() / "dashboard.log"
+    with dashboard_lock():
+        rec = read_dashboard()
+        if rec and dashboard_answers(rec):
+            return rec
+        out = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "dashboard", "--detached",
+                                      "--idle-exit", str(DASHBOARD_IDLE_S), "--idle-check", str(DASHBOARD_CHECK_S)],
+                                     cwd=repo, stdin=subprocess.DEVNULL, stdout=out, stderr=out,
+                                     start_new_session=True)
+        finally:
+            os.close(out)
+        deadline = time.monotonic() + DASHBOARD_START_S
+        while time.monotonic() < deadline and child.poll() is None:
+            rec = read_dashboard()
+            if rec and rec["pid"] == child.pid and dashboard_answers(rec):
+                return rec
+            time.sleep(0.1)
+        if child.poll() is None:  # too slow to answer: never left running unrecorded
+            child.terminate()
+            try:
+                child.wait(2)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+        rec = read_dashboard()
+        if rec and rec["pid"] == child.pid:
+            forget_dashboard(rec)
+    raise FleetError(f"the background dashboard did not answer within {DASHBOARD_START_S:g}s; see {log}")
+
+
+def anything_live(board: DashboardBoard) -> bool:
+    listings = {}
+    return any(live_workers(Path(p), listings) for p in board.checkouts())
+
+
+def serve_detached(a, cfg) -> int:
+    """`fleet dashboard --detached`, which --background starts: serve every active checkout, recorded for reuse,
+    until --stop, or until no worker has been live in any of them for --idle-exit seconds (checked every
+    --idle-check, without any lock)."""
+    server = dashboard_server(repo_root(), 0, cfg)
+    board, home = server.board, private_dir(dashboard_home())
+    rec = {"pid": os.getpid(), "proc_start": process_start(os.getpid()), "port": board.port, "token": board.token,
+           "nonce": board.nonce, "url": board.url, "started": time.time()}
+    write_private(home / "dashboard.json", json.dumps(rec) + "\n")
+    done = threading.Event()
+
+    def idle() -> None:
+        last = time.monotonic()
+        while not done.wait(a.idle_check):
+            try:
+                last = time.monotonic() if anything_live(board) else last
+            except Exception:  # noqa: BLE001 - unsure counts as live: a dashboard never stops on a read error
+                last = time.monotonic()
+            if time.monotonic() - last >= a.idle_exit:
+                print("no live worker in any active checkout; stopping", flush=True)
+                server.shutdown()
+                return
+    threading.Thread(target=idle, daemon=True).start()
+    signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start())
+    print(f"serving 127.0.0.1:{board.port} (pid {os.getpid()})", flush=True)  # the log never holds the token
+    try:
+        server.serve_forever(poll_interval=0.5)
+    finally:
+        done.set()
+        server.server_close()
+        forget_dashboard(rec)
+    return 0
+
+
+def dashboard_stop() -> str:
+    """Stop the background dashboard, under its lock. Only a process that proves to be the recorded dashboard is
+    ever signalled; a record naming anything else is dropped, and the message says which happened."""
+    if not (dashboard_home() / "dashboard.json").exists():  # nothing to stop, and no lock file made for it
+        return "no background dashboard is running"
+    with dashboard_lock():
+        rec = read_dashboard()
+        if rec is None:
+            return "no background dashboard is running"
+        if not dashboard_answers(rec):  # gone, or its pid or port taken by another process since: never signalled
+            forget_dashboard(rec)
+            return (f"no background dashboard was running: its record (pid {rec['pid']}) named a process that is "
+                    "gone or not Fleet's, so it was dropped and nothing was signalled")
+        os.kill(rec["pid"], signal.SIGTERM)
+        deadline = time.monotonic() + DASHBOARD_STOP_S
+        while time.monotonic() < deadline and dashboard_answers(rec):
+            time.sleep(0.1)
+        if dashboard_answers(rec):
+            return f"asked the background dashboard (pid {rec['pid']}) to stop; it is still shutting down"
+        forget_dashboard(rec)
+    return (f"stopped the background dashboard (pid {rec['pid']}); the next fleet init or launch that needs one "
+            "starts it again")
+
+
+def open_link(url: str) -> None:
+    try:
+        import webbrowser
+        webbrowser.open(url)
+    except Exception as e:  # noqa: BLE001 - the link is printed either way
+        print(f"could not open a browser ({one_line(e)}); open the link yourself", file=sys.stderr)
+
+
 def cmd_dashboard(a, cfg):
+    if a.detached:
+        return serve_detached(a, cfg)
+    if a.stop:
+        print(dashboard_stop())
+        return 0
     if not 0 <= a.port <= 65535:
         raise FleetError("port must be between 0 and 65535 (0 picks a free one)")
     if a.open and sys.platform.startswith("linux"):
         raise FleetError("--open is off on Linux: the browser would get the link, token and all, on its command line, "
                          "which other users of this computer can read. Run fleet dashboard and copy the link it "
                          "prints into your browser; nothing was started")
+    if a.background:
+        rec = dashboard_background(repo_root())
+        print(f"Fleet dashboard, in the background (pid {rec['pid']}), for every active Fleet session on this "
+              f"computer:\n  {rec['url']}\nRead-only, served to this computer only. fleet dashboard --stop ends it; it "
+              f"also stops itself after {DASHBOARD_IDLE_S // 60} minutes with no live worker.")
+        if a.open:
+            open_link(rec["url"])
+        return 0
     repo = repo_root()
     server = dashboard_server(repo, a.port, cfg)
     url = server.board.url
-    print(f"Fleet dashboard for {repo}:\n  {url}\nRead-only, and served to this computer only (127.0.0.1). The token "
-          "in the link is its key: keep it to yourself. Ctrl-C stops it.", flush=True)
+    print(f"Fleet dashboard for every active Fleet session on this computer (started in {repo}):\n  {url}\nRead-only, "
+          "and served to this computer only (127.0.0.1). The token in the link is its key: keep it to yourself. "
+          "Ctrl-C stops it.", flush=True)
     if a.open:
-        try:
-            import webbrowser
-            webbrowser.open(url)
-        except Exception as e:  # noqa: BLE001 - the link is printed either way
-            print(f"could not open a browser ({one_line(e)}); open the link yourself", file=sys.stderr)
+        open_link(url)
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
@@ -12972,6 +13728,102 @@ def cmd_dashboard(a, cfg):
     finally:
         server.server_close()
     return 0
+
+
+# ---------- where the owner watches ----------
+# init, and launch while no view runs yet, print a WATCH line the lead relays, so the owner sees the workers with
+# no step of their own: under Claude Code's prompt when its lead has Fleet's status line, else in the background
+# dashboard, started then. defaults.watch = "off" leaves only the fleet agents hint. Nothing starts inside a Fleet
+# worker, in CI, or with FLEET_NO_DASHBOARD set (the tests), and nothing here can fail or hold up the command.
+
+WATCH_MODES = ("auto", "off")
+
+
+def watch_host(env=None) -> str | None:
+    """lead_host's answer, where a Claude Code lead outside the terminal (an SDK or app entrypoint, as in T3 Code or
+    an IDE panel) counts as an app: Claude Code shows a status line in its terminal interface only."""
+    env = os.environ if env is None else env
+    host, entry = lead_host(env), env.get("CLAUDE_CODE_ENTRYPOINT", "")
+    return "app" if host == "claude" and entry and entry != "cli" else host
+
+
+def statusline_installed(repo: Path) -> bool:
+    """Whether the status line Claude Code shows in this checkout is Fleet's: the first settings file that sets one
+    decides, in Claude Code's order (the checkout's settings.local.json, its settings.json, then the user's), so a
+    project line of the owner's hides Fleet's user line. A file Fleet cannot read sets none."""
+    for path in (repo / ".claude" / "settings.local.json", repo / ".claude" / "settings.json",
+                 claude_settings_file("user")):
+        try:
+            data = read_settings(path)[0]
+        except (FleetError, OSError):
+            continue
+        if "statusLine" in data:
+            return fleet_statusline(data["statusLine"])[0]
+    return False
+
+
+def autostart_off(env=None) -> str | None:
+    """Why init and launch start no dashboard here, or None when they may."""
+    env = os.environ if env is None else env
+    if env.get(FLEET_WORKER_ENV):
+        return "inside a Fleet worker"
+    if env.get(NO_DASHBOARD_ENV):
+        return f"{NO_DASHBOARD_ENV} is set"
+    if env.get("CI", "").strip().lower() not in ("", "0", "false", "no"):
+        return "in CI"
+    return None
+
+
+TRACK_HINT = ("run fleet track in another terminal tab to see your workers live (fleet track --pane opens it below, "
+              "in tmux or cmux)")
+
+
+def watch_lines(repo: Path, cfg: dict, run: str, first: bool) -> list[str]:
+    """The WATCH line init (first) and launch print: where the owner sees the workers. A Claude Code lead in its
+    terminal has the status line (or is told how to set it); any other lead, Codex's CLI or desktop app included
+    (Fleet cannot tell them apart), gets fleet track for a terminal and the background dashboard's link for an app,
+    the dashboard started then. launch prints one only while no dashboard runs and the run has a live worker.
+    Nothing here splits a terminal, and on any error init and launch still succeed, with a one-line note."""
+    agents = f"in a terminal: fleet agents {run}"
+    try:
+        if dict_of(cfg.get("defaults")).get("watch", "auto") == "off":
+            return [f"WATCH {agents}"] if first else []
+        if not first and not run_has_live(repo, run):
+            return []
+        if watch_host() == "claude":
+            if statusline_installed(repo):
+                line = f"WATCH your workers show under Claude Code's prompt (fleet status line) · {agents}"
+            else:
+                line = f"WATCH fleet statusline --install shows them under the prompt; meanwhile {TRACK_HINT}"
+            return [line] if first else []
+        if inside_checkout(dashboard_home(), repo):  # its record would hold the token in this checkout
+            return [f"WATCH {TRACK_HINT} (no dashboard: its files would land inside this checkout)"] if first else []
+        rec = read_dashboard()
+        if rec and dashboard_answers(rec):
+            if not first:
+                return []
+        elif why := autostart_off():
+            return [f"WATCH {TRACK_HINT} (no dashboard started: {why})"] if first else []
+        else:
+            rec = dashboard_background(repo)
+        return [f"WATCH {TRACK_HINT} · in a desktop app: {rec['url']} (live, read-only; fleet dashboard --stop ends "
+                "it)"]
+    except Exception as e:  # noqa: BLE001 - where the owner watches never fails or blocks init or launch
+        return [f"WATCH {TRACK_HINT}",
+                f"note: the dashboard did not start ({one_line(e, 160)}); fleet dashboard --background tries again"]
+
+
+def then_watch(a, cfg: dict, first: bool) -> None:
+    """Print the WATCH line once main releases the checkout's lock, after anything else waiting for it (a launch's
+    start screen), so starting a dashboard never holds the lock."""
+    repo, before = repo_root(), getattr(a, "unlocked", None)
+
+    def follow() -> None:
+        if before:
+            before()
+        for line in watch_lines(repo, cfg, a.run, first):
+            print(line)
+    a.unlocked = follow
 
 
 def watch_args(s) -> None:
@@ -13277,6 +14129,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--brief", action="store_true",
                    help="one line per worker: live or not, provider:model, what it is doing, wall time and tokens "
                         "when known; prints nothing when no worker is live (no run named)")
+    s.add_argument("--all", action="store_true",
+                   help="with --brief: every active Fleet checkout on this computer, this one first")
     s.set_defaults(fn=cmd_status)
 
     s = sub.add_parser("wait", help="block until a report reaches needs-verification or blocked, or a worker "
@@ -13323,13 +14177,32 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--scope", choices=["user", "project"], default="user",
                    help="with --install or --uninstall: ~/.claude/settings.json (default) or this checkout's "
                         ".claude/settings.local.json")
+    s.add_argument("--settings", help=argparse.SUPPRESS)  # the installer's: the exact settings file, beside its skill
     s.set_defaults(fn=cmd_statusline)
 
-    s = sub.add_parser("dashboard", help="owner's view in a browser: a local read-only page of this checkout's "
-                                         "workers and their screens, on 127.0.0.1 with a token in its link")
+    s = sub.add_parser("dashboard", help="owner's view in a browser: a local read-only page of every active Fleet "
+                                         "checkout's workers and their screens, on 127.0.0.1 with a token in its link")
     s.add_argument("--port", type=int, default=0, help="default 0: a free port")
-    s.add_argument("--open", action="store_true", help="open the page in your browser")
+    s.add_argument("--open", action="store_true", help="open the page in your browser (not on Linux)")
+    s.add_argument("--background", action="store_true",
+                   help="start one detached dashboard for this computer, or reuse the one running, and print its link")
+    s.add_argument("--stop", action="store_true",
+                   help="stop the background dashboard, until the next init or launch that starts one")
+    s.add_argument("--detached", action="store_true", help=argparse.SUPPRESS)  # what --background starts
+    s.add_argument("--idle-exit", type=float, default=DASHBOARD_IDLE_S, help=argparse.SUPPRESS)
+    s.add_argument("--idle-check", type=float, default=DASHBOARD_CHECK_S, help=argparse.SUPPRESS)
     s.set_defaults(fn=cmd_dashboard)
+
+    s = sub.add_parser("track", help="owner's view in a terminal: every active Fleet session on this computer, "
+                                     "redrawn live (Ctrl-C quits); --pane opens it below, in tmux or cmux")
+    s.add_argument("--run", help="only this run of this checkout")
+    s.add_argument("--interval", type=float, default=2.0, help="seconds between redraws (default 2)")
+    s.add_argument("--exit-when-idle", type=float, metavar="MINUTES",
+                   help="end after this many minutes with no live worker (default: run until Ctrl-C)")
+    s.add_argument("--pane", action="store_true",
+                   help="open fleet track in a short pane below this one, without focus, in tmux or cmux; reuses the "
+                        "one it opened there")
+    s.set_defaults(fn=cmd_track)
 
     s = sub.add_parser("attach", help="owner's view: open one worker's terminal (tmux attach; cmux names its tab)")
     s.add_argument("run")
