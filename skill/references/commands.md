@@ -2,7 +2,7 @@
 
 Every `fleet` command: what it does and when to use it. Commands that take `<run>` act on `.fleet/runs/<run>/` in the current checkout; run them from the repository root. `fleet <command> --help` prints the exact flags. For full sequences, see the [worked examples](examples.md).
 
-The lead runs these commands. The owner may run any of them too, most often `hold`, `release`, `context` and `stop`, once `fleet` is on their PATH. `agents`, `attach`, `track`, `statusline` and `dashboard` are the owner's alone: the lead never runs them. `smoke` is the owner's too, because it spends their real usage: the lead runs it only when the owner asks.
+The lead runs these commands. The owner may run any of them too, most often `hold`, `release`, `context` and `stop`, once `fleet` is on their PATH. `agents`, `attach`, `track`, `statusline` and `dashboard` are the owner's alone: the lead never runs them. Run in an agent's shell anyway, none of them streams into the agent's context ([owner views](#owner-views)). `smoke` is the owner's too, because it spends their real usage: the lead runs it only when the owner asks.
 
 ## At a glance
 
@@ -1177,6 +1177,8 @@ Removes the hold so launches can continue.
 
 These commands are for the owner, not the lead. They only read run state (no lock, nothing saved in the checkout), so they can stay open beside a running lead. `statusline --install` and `--uninstall` change one Claude Code settings file, nothing else. `status --brief --all`, the status line and the dashboard show every active Fleet session on the computer, not only this checkout's, and the owner gets one without asking: setup installs the status line, and init starts the dashboard where there is none ([where the owner watches](#init)).
 
+**In an agent's shell they never stream.** What a command prints in an agent's shell goes into that agent's context, and so costs its tokens. So when stdout is not a terminal (as when an agent's shell tool runs a command through a pipe), or when a variable that an agent sets in its shell is non-empty (`FLEET_WORKER`, `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`, `CODEX_SANDBOX`, `GEMINI_CLI`, `CURSOR_AGENT` or `AI_AGENT`, which mark an agent's shell even on a terminal), [`track`](#track) prints one frame and ends, [`agents`](#agents) prints its list once, and [`attach`](#attach) refuses. Only the variables' names are read. In your own terminal, and in the pane `track --pane` opens, they stay live. The status line prints once per refresh into Claude Code's interface, never into the model's context, and the dashboard logs no requests, so neither streams either.
+
 Native subagent panels (Claude Code's agent panel, Codex's, Antigravity's Agent Manager) list only the agents their host started itself, and none offers a public way to add others, so Fleet shows its workers beside them:
 
 | Where you talk to the lead | Where you see its workers |
@@ -1213,7 +1215,7 @@ A worker browser in the spirit of Claude Code's agent list. Without a run it ope
 - `enter` opens the screen full size; `esc` goes back.
 - `a` attaches to the worker's own terminal (tmux): type to it like any CLI, then detach with your tmux prefix and `d` to come back (prefix twice when you run `agents` inside tmux). Under cmux the worker is already a tab beside the lead, so `a` names it instead.
 
-`--list` (and any call without a terminal, such as from a script) prints the same rows once, with the command that opens the session.
+`--list`, any call without a terminal (such as from a script) and any call in an [agent's shell](#owner-views) print the same rows once, with the command that opens the session.
 
 **Use:** whenever you want to see what a worker is doing, on any backend. Typing into a worker bypasses the lead: tell it what you said, or prefer asking the lead to `send`.
 
@@ -1236,9 +1238,15 @@ fleet billing/fix · 1 live
   ● refund       claude:claude-sonnet-5@high  turn ended, no hand-back: "Which currency?" · 4m 2s · 310.9K in, 5.1K out
 ```
 
-`--run` narrows it to one run of this checkout. With no live worker it shows `no Fleet workers live` and keeps running, unless `--exit-when-idle`, after that many minutes with none. On a terminal it draws on the alternate screen, each frame over the last, and Ctrl-C quits and puts the terminal back as it was; piped, it prints the frames one after another. It takes no lock and writes nothing in the checkout: its token cache stays in memory.
+`--run` narrows it to one run of this checkout. With no live worker it shows `no Fleet workers live` and keeps running, unless `--exit-when-idle`, after that many minutes with none. On a terminal it draws on the alternate screen, each frame over the last, and Ctrl-C quits and puts the terminal back as it was. Without a terminal (piped, or run by an agent's shell tool) or in an [agent's shell](#owner-views), it prints one frame and ends, so it never streams into an agent's context; `--interval` and `--exit-when-idle` then change nothing. That frame's first line says why:
 
-`--pane` opens `fleet track` in a short pane below the current one, without taking focus, for an owner who leads in tmux or cmux: under tmux (`TMUX` and `TMUX_PANE` set) on their own tmux server, the socket their `TMUX` names, never Fleet's worker server, with `tmux split-window -v -d -l 8 -t $TMUX_PANE`; under cmux (`CMUX_WORKSPACE_ID` and `CMUX_SURFACE_ID` set) as a split below their surface, which never gets a worker's tab. The pane's `fleet track` ends after 30 minutes with no live worker (`--exit-when-idle` changes it), and the pane closes with it. Run `--pane` again in the same pane and it names the one already open instead of opening a second; Fleet remembers it in `agent-fleet/track-panes.json` under the cache, readable by you only (never inside a checkout), and drops the records of panes that have closed. A tmux pane starts with the tmux server's environment, not your shell's, so the pane's command sets `XDG_CACHE_HOME`, `FLEET_CONFIG` and your other `FLEET_` variables as your shell has them: it reads the same registry and config as you. Outside tmux and cmux it refuses and says to run `fleet track` in a second tab. Nothing else in Fleet ever splits your terminal: init and launch only print the `WATCH` line.
+```text
+fleet track · 14:03:22 · printed once: an agent's shell (CODEX_THREAD_ID is set). The live view is for your own terminal: fleet track there, or fleet track --pane
+```
+
+It takes no lock and writes nothing in the checkout: its token cache stays in memory.
+
+`--pane` opens `fleet track` in a short pane below the current one, without taking focus, for an owner who leads in tmux or cmux: under tmux (`TMUX` and `TMUX_PANE` set) on their own tmux server, the socket their `TMUX` names, never Fleet's worker server, with `tmux split-window -v -d -l 8 -t $TMUX_PANE`; under cmux (`CMUX_WORKSPACE_ID` and `CMUX_SURFACE_ID` set) as a split below their surface, which never gets a worker's tab. The pane's `fleet track` ends after 30 minutes with no live worker (`--exit-when-idle` changes it), and the pane closes with it. Run `--pane` again in the same pane and it names the one already open instead of opening a second; Fleet remembers it in `agent-fleet/track-panes.json` under the cache, readable by you only (never inside a checkout), and drops the records of panes that have closed. A tmux pane starts with the tmux server's environment, not your shell's, so the pane's command sets `XDG_CACHE_HOME`, `FLEET_CONFIG` and your other `FLEET_` variables as your shell has them: it reads the same registry and config as you. It also unsets every [agent's shell variable](#owner-views), which a tmux server an agent started would hand the pane, so the pane, your own terminal, stays live. Outside tmux and cmux it refuses and says to run `fleet track` in a second tab. Nothing else in Fleet ever splits your terminal: init and launch only print the `WATCH` line.
 
 **Use:** the owner's live view in a terminal, under any lead: `fleet track` in a tab of its own, or `fleet track --pane` in tmux or cmux.
 
@@ -1248,7 +1256,7 @@ fleet billing/fix · 1 live
 fleet attach <run> <id> [--read-only]
 ```
 
-Opens one worker's terminal. Under tmux it attaches to the run's session with that worker's window selected (inside your own tmux on the same server it switches to it instead); `--read-only` watches without typing. Under cmux it prints which tab holds the worker. Inside the tmux session, your prefix and `w` lists every session and window to jump between.
+Opens one worker's terminal. Under tmux it attaches to the run's session with that worker's window selected (inside your own tmux on the same server it switches to it instead); `--read-only` watches without typing. Under cmux it prints which tab holds the worker. Inside the tmux session, your prefix and `w` lists every session and window to jump between. Under tmux it refuses without a terminal or in an [agent's shell](#owner-views), where the worker's screen would stream into the agent, and names `fleet agents <run>` instead.
 
 ### statusline
 

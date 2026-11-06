@@ -591,17 +591,34 @@ class TtyIO(io.StringIO):
         return True
 
 
-class Track(Machine):
-    """fleet track: the live view in a terminal, and --pane, with the owner's tmux runner patched."""
+CSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")  # a terminal's control sequences, as fleet track draws with them
+
+
+class OwnerTerminal(Machine):
+    """The owner's own terminal: none of an agent's shell variables (the suite may run under an agent, or in a
+    Fleet worker), and wide enough that no row is cut."""
+
+    def setUp(self):
+        super().setUp()
+        env = {k: v for k, v in os.environ.items() if k not in fleet.AGENT_SHELL_ENV}
+        self.env = patch.dict(os.environ, {**env, "COLUMNS": "250", "LINES": "60"}, clear=True)
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+
+class Track(OwnerTerminal):
+    """fleet track: the live view in a person's terminal, one frame wherever its output goes to an agent, and
+    --pane, with the owner's tmux runner patched."""
 
     def track(self, *args, stdout=None, frames=None) -> str:
-        """Run fleet track; with `frames`, Ctrl-C arrives after that many redraws."""
-        out = stdout or io.StringIO()
-        sleeps = []
+        """Run fleet track, on a terminal unless `stdout` says otherwise; with `frames`, Ctrl-C arrives after that
+        many redraws. self.sleeps holds the pauses between redraws."""
+        out = TtyIO() if stdout is None else stdout
+        self.sleeps = []
 
         def sleep(seconds):
-            sleeps.append(seconds)
-            if frames is not None and len(sleeps) >= frames:
+            self.sleeps.append(seconds)
+            if frames is not None and len(self.sleeps) >= frames:
                 raise KeyboardInterrupt
             real_sleep(min(seconds, 0.01))
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out), \
@@ -614,7 +631,8 @@ class Track(Machine):
         self.start()
         self.launch()
         other = self.other_checkout()
-        frames = [f for f in re.split(r"(?m)^(?=fleet track · )", self.track("--interval", "0.5", frames=3)) if f]
+        out = CSI.sub("", self.track("--interval", "0.5", frames=3))
+        frames = [f for f in re.split(r"(?m)^(?=fleet track · )", out) if f]
         self.assertEqual(len(frames), 3)
         for frame in frames:
             self.assertRegex(frame, r"\Afleet track · \d\d:\d\d:\d\d · every 0.5s · Ctrl-C quits\n")
@@ -635,6 +653,38 @@ class Track(Machine):
         self.assertEqual(self.snapshot(), before)
         self.assertFalse(any((self.repo / ".fleet").rglob("*tokens*")))
 
+    def test_without_a_terminal_it_prints_one_frame_and_ends(self):
+        """Piped, as an agent's shell tool runs a command (Claude Code's, Codex's): one frame, never a stream of
+        frames into the agent's context."""
+        self.start()
+        self.launch()
+        before = self.snapshot()
+        out = self.track("--interval", "0.01", stdout=io.StringIO())
+        self.assertEqual(self.sleeps, [])  # no redraw ever waited for
+        self.assertNotIn("\x1b", out)
+        head, blank, *rows = out.splitlines()
+        self.assertRegex(head, r"\Afleet track · \d\d:\d\d:\d\d · printed once: not a terminal\. The live view is for "
+                               r"your own terminal: fleet track there, or fleet track --pane\Z")
+        self.assertEqual(blank, "")
+        self.assertTrue(any("● 01" in row for row in rows), out)
+        self.assertEqual(out.count("fleet track · "), 1)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_in_an_agents_shell_it_prints_one_frame_even_on_a_terminal(self):
+        """Gemini CLI, Cursor's agent and Codex can run a command on a terminal: their shell's variables say whose
+        it is."""
+        self.start()
+        for name in fleet.AGENT_SHELL_ENV:
+            with self.subTest(name=name), patch.dict(os.environ, {name: "1"}):
+                out = self.track("--interval", "0.01", "--exit-when-idle", "5")
+                self.assertEqual(self.sleeps, [])
+                self.assertNotIn("\x1b", out)
+                self.assertIn(f" · printed once: an agent's shell ({name} is set). The live view is for your own "
+                              "terminal", out)
+                self.assertIn("no Fleet workers live", out)
+        with patch.dict(os.environ, {"AI_AGENT": ""}):  # set but empty: no agent's
+            self.assertTrue(self.track(frames=1).startswith("\x1b[?1049h"))
+
     def test_a_terminal_gets_the_alternate_screen_back_on_ctrl_c(self):
         self.start()
         self.launch()
@@ -644,13 +694,15 @@ class Track(Machine):
         self.assertEqual(out.count("\x1b[H"), 2)  # each frame drawn over the last, never a scroll of frames
         self.assertNotIn("\x1b[2J", out)  # no full clear between frames: no flicker
 
-    def in_pty(self, sig) -> tuple[int, bytes]:
-        """fleet track on a real terminal, sent `sig` once it has drawn a frame: its exit code and all it wrote."""
+    def in_pty(self, sig, argv=None, env=None) -> tuple[int, bytes]:
+        """fleet track (or `argv`) on a real terminal, sent `sig` once it has drawn a frame (with None, left to end
+        by itself): its exit code and all it wrote."""
         import pty
         import select
         master, slave = pty.openpty()
-        p = subprocess.Popen([sys.executable, str(FLEET), "track", "--interval", "0.2"], cwd=self.repo, stdin=slave,
-                             stdout=slave, stderr=slave, start_new_session=True)
+        argv = argv or [sys.executable, str(FLEET), "track", "--interval", "0.2"]
+        p = subprocess.Popen(argv, cwd=self.repo, stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
+                             env=env)
         os.close(slave)
         self.addCleanup(os.close, master)
         self.addCleanup(lambda: p.poll() is None and p.kill())
@@ -668,7 +720,8 @@ class Track(Machine):
                         return
                     out.extend(chunk)
         read(lambda: "fleet track ·".encode() in out, 60)
-        p.send_signal(sig)
+        if sig is not None:
+            p.send_signal(sig)
         read(lambda: p.poll() is not None, 30)
         read(lambda: False, 0.3)
         return p.wait(10), bytes(out)
@@ -683,11 +736,32 @@ class Track(Machine):
                 self.assertTrue(out.endswith(b"\x1b[?25h\x1b[?1049l"), out[-80:])
                 self.assertEqual(out.count(b"\x1b[?1049l"), 1)  # put back once
 
+    def test_an_agent_on_a_real_terminal_gets_one_frame(self):
+        self.start()
+        code, out = self.in_pty(None, env={**os.environ, "GEMINI_CLI": "1"})
+        self.assertEqual(code, 0, out[-200:])
+        self.assertEqual(out.count("fleet track ·".encode()), 1)
+        self.assertIn(b"printed once: an agent's shell (GEMINI_CLI is set)", out)
+        self.assertNotIn(b"\x1b[?1049h", out)  # never the live view's screen
+
+    def test_the_pane_stays_live_whatever_agent_variables_its_server_holds(self):
+        """A tmux server an agent started holds that agent's variables, and its panes start with them."""
+        self.start()
+        a = argparse.Namespace(interval=0.2, exit_when_idle=None, run=None)
+        agent = {name: "1" for name in fleet.AGENT_SHELL_ENV}
+        code, out = self.in_pty(signal.SIGTERM, argv=["/bin/sh", "-c", f"exec {fleet.track_command(a)}"],
+                                env={**os.environ, **agent})
+        self.assertEqual(code, 0, out[-200:])
+        self.assertTrue(out.startswith(b"\x1b[?1049h\x1b[?25l"), out[:120])  # the live view
+        self.assertNotIn(b"printed once", out)
+
     def test_the_pane_carries_the_callers_fleet_environment(self):
         a = argparse.Namespace(interval=2.0, exit_when_idle=None, run="demo")
         words = shlex.split(fleet.track_command(a, env={"XDG_CACHE_HOME": "/my cache", "FLEET_NO_DASHBOARD": "1",
-                                                        "FLEET_WORKER": "demo/01", "HOME": "/h"}))
-        self.assertEqual(words[:words.index(sys.executable)], ["env", "-u", "FLEET_CONFIG", "-u", "FLEET_WORKER",
+                                                        "FLEET_WORKER": "demo/01", "CLAUDECODE": "1",
+                                                        "AI_AGENT": "codex", "HOME": "/h"}))
+        agents = [x for name in fleet.AGENT_SHELL_ENV for x in ("-u", name)]  # never an agent's: the owner's pane
+        self.assertEqual(words[:words.index(sys.executable)], ["env", "-u", "FLEET_CONFIG", *agents,
                                                                "FLEET_NO_DASHBOARD=1", "XDG_CACHE_HOME=/my cache"])
         self.assertEqual(words[words.index(sys.executable) + 2:], ["track", "--interval", "2", "--exit-when-idle", "30",
                                                                    "--run", "demo"])
@@ -807,7 +881,7 @@ class TrackPaneLive(Machine):
         self.addCleanup(subprocess.run, ["tmux", "-L", sock, "kill-server"], capture_output=True)
         elsewhere = Path(self.temp.name) / "server-cache"  # the owner's server started with another cache
         subprocess.run(["tmux", "-L", sock, "new-session", "-d", "-s", "lead", "-x", "160", "-y", "40"], check=True,
-                       env=dict(os.environ, XDG_CACHE_HOME=str(elsewhere)))
+                       env=dict(os.environ, XDG_CACHE_HOME=str(elsewhere), CLAUDECODE="1"))  # an agent started it
         socket, pid, pane = subprocess.run(["tmux", "-L", sock, "display-message", "-p", "-t", "lead",
                                             "#{socket_path}\t#{pid}\t#{pane_id}"], capture_output=True, text=True,
                                            check=True).stdout.strip().split("\t")
@@ -826,12 +900,59 @@ class TrackPaneLive(Machine):
             screen = subprocess.run(["tmux", "-L", sock, "capture-pane", "-p", "-t", new], capture_output=True,
                                     text=True).stdout
         self.assertIn("fleet track ·", screen)
+        self.assertIn("· every 2s · Ctrl-C quits", screen)  # live, though its server holds an agent's variable
         self.assertIn(f"fleet {self.repo.name}/demo · 1 live", screen)
         self.assertIn(f"fleet {other.name}/api · 1 live", screen)  # the pane read the caller's registry
         again = subprocess.run(run, cwd=self.repo, env=env, capture_output=True, text=True, timeout=60)
         self.assertIn(f"already runs in the pane below ({new})", again.stdout)
         count = subprocess.run(["tmux", "-L", sock, "list-panes", "-t", "lead"], capture_output=True, text=True)
         self.assertEqual(len(count.stdout.splitlines()), 2)
+
+
+class OwnerViewsInAnAgentsShell(OwnerTerminal):
+    """agents and attach, where what they print would go to an agent: agents lists once, attach refuses."""
+
+    def agents(self, env=None, stdout=None):
+        out = TtyIO() if stdout is None else stdout
+        with patch.object(sys, "stdin", TtyIO()), contextlib.redirect_stdout(out), \
+                patch.dict(os.environ, env or {}):
+            code = fleet.main(["agents", "demo"])
+        return code, out.getvalue()
+
+    def test_agents_lists_the_workers_once_in_an_agents_shell(self):
+        self.start()
+        self.launch()
+        with patch("curses.wrapper", side_effect=AssertionError("opened the live view")):
+            for env, stdout in (({"CODEX_THREAD_ID": "t"}, None), ({}, io.StringIO())):
+                with self.subTest(env=env):
+                    code, out = self.agents(env, stdout)
+                    self.assertEqual(code, 0, out)
+                    self.assertIn("run demo", out)
+                    self.assertIn("● 01", out)
+        with patch("curses.wrapper", return_value=0) as live:  # a person's terminal still gets the live view
+            self.assertEqual(self.agents()[0], 0)
+        live.assert_called_once()
+
+    def test_attach_refuses_where_the_workers_screen_would_go_to_an_agent(self):
+        self.start()
+        self.launch()
+
+        class Tmux:
+            def attach_argv(self, w, read_only):
+                return ["tmux", "attach-session", "-t", "fleet-demo"]
+        with patch.object(fleet, "terminal", return_value=Tmux()), \
+                patch.object(fleet.subprocess, "call", side_effect=AssertionError("attached")):
+            for env, out, why in (({"CLAUDECODE": "1"}, TtyIO(), "an agent's shell (CLAUDECODE is set)"),
+                                  ({}, io.StringIO(), "not a terminal")):
+                with self.subTest(why=why), patch.dict(os.environ, env), contextlib.redirect_stdout(out), \
+                        contextlib.redirect_stderr(out):
+                    self.assertEqual(fleet.main(["attach", "demo", "01"]), 1)
+                self.assertIn(f"fleet attach is for your own terminal, and this is {why}", out.getvalue())
+                self.assertIn("fleet agents demo lists the workers here", out.getvalue())
+        with patch.object(fleet, "terminal", return_value=Tmux()), \
+                patch.object(fleet.subprocess, "call", return_value=0) as call, contextlib.redirect_stdout(TtyIO()):
+            self.assertEqual(fleet.main(["attach", "demo", "01"]), 0)  # a person's terminal attaches
+        call.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.0-preview.34
+
+The owner's views never spend an agent's tokens.
+
+- **`fleet track` prints once in an agent's shell.** Run piped (as Claude Code's and Codex's shell tools run commands), or with an agent's shell variable set (`CLAUDECODE`, `CODEX_THREAD_ID`, `GEMINI_CLI`, `CURSOR_AGENT`, `AI_AGENT` and others, which mark an agent even on a terminal), it prints one frame and ends. Before, a lead that ran it got a new frame every 2 seconds in its context until its command timed out. Your own terminal still gets the live view, and so does the pane `--pane` opens, whose command unsets those variables.
+- **`fleet agents` and `fleet attach` too.** In an agent's shell `agents` prints its list instead of opening the live view, and `attach` refuses under tmux rather than stream a worker's screen.
+- Nothing else changes: the status line runs outside the model's context, and the dashboard logs no requests.
+
 ## 0.1.0-preview.33
 
 Your workers, and every Fleet session running on your machine, are in view by default.
