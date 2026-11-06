@@ -454,12 +454,12 @@ The agent panels hosts build in (Claude Code's agent panel, Codex's, Antigravity
 
 ```text
 fleet checkout · 2 live · 1 handed back
-  ● api-client   codex:gpt-6-sol@high           permission prompt 2m 4s ago: Allow `npm test`? · 12m 40s
-  ● settings-ui  claude:claude-opus-5-5@high    working · 9m 3s · 2.1M in, 41.2K out
-  ○ copy         cursor:auto                    handed back: needs-verification · gate passed · 31m 5s
+  ● api-client   claude:claude-opus-5-5@high  permission prompt 2m 4s ago: Claude needs your permission to use Bash · 12m 40s · 2.1M in, 41.2K out
+  ● settings-ui  codex:gpt-6-sol@high         working · 9m 3s
+  ○ copy         cursor:auto                  handed back: needs-verification · gate passed · 31m 5s
 ```
 
-Each row is a worker: `●` live or `○` stopped, its provider and model, what it is doing (working, a permission prompt or idle from its hooks, handed back, blocked with its question), its wall time and its tokens when Fleet knows them. The status line keeps yours: `--install` backs up your settings file, then makes your current status line run first with Fleet's rows after it, and `--uninstall` puts it back. The dashboard listens on 127.0.0.1 only and needs the token in its link. All three only read run state, without the lock. See [status --brief](skill/references/commands.md#the-brief-view), [statusline](skill/references/commands.md#statusline) and [dashboard](skill/references/commands.md#dashboard).
+Each row is a worker: `●` live or `○` stopped, its provider and model, what it is doing (working, a Claude worker's permission prompt or idle from its hooks, handed back, blocked with its question), its wall time and its tokens when Fleet knows them. Codex reports only the end of a turn, so a Codex worker waiting at an approval prompt shows `working`: open its screen with `fleet agents` or the dashboard. The status line keeps yours: `--install` backs up your settings file, then makes your current status line run first with Fleet's rows after it, and `--uninstall` puts it back. The dashboard listens on 127.0.0.1 only and needs the token in its link; on Linux, copy the link it prints rather than using `--open`, which would show the token to other users of the computer. All three only read run state, without the lock. See [status --brief](skill/references/commands.md#the-brief-view), [statusline](skill/references/commands.md#statusline) and [dashboard](skill/references/commands.md#dashboard).
 
 ## Keeping the lead sharp
 
