@@ -2,7 +2,7 @@
 
 Every `fleet` command: what it does and when to use it. Commands that take `<run>` act on `.fleet/runs/<run>/` in the current checkout; run them from the repository root. `fleet <command> --help` prints the exact flags. For full sequences, see the [worked examples](examples.md).
 
-The lead runs these commands. The owner may run any of them too, most often `hold`, `release`, `context` and `stop`, once `fleet` is on their PATH. `agents`, `attach`, `statusline` and `dashboard` are the owner's alone: the lead never runs them. `smoke` is the owner's too, because it spends their real usage: the lead runs it only when the owner asks.
+The lead runs these commands. The owner may run any of them too, most often `hold`, `release`, `context` and `stop`, once `fleet` is on their PATH. `agents`, `attach`, `track`, `statusline` and `dashboard` are the owner's alone: the lead never runs them. `smoke` is the owner's too, because it spends their real usage: the lead runs it only when the owner asks.
 
 ## At a glance
 
@@ -51,8 +51,9 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`release`](#release) | Lifts a hold | The owner is ready to continue |
 | [`agents`](#agents) | Owner's browser: every worker, its live screen, attach to any one | The owner wants to see what a worker is doing |
 | [`attach`](#attach) | Owner opens one worker's terminal | The owner wants to type into or watch one worker |
-| [`statusline`](#statusline) | Owner's rows of live workers in Claude Code's status line, after their own line | The owner leads from Claude Code and wants the workers in view |
-| [`dashboard`](#dashboard) | Owner's local, read-only web page of the workers and their screens | The owner leads from a desktop app, or has no terminal open |
+| [`track`](#track) | Owner's live view of every active session, redrawn in a terminal; `--pane` opens it below, in tmux or cmux | The owner leads from Codex or another terminal host |
+| [`statusline`](#statusline) | Owner's rows of live workers in Claude Code's status line, after their own line; setup installs it | The owner leads from Claude Code and wants the workers in view |
+| [`dashboard`](#dashboard) | Owner's local, read-only web page of every active checkout's workers and their screens; init starts it in the background | The owner leads from Codex or a desktop app, or has no terminal open |
 
 **Similar names:** `hold` and `release` pause and continue *launches*. `resume` reloads a *run* into the lead's memory. `launch --resume` continues a stopped *worker's* own CLI session. There is no `pause` command: `hold` is the pause.
 
@@ -164,7 +165,18 @@ fleet init <run> [--backend auto|cmux|tmux] [--workspace <ref>] [--routing <mode
           [--isolation shared|worktree]
 ```
 
-Creates `.fleet/runs/<run>/`, adds it to `.fleet/.gitignore`, and records the HEAD and index baseline. It picks the run's terminal backend, which the run keeps: `--backend`, else `defaults.backend`, else `auto`, which uses cmux inside cmux or when a workspace is named, and headless tmux otherwise. A tmux run gets its own detached session (`fleet-<checkout>-<run>-<hash>`) on Fleet's tmux server (`tmux -L fleet`; `defaults.tmux_socket` changes it) and init prints the `fleet agents` line to relay to the owner. For a cmux run it validates the workspace (`--workspace`, the config default, or the current one) and stores its UUID, because cmux renumbers refs like `workspace:2` when it restarts. It refuses if the run already exists, or if another run in this checkout still has live workers. Under `cross-all` it also refuses when the routing pool alone shows no reviewer could ever differ from a writer's family, for example `single:<provider>` with a single-family adapter; under `cross-heavy` it warns that plan will refuse heavy tickets. `--review off` while the config asks for review needs `--reason` with the owner's words, which the run's decisions keep: review is never turned off silently. The run's options keep the config's `[defaults]` as they were at init, the [caps](#caps) `max_workers` and `max_wall_minutes` among them.
+Creates `.fleet/runs/<run>/`, adds it to `.fleet/.gitignore`, and records the HEAD and index baseline. It picks the run's terminal backend, which the run keeps: `--backend`, else `defaults.backend`, else `auto`, which uses cmux inside cmux or when a workspace is named, and headless tmux otherwise. A tmux run gets its own detached session (`fleet-<checkout>-<run>-<hash>`) on Fleet's tmux server (`tmux -L fleet`; `defaults.tmux_socket` changes it). For a cmux run it validates the workspace (`--workspace`, the config default, or the current one) and stores its UUID, because cmux renumbers refs like `workspace:2` when it restarts. It refuses if the run already exists, or if another run in this checkout still has live workers. Under `cross-all` it also refuses when the routing pool alone shows no reviewer could ever differ from a writer's family, for example `single:<provider>` with a single-family adapter; under `cross-heavy` it warns that plan will refuse heavy tickets. `--review off` while the config asks for review needs `--reason` with the owner's words, which the run's decisions keep: review is never turned off silently. The run's options keep the config's `[defaults]` as they were at init, the [caps](#caps) `max_workers` and `max_wall_minutes` among them.
+
+
+**Where the owner watches.** Init also prints a `WATCH` line, which the lead relays, so the owner sees the workers with no step of their own. It follows the lead's host:
+
+| Lead | `WATCH` line |
+| --- | --- |
+| Claude Code with Fleet's [status line](#statusline) as the one it shows (the first `statusLine` in this checkout's `.claude/settings.local.json`, its `.claude/settings.json`, then the user's) | `WATCH your workers show under Claude Code's prompt (fleet status line) · in a terminal: fleet agents <run>` |
+| Claude Code without it | `WATCH fleet statusline --install shows them under the prompt; meanwhile run fleet track in another terminal tab …` |
+| Codex (CLI or desktop), a desktop app (ChatGPT, Claude desktop, T3 Code, Antigravity), any other or unknown host | `WATCH run fleet track in another terminal tab to see your workers live (fleet track --pane opens it below, in tmux or cmux) · in a desktop app: http://127.0.0.1:<port>/?t=<token> (live, read-only; fleet dashboard --stop ends it)`: [`fleet track`](#track) for a terminal, and the [background dashboard](#dashboard), started then or the one already running, for an app |
+
+A Claude Code session outside its terminal interface (an SDK or app entrypoint: `CLAUDE_CODE_ENTRYPOINT` other than `cli`) counts as an app, since only the terminal shows a status line. Fleet cannot tell Codex's CLI from its desktop app, so every lead other than Claude Code's terminal gets both the `fleet track` hint and the dashboard link. Init never splits a terminal: `fleet track --pane` is the owner's own command. With `[defaults] watch = "off"` init prints only `WATCH in a terminal: fleet agents <run>` and starts nothing. No dashboard starts inside a Fleet worker (`FLEET_WORKER` set), in CI (`CI` set), or with `FLEET_NO_DASHBOARD` set (the test suites and the smoke and benchmark kits set it); the line then says why. When the cache is inside the checkout (a home folder kept in Git), no dashboard starts, since its record would put the token there: the line is the `fleet track` hint and `(no dashboard: its files would land inside this checkout)`. The dashboard starts after init releases the checkout's lock, and nothing about it can fail init: on any error the line names `fleet track`, with a one-line note. Init also records the checkout in the machine's [registry of active checkouts](#every-active-checkout).
 
 `--isolation worktree` is the owner's opt-in; see [worktree isolation](#worktree-isolation). The default, `shared`, works as before, and so does any run started without the option.
 
@@ -328,6 +340,8 @@ fleet launch <run> --ready [--pane <ref|uuid|index>]
 ```
 
 Starts the worker in its own cmux pane, or its own window of the run's tmux session, with the prompt. The provider, tier and pins must match the saved plan; a steer (see `steer`) may change the provider and model, and launch prints `steered (<tier>): …`. Launch enforces blockers, file ownership, capacity, any hold, the run's [caps](#caps) and the ticket's [review rounds](#review-rounds). A ticket owns its files from its first launch until it is verified or dropped, so launch refuses another ticket that shares them while neither waits on the other, as `--ready` does (plan and add refuse such a pair; a run planned by an earlier Fleet may hold one). A launch refused after it took its snapshots or set the last report aside undoes both, so the next launch takes its baseline from the files as they are then. An implementation ticket runs the adapter's `worker` profile; a reviewer or an investigate ticket runs its `review` profile, or, when the adapter's `review_transport` is `headless`, its `headless` line through `fleet _headless`, which counts as read-only ([headless reviewers](providers.md#headless-reviewers)); launch refuses a prompt written for the other transport, and `--resume` of a headless run. Launch refuses a profile above `permission_ceiling`, naming the adapter, the profile and the ceiling: raising the ceiling is the owner's call ([permission profiles](providers.md#permission-profiles)). An adapter with `hooks` (Claude) also gets its own settings file, `.fleet/runs/<run>/settings/<id>.json`, passed with `--settings`: a guard that keeps its edits to the ticket's files and its report, and the events `wait` reads ([hooks](#claude-hooks)). The settings never change a profile's permission mode. A Claude reviewer or investigator stays in manual mode with one allow rule, for its report. With the owner's `scope_permissions`, a Claude worker keeps the account's mode, with allow rules for its own files, its report, its own [`note`](#note) command and its planned check commands. A headless run has no hooks. Each launch, `--resume` included, adds an entry to the run's [ledger](#cost). If a blocker was verified after the ticket's prompt was written, launch still starts the worker but warns on stderr that the prompt does not hand down that blocker's work; regenerate it with `fleet prompt <run> <id> --force` before the next launch. `--ready` writes a missing prompt itself, so that one is current; it does not rewrite one you wrote earlier. In a [worktree run](#worktree-isolation) an implement ticket's first launch makes its tree, every later launch of it reuses that tree, each review round gets a fresh snapshot, and another ticket's files never block a launch.
+
+Once a worker is live, launch prints init's [`WATCH` line](#init) again for a lead other than Claude Code's terminal when no background dashboard answers, starting one; otherwise it adds nothing, and it never splits a terminal. Every launch, from `launch`, `review`, `judge`, `approve --review` or `supervise`, refreshes the checkout's entry in the [registry](#every-active-checkout).
 
 Under tmux each worker gets a new window, with no limit; the window stays after the worker exits, so its screen and scrollback stay readable until `stop --close`. Fleet strips the lead's session variables (such as `CLAUDECODE`) from the worker's environment.
 
@@ -644,6 +658,7 @@ Reconciles exit receipts, then lists each worker's provider and model, pane, sta
 
 ```text
 fleet status [<run>] --brief [--json]
+fleet status --brief --all [--json]
 ```
 
 One line per worker, in the spirit of Claude Code's agent rows. With no run named it covers every run in this checkout that has a live worker, and lists each one's live workers plus the stopped ones whose hand-back or exit still waits on the lead. Name a run to list all its workers. With no run named and no live worker, it prints nothing at all.
@@ -668,6 +683,16 @@ Tokens are input, with cache reads and writes, then output: the ledger's count w
 It holds no lock, saves nothing in the checkout and writes no `.seen` marker, so it runs beside any command. A damaged `run.json`, a run from before the ledger or a worker record it cannot read never stops it: the default view leaves out a run it cannot read, and a record it cannot read gets a line that says so, with the reason. Every file a worker can write (`run.json`, reports, events files, exit receipts, gate records) is read only as a regular file and only up to a cap (a report's first 512 KB, an events file's last 64 KB), so a FIFO or a link to a device can neither hang nor flood it. A run you name that cannot be read prints the reason and exits 1. The one file it keeps is a cache of token counts outside the checkout (`agent-fleet/brief-tokens.json` in `$XDG_CACHE_HOME`, else `~/.cache`; kept in memory instead when that would be inside the checkout, as when the checkout is your home folder), so each refresh reads only what a session log gained since the last one: about 10 ms for ten workers. A log it has cached is read again from the start when it is another file, shrank, or was rewritten at the same size. `--json` is strict JSON: no `NaN` or `Infinity` ever reaches it. A worker's report, last words, ticket title and the rest of its record are worker text: each is flattened to one line, control and bidi characters removed, before it is printed. The screen's last line is not shown: reading it costs a terminal call per worker (about 6 ms under tmux), and a TUI's last line is its own footer.
 
 `--json` prints the same rows with every field (`run`, `id`, `live`, `state`, `worker`, `provider`, `model`, `effort`, `activity`, `doing`, `report`, `elapsed_s`, `tokens`, `title`) under `runs`, and the runs it could not read under `skipped`. It always prints that object, even with nothing live. `activity` is one of `working`, `starting`, `stop-failed`, `unknown`, `unreachable`, `permission`, `idle`, `handed-back`, `blocked`, `plan-ready`, `verified`, `settled`, `exited` or `unreadable`.
+
+`--all` lists every active Fleet checkout on this computer that has a live worker (the [registry](#every-active-checkout)), this checkout first, then the others by name. Each run's line names its checkout: its folder's name, with its path when two share one. It runs from anywhere, outside every checkout too. `--json` prints `{"checkouts": [{"checkout", "label", "current", "runs", "skipped"}]}`.
+
+```text
+fleet app/demo · 2 live
+  ● api-client   claude:claude-opus-5-5@high  working · 12m 40s · 2.1M in, 41.2K out
+  ● settings-ui  codex:gpt-6-sol@high         working · 9m 3s
+fleet billing/fix · 1 live
+  ● refund       claude:claude-sonnet-5@high  handed back: needs-verification · 4m 2s
+```
 
 **Use:** the owner's quick look, from any terminal, a script or another tool. [`statusline`](#statusline) and [`dashboard`](#dashboard) show these same rows.
 
@@ -1150,16 +1175,20 @@ Removes the hold so launches can continue.
 
 ## Owner views
 
-These commands are for the owner, not the lead. They only read run state (no lock, nothing saved in the checkout), so they can stay open beside a running lead. `statusline --install` and `--uninstall` change one Claude Code settings file, nothing else.
+These commands are for the owner, not the lead. They only read run state (no lock, nothing saved in the checkout), so they can stay open beside a running lead. `statusline --install` and `--uninstall` change one Claude Code settings file, nothing else. `status --brief --all`, the status line and the dashboard show every active Fleet session on the computer, not only this checkout's, and the owner gets one without asking: setup installs the status line, and init starts the dashboard where there is none ([where the owner watches](#init)).
 
 Native subagent panels (Claude Code's agent panel, Codex's, Antigravity's Agent Manager) list only the agents their host started itself, and none offers a public way to add others, so Fleet shows its workers beside them:
 
 | Where you talk to the lead | Where you see its workers |
 | --- | --- |
 | Claude Code | [`statusline`](#statusline): a row per live worker under the prompt, after your own status line |
-| Codex CLI | [`agents`](#agents) in a split, or [`dashboard`](#dashboard); Codex's status line takes its built-in items only, no command |
+| Codex CLI | [`track`](#track) in another tab, or `track --pane` below the lead in tmux or cmux; Codex's status line takes its built-in items only, no command |
 | A desktop app: ChatGPT or Codex desktop, Claude desktop, T3 Code, Antigravity, the Cursor IDE | [`dashboard`](#dashboard), in any browser |
-| Any terminal | [`agents`](#agents), or [`status --brief`](#the-brief-view) for one look |
+| Any terminal | [`track`](#track) for a live view, [`agents`](#agents) to watch and attach to one worker, or [`status --brief`](#the-brief-view) for one look |
+
+### Every active checkout
+
+Fleet keeps a registry of the checkouts with runs on this computer, so its views show every active session: `agent-fleet/active/<checkout>.json` under `$XDG_CACHE_HOME` (else `~/.cache`), one file per checkout with its path, its runs and when a run last started or launched. `init` and every launch write it, atomically and readable by you only, in a folder only you can open, and never inside a checkout (a checkout that is your home folder goes unlisted). The views read it without any lock. A reader removes an entry whose checkout or `.fleet/runs` is gone, or that has had no live worker for a day, and skips a damaged one.
 
 ### agents
 
@@ -1188,6 +1217,31 @@ A worker browser in the spirit of Claude Code's agent list. Without a run it ope
 
 **Use:** whenever you want to see what a worker is doing, on any backend. Typing into a worker bypasses the lead: tell it what you said, or prefer asking the lead to `send`.
 
+### track
+
+```text
+fleet track [--run <run>] [--interval <seconds>] [--exit-when-idle <minutes>]
+fleet track --pane [--run <run>] [--interval <seconds>] [--exit-when-idle <minutes>]
+```
+
+The live view in a terminal: every [active Fleet session](#every-active-checkout) on this computer, redrawn in place every 2 seconds (`--interval`), from the same rows as the [brief view](#the-brief-view) and the status line. It is the one to use under Codex, whose status line takes its built-in items only, and in any terminal tab beside the lead:
+
+```text
+fleet track · 14:03:22 · every 2s · Ctrl-C quits
+
+fleet app/demo · 2 live · 1 handed back
+  ● api-client   codex:gpt-6-sol@high         working · 12m 40s
+  ○ copy         cursor:auto                  handed back: needs-verification · gate passed · 31m 5s
+fleet billing/fix · 1 live
+  ● refund       claude:claude-sonnet-5@high  turn ended, no hand-back: "Which currency?" · 4m 2s · 310.9K in, 5.1K out
+```
+
+`--run` narrows it to one run of this checkout. With no live worker it shows `no Fleet workers live` and keeps running, unless `--exit-when-idle`, after that many minutes with none. On a terminal it draws on the alternate screen, each frame over the last, and Ctrl-C quits and puts the terminal back as it was; piped, it prints the frames one after another. It takes no lock and writes nothing in the checkout: its token cache stays in memory.
+
+`--pane` opens `fleet track` in a short pane below the current one, without taking focus, for an owner who leads in tmux or cmux: under tmux (`TMUX` and `TMUX_PANE` set) on their own tmux server, the socket their `TMUX` names, never Fleet's worker server, with `tmux split-window -v -d -l 8 -t $TMUX_PANE`; under cmux (`CMUX_WORKSPACE_ID` and `CMUX_SURFACE_ID` set) as a split below their surface, which never gets a worker's tab. The pane's `fleet track` ends after 30 minutes with no live worker (`--exit-when-idle` changes it), and the pane closes with it. Run `--pane` again in the same pane and it names the one already open instead of opening a second; Fleet remembers it in `agent-fleet/track-panes.json` under the cache, readable by you only (never inside a checkout), and drops the records of panes that have closed. A tmux pane starts with the tmux server's environment, not your shell's, so the pane's command sets `XDG_CACHE_HOME`, `FLEET_CONFIG` and your other `FLEET_` variables as your shell has them: it reads the same registry and config as you. Outside tmux and cmux it refuses and says to run `fleet track` in a second tab. Nothing else in Fleet ever splits your terminal: init and launch only print the `WATCH` line.
+
+**Use:** the owner's live view in a terminal, under any lead: `fleet track` in a tab of its own, or `fleet track --pane` in tmux or cmux.
+
 ### attach
 
 ```text
@@ -1204,7 +1258,7 @@ fleet statusline --uninstall [--scope user|project]
 fleet statusline [--then '<your command>'] [--rows N]
 ```
 
-Puts the [brief view](#the-brief-view)'s rows in Claude Code's status line, below the prompt, the way its own agent panel lists its subagents. It is for Claude Code only. Codex's status line takes its built-in items only, with no command of your own, so under Codex use [`agents`](#agents) in a split or the [`dashboard`](#dashboard).
+Puts the [brief view](#the-brief-view)'s rows in Claude Code's status line, below the prompt, the way its own agent panel lists its subagents. It is for Claude Code only. Codex's status line takes its built-in items only, with no command of your own, so under Codex use [`track`](#track) or the [`dashboard`](#dashboard).
 
 ```text
 ~/src/app  main  Opus 5.5
@@ -1214,33 +1268,37 @@ fleet checkout · 3 live · 2 handed back
 +2 more: fleet status --brief
 ```
 
-The first line is your own status line, run by `--then`; Fleet's rows follow it, here capped with `--rows 2`. Rows are not indented, since Claude Code trims each line. With no live worker in the session's checkout, only your own line shows. Inside a Fleet worker (the worker's runner sets `FLEET_WORKER=<run>/<id>` for its CLI), only your own line shows too, so rows whose clocks change every refresh never keep a worker's screen from settling for `wait`'s stall check, or crowd `peek`.
+The first line is your own status line, run by `--then`; Fleet's rows follow it, here capped with `--rows 2`. After this checkout's rows, one line sums the workers live in the other [active checkouts](#every-active-checkout), when there are any: `+3 workers in 2 other repos (fleet status --brief --all)`. It counts at most 8 of them, and keeps the counts for 10 seconds, so a refresh never scans them all: with five active checkouts a refresh takes about 60 ms. Rows are not indented, since Claude Code trims each line. With no live worker in the session's checkout, only your own line shows. Inside a Fleet worker (the worker's runner sets `FLEET_WORKER=<run>/<id>` for its CLI), only your own line shows too, so rows whose clocks change every refresh never keep a worker's screen from settling for `wait`'s stall check, or crowd `peek`.
 
-`--install` sets `statusLine` in `~/.claude/settings.json` (in `$CLAUDE_CONFIG_DIR` when that is set), or with `--scope project` in this checkout's `.claude/settings.local.json`, to `{"type": "command", "command": "<this fleet> statusline", "refreshInterval": 2}`. Claude Code runs that command with the session's JSON on stdin, prints each line it writes as a row, and runs it again every 2 seconds, even while the session is idle. A status line you already had is kept: the new command runs it first with `--then '<it>'`, and its other keys (`padding`) stay. It also runs on its own after `|| sh -c '<it>'`, so your line still shows if this Fleet's folder goes away (a plugin update deletes the old version's folder about a week later) until you install again. Before writing, Fleet copies the file to `statusline-backups/` beside your Fleet config (`~/.config/agent-fleet/`), readable by you only since a settings file may hold keys, and prints what changed and where the backup is. Every other key in the file stays as it was. It refuses a file that is not valid JSON, or a `statusLine` that is not a command, rather than overwrite it. Run it again and nothing changes: it never chains Fleet to itself, and after Fleet moves it points the line at the new path, keeping what it chains. Only a command that is exactly Fleet's status line counts as Fleet's: `[<python>] <path>/fleet statusline` with only its own `--then` and `--rows`, and the `||` fallback. Anything else, even `my-line.sh; fleet statusline` or `fleet statusline | head -3`, is your own line and is chained whole. `--uninstall` puts back the `statusLine` it replaced, or removes the key when there was none. A symlinked settings file stays a link. It never edits another host's config.
+`--install` sets `statusLine` in `~/.claude/settings.json` (in `$CLAUDE_CONFIG_DIR` when that is set), or with `--scope project` in this checkout's `.claude/settings.local.json`, to `{"type": "command", "command": "<this fleet's folder>/fleet-statusline", "refreshInterval": 2}`. `fleet-statusline` is a small launcher beside `fleet`: it runs `fleet statusline` with the same arguments. Claude Code runs that command with the session's JSON on stdin, prints each line it writes as a row, and runs it again every 2 seconds, even while the session is idle. A status line you already had is kept: the new command runs it first with `--then '<it>'`, and its other keys (`padding`) stay. It also runs on its own after `|| sh -c '<it>'`, so your line still shows if this Fleet's folder goes away (a plugin update deletes the old version's folder about a week later) until you install again. Before writing, Fleet copies the file to `statusline-backups/` beside your Fleet config (`~/.config/agent-fleet/`), readable by you only since a settings file may hold keys, and prints what changed and where the backup is. Every other key in the file stays as it was. It refuses a file that is not valid JSON, or a `statusLine` that is not a command, rather than overwrite it. Run it again and nothing changes: it never chains Fleet to itself, and after Fleet moves it points the line at the new path, keeping what it chains. Only a command that is exactly Fleet's status line counts as Fleet's: `[<python>] <path>/fleet-statusline`, or the older `[<python>] <path>/fleet statusline`, with only its own `--then` and `--rows`, and the `||` fallback; install replaces the older form with the launcher. Anything else, even `my-line.sh; fleet statusline` or `fleet statusline | head -3`, is your own line and is chained whole. `--uninstall` puts back the `statusLine` it replaced, or removes the key when there was none. A symlinked settings file stays a link. It never edits another host's config.
 
 `--scope project` changes a file in the checkout. Unless Git ignores `.claude/settings.local.json` there, it refuses while workers run, since the [scope check](#the-scope-check) would count the change against them.
 
 The command itself reads the checkout from the session's `workspace.project_dir`, the folder the session started in (else `workspace.current_dir`, else `cwd`), so a lead that `cd`s into a worker's tree keeps its rows, and it always exits 0: garbage on stdin, a broken config, a damaged run or a failing `--then` command only leave Fleet's rows out. Your own command's output prints as it wrote it, colours included, and is cut off after 5 seconds. `--rows` caps Fleet's worker rows (default 6), then `+k more`.
 
-Claude Code runs a status line in every session that reads the file, Fleet's own Claude workers included. Each run costs about 0.2 s of CPU, almost all of it Python starting Fleet; the brief view itself takes about 10 ms for ten workers, and a worker's own status line skips it.
+Claude Code runs a status line in every session that reads the file, Fleet's own Claude workers included. So the launcher does as little as it can. Inside a Fleet worker it runs only your own line, without loading Fleet: about 25 ms of CPU a run. Elsewhere it loads Fleet with its compiled bytecode kept under the cache (`agent-fleet/pycache`, never beside the runtime, whose folder the installer owns, and never inside a Git checkout): about 60 ms a run with a live worker here and four other active checkouts, where running `fleet statusline` itself took about 230 ms, almost all of it Python compiling Fleet. If Fleet cannot load (a Python older than 3.11, a folder half-updated), your own line still shows. The brief view itself takes about 10 ms for ten workers.
 
-**Use:** once, when the owner leads from Claude Code: `fleet statusline --install`.
+**Setup installs it.** `fleet setup --harness claude` (or `all`, from npm or `install.sh`) runs `--install` with the copied runtime, so the line points at the installed copy, never npm's cache; it goes in the settings file beside the skill: `<base>/.claude/settings.local.json` for `--scope project` (the folder setup ran in, even below a Git checkout's root), `<base>/.claude/settings.json` for `--root`, else your own. `--no-statusline` skips it, and `fleet uninstall` puts your own line back first. If setup cannot set it (a settings file that is not JSON, no Python 3.11), setup still succeeds and prints a warning with the command to run. If uninstall cannot put your line back, it keeps the claude copy, since the line still runs it, removes the rest, exits non-zero and prints the command to run before uninstalling again. A Claude Code plugin cannot set a status line (a plugin's settings apply only `agent` and `subagentStatusLine`), so after a plugin or `npx skills add` install, run `fleet statusline --install` once.
+
+**Use:** nothing, after setup; after a plugin or skills-CLI install, once: `fleet statusline --install`.
 
 ### dashboard
 
 ```text
 fleet dashboard [--port N] [--open]
+fleet dashboard --background [--open]
+fleet dashboard --stop
 ```
 
-Serves a local, read-only web page of this checkout's runs and workers, for an owner who leads from a desktop app (ChatGPT or Codex desktop, Claude desktop, T3 Code, Antigravity, the Cursor IDE) or has no terminal open. It prints the page's address and serves until Ctrl-C:
+Serves a local, read-only web page of every active Fleet session on this computer: each [active checkout](#every-active-checkout), with its runs, workers and screens, for an owner who leads from a desktop app (ChatGPT or Codex desktop, Claude desktop, T3 Code, Antigravity, the Cursor IDE) or has no terminal open. It prints the page's address and serves until Ctrl-C:
 
 ```text
-Fleet dashboard for /Users/me/src/app:
+Fleet dashboard for every active Fleet session on this computer (started in /Users/me/src/app):
   http://127.0.0.1:53817/?t=6pX0oV1r2m0bS1y3Qf8wJ6kHq0hVb9u4
 Read-only, and served to this computer only (127.0.0.1). The token in the link is its key: keep it to yourself. Ctrl-C stops it.
 ```
 
-The page lists each run with a live worker, and the five other runs changed most recently, with every worker's row as in the [brief view](#the-brief-view). It refreshes every 2 seconds. Click a worker to see its current screen below the list. It is one page with no external files, so it works offline, and it follows the system's light or dark mode. `--port` picks the port (default 0, any free one). `--open` opens it in your browser on macOS and Windows. On Linux it refuses and starts nothing: the browser would get the link, token and all, on its command line, which other users of the computer can read in `/proc`. Copy the printed link instead.
+The page lists each active checkout, this one first, and in each the runs with a live worker and the five others changed most recently, with every worker's row as in the [brief view](#the-brief-view). It refreshes every 2 seconds. Click a worker to see its current screen below the list. It is one page with no external files, so it works offline, and it follows the system's light or dark mode. `--port` picks the port (default 0, any free one). `--open` opens it in your browser on macOS and Windows. On Linux it refuses and starts nothing: the browser would get the link, token and all, on its command line, which other users of the computer can read in `/proc`. Copy the printed link instead.
 
 - It listens on 127.0.0.1 only, and every request needs the token, which is new at each start: without it, or with a wrong one, the answer is 403.
 - It refuses any request whose `Host` is not `127.0.0.1:<port>` or `localhost:<port>`, so a web page that rebinds its own name to your computer cannot read it.
@@ -1248,6 +1306,8 @@ The page lists each run with a live worker, and the five other runs changed most
 - It reads only: no lock, nothing saved in the checkout. Its requests share nothing that a slow read holds, so one request that waits on a file never holds up the next. A worker's screen comes from the same terminal read as [`peek`](#peek), at most its last 200 lines, with control and bidi characters removed.
 - Every worker's text is set on the page as text, never as markup, and the JSON escapes `<`, `>` and `&`.
 
-`GET /api/status?t=<token>` returns the brief view's `--json` object for those runs. `GET /api/screen?t=<token>&run=<run>&id=<id>` returns `{"run", "id", "screen", "error"}`.
+`GET /api/status?t=<token>` returns `{"checkouts": [...]}`, as `status --brief --all --json`. `GET /api/id?t=<token>` returns `{"pid", "nonce"}`: the dashboard's process and a value new at each start. `GET /api/screen?t=<token>&checkout=<path>&run=<run>&id=<id>` returns `{"checkout", "run", "id", "screen", "error"}`; it serves a screen only for a checkout the registry lists (or the one the dashboard started in), matched as an exact string, and refuses any other with 403: no path from the query is ever opened.
+
+**In the background.** `--background` starts one detached dashboard for this computer, in its own session, or reuses the one running, and prints its link; init and launch use it ([where the owner watches](#init)). Its record (pid, the process's start time, port, token, the start's nonce) is `agent-fleet/dashboard/dashboard.json` under the cache, readable by you only, in a folder only you can open, with its output in `dashboard.log` beside it, never holding the token. None of it ever goes inside a checkout: when the cache is in one, there is no background dashboard. A record counts only while its process is alive, started when the record says, and answers `/api/id` with its token as a Fleet dashboard (its `Server` header) with the record's pid and nonce, so after a crash a reused pid or port is never trusted. One that is not answering in time when it starts is stopped. `--stop` stops it, under the same lock file as a start: it signals only a process that passes those checks, says so when the record named anything else (dropped, nothing signalled), and when the dashboard is still shutting down after 5 seconds it says so and keeps the record. A stopped dashboard stays stopped until the next init or launch that starts one. It also stops itself once no active checkout has had a live worker for 30 minutes, checking about once a minute without any lock.
 
 **Use:** when the owner wants to watch workers outside a terminal. Run it in a terminal of its own, or in the background, and open the printed link in any browser.

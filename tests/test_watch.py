@@ -27,6 +27,7 @@ from test_claude_hooks import HookCase, notification, stop  # noqa: E402
 from test_runtime import fleet  # noqa: E402
 
 FLEET = Path(__file__).resolve().parents[1] / "skill" / "bin" / "fleet"
+LAUNCHER = FLEET.parent / "fleet-statusline"  # the status-line command --install writes
 CONTROL_CHARS = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f​-‏‪-‮⁦-⁩﻿]")
 TOKEN_LAUNCH = "{bin} {session} --model {model} --effort {effort} {profile} {settings} {prompt}"
 
@@ -527,7 +528,9 @@ class Statusline(WatchCase):
         with patch.object(fleet, "load_config", side_effect=fleet.FleetError("broken config")):
             self.assertIn("● 01", self.statusline())
         with patch.object(fleet, "repo_root", side_effect=fleet.FleetError("not a git repository")):
-            self.assertEqual(self.statusline(b"{}", "--then", "echo mine"), "mine\n")
+            # Outside any checkout, the active ones (this test's, registered at launch) still show, summed.
+            self.assertEqual(self.statusline(b"{}", "--then", "echo mine"),
+                             "mine\n+1 worker in 1 other repo (fleet status --brief --all)\n")
         with patch.object(fleet, "brief_runs", side_effect=RuntimeError("anything at all")):
             self.assertEqual(self.statusline(b"{}", "--then", "echo mine"), "mine\n")
 
@@ -608,8 +611,7 @@ class Install(unittest.TestCase):
         line = self.line()
         self.assertEqual((line["type"], line["refreshInterval"]), ("command", 2))
         words = shlex.split(line["command"])
-        self.assertEqual(words[-1], "statusline")
-        self.assertEqual(Path(words[-2]).resolve(), FLEET.resolve())
+        self.assertEqual(Path(words[-1]).resolve(), LAUNCHER.resolve())
         self.assertEqual(self.backups(), [])
         self.assertIn("now: (none)", self.run_fleet("--uninstall"))
         self.assertEqual(json.loads(self.settings.read_text()), {})
@@ -631,7 +633,8 @@ class Install(unittest.TestCase):
         line = data["statusLine"]
         self.assertEqual((line["padding"], line["refreshInterval"]), (1, 2))
         words = shlex.split(line["command"])
-        self.assertEqual(words[-7:], ["statusline", "--then", mine, "||", "sh", "-c", mine])
+        self.assertEqual(Path(words[-7]).resolve(), LAUNCHER.resolve())
+        self.assertEqual(words[-6:], ["--then", mine, "||", "sh", "-c", mine])
         self.assertEqual(stat.S_IMODE(self.settings.stat().st_mode), 0o640)
         [backup] = self.backups()
         self.assertEqual(backup.read_bytes(), raw)
@@ -695,13 +698,14 @@ class Install(unittest.TestCase):
         copy = self.root / "plugin-1.2.3" / "fleet"  # a plugin update deletes the old version's folder
         copy.parent.mkdir()
         shutil.copy2(FLEET, copy)
+        shutil.copy2(LAUNCHER, copy.parent / LAUNCHER.name)
         self.claude.mkdir()
         mine = {"type": "command", "command": "echo mine; cat >/dev/null"}
         self.settings.write_text(json.dumps({"statusLine": mine}))
         with patch.object(fleet, "__file__", str(copy)):
             self.run_fleet("--install")
         command = self.line()["command"]
-        self.assertIn(str(copy), command)
+        self.assertIn(str(copy.parent / LAUNCHER.name), command)
 
         def show() -> str:
             return subprocess.run(["/bin/sh", "-c", command], input="{}", text=True, capture_output=True, timeout=60,
@@ -716,8 +720,8 @@ class Install(unittest.TestCase):
             "type": "command", "command": "/old/place/fleet statusline --then 'my-line --fast'"}}))
         self.run_fleet("--install")
         words = shlex.split(self.line()["command"])
-        self.assertEqual(Path(words[-8]).resolve(), FLEET.resolve())
-        self.assertEqual(words[-7:], ["statusline", "--then", "my-line --fast", "||", "sh", "-c", "my-line --fast"])
+        self.assertEqual(Path(words[-7]).resolve(), LAUNCHER.resolve())  # the older form is Fleet's too
+        self.assertEqual(words[-6:], ["--then", "my-line --fast", "||", "sh", "-c", "my-line --fast"])
         self.run_fleet("--uninstall")  # no record of its own: the chained command comes back
         self.assertEqual(self.line(), {"type": "command", "command": "my-line --fast"})
 
@@ -732,6 +736,72 @@ class Install(unittest.TestCase):
         after = sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob("*"))
         self.assertEqual(sorted(set(after) - set(before)),
                          ["claude", "claude/settings.json", "fleet-config", "fleet-config/statusline.json"])
+
+
+class Launcher(unittest.TestCase):
+    """fleet-statusline, the command Claude Code runs every 2 s in every session: a copy beside a fleet of the
+    test's own, run as Claude Code runs it."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name).resolve()
+        self.bin, self.cache = self.root / "skill" / "bin", self.root / "cache"
+        self.bin.mkdir(parents=True)
+        shutil.copy2(LAUNCHER, self.bin / LAUNCHER.name)
+
+    def show(self, *args, **env) -> subprocess.CompletedProcess:
+        clean = {k: v for k, v in os.environ.items() if k != "FLEET_WORKER"}
+        return subprocess.run([str(self.bin / LAUNCHER.name), *args], input="{}", text=True, capture_output=True,
+                              timeout=60, cwd=self.root, env={**clean, "XDG_CACHE_HOME": str(self.cache), **env})
+
+    def test_inside_a_worker_only_the_owners_line_runs_and_fleet_is_never_loaded(self):
+        loaded = self.root / "loaded"
+        (self.bin / "fleet").write_text(f"open({str(loaded)!r}, 'w').close()\n"
+                                        "def main(argv):\n    print('rows of ' + ' '.join(argv))\n")
+        res = self.show("--then", "cat; echo mine", FLEET_WORKER="demo/01")
+        self.assertEqual((res.returncode, res.stdout), (0, "{}mine\n"))
+        self.assertFalse(loaded.exists())
+        self.assertEqual(self.show("--then=echo mine", FLEET_WORKER="demo/01").stdout, "mine\n")
+        self.assertEqual(self.show(FLEET_WORKER="demo/01").stdout, "")
+        res = self.show("--then", "echo mine", "--rows", "2")
+        self.assertEqual(res.stdout, "rows of statusline --then echo mine --rows 2\n")  # elsewhere: fleet statusline
+        self.assertTrue(loaded.exists())
+
+    def test_a_fleet_that_cannot_load_still_shows_the_owners_line(self):
+        for broken in ("this is not Python (\n", "raise SystemExit(3)\n", "import os\nos.kill(os.getpid(), 0)\n"
+                       "def main(argv):\n    raise RuntimeError('boom')\n", None):
+            with self.subTest(broken=broken):
+                (self.bin / "fleet").unlink(missing_ok=True)
+                if broken is not None:
+                    (self.bin / "fleet").write_text(broken)
+                res = self.show("--then", "echo mine")
+                self.assertEqual((res.returncode, res.stdout), (0, "mine\n"))
+
+    def test_fleets_bytecode_is_kept_under_the_cache_never_beside_it(self):
+        shutil.copy2(FLEET, self.bin / "fleet")
+        for _ in range(2):
+            res = self.show("--then", "echo mine")
+            self.assertEqual((res.returncode, res.stdout), (0, "mine\n"))  # outside any checkout: the line alone
+        self.assertEqual(sorted(p.name for p in self.bin.iterdir()), ["fleet", LAUNCHER.name])  # the installer's
+        self.assertTrue(list((self.cache / "agent-fleet" / "pycache").rglob("fleet*.pyc")))
+        home = self.root / "home"  # a home folder kept in Git: no bytecode written inside it
+        home.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=home, check=True)
+        res = self.show("--then", "echo mine", XDG_CACHE_HOME=str(home / ".cache"))
+        self.assertEqual(res.stdout, "mine\n")
+        self.assertFalse((home / ".cache" / "agent-fleet" / "pycache").exists())
+
+    def test_install_counts_the_launcher_and_the_older_command_as_fleets(self):
+        for command, then in ((f"{LAUNCHER}", None), (f"python3 {LAUNCHER} --then x || sh -c x", "x"),
+                              (f"'{LAUNCHER}' --rows 2 --then 'my line' || sh -c 'my line'", "my line"),
+                              ("/old/fleet statusline --then x || sh -c x", "x"),
+                              ("/usr/bin/python3.11 /old/fleet statusline", None)):
+            with self.subTest(command=command):
+                self.assertEqual(fleet.fleet_statusline({"command": command}), (True, then))
+        for command in (f"{LAUNCHER} statusline", f"{LAUNCHER} --bogus", f"{LAUNCHER}; echo hi", "/x/fleet --then x"):
+            with self.subTest(command=command):
+                self.assertEqual(fleet.fleet_statusline({"command": command}), (False, None))
 
 
 class ProjectInstall(WatchCase):
@@ -784,6 +854,16 @@ class Dashboard(WatchCase):
         self.assertNotEqual(other.board.token, self.token)  # a new token at every start
         self.assertIn("port must be between 0 and 65535", self.call("dashboard", "--port", "70000", expected=1))
 
+    def test_api_id_names_this_dashboards_pid_and_nonce(self):
+        code, headers, body = self.request("/api/id")
+        self.assertEqual(code, 200)
+        self.assertTrue(headers["Server"].startswith("fleet-dashboard"))
+        self.assertEqual(json.loads(body), {"pid": os.getpid(), "nonce": self.server.board.nonce})
+        other = fleet.dashboard_server(self.repo, 0, None)
+        self.addCleanup(other.server_close)
+        self.assertNotEqual(other.board.nonce, self.server.board.nonce)  # a new one at every start
+        self.assertEqual(self.request("/api/id", token=False)[0], 403)
+
     def test_the_page_and_the_api_answer_with_the_token(self):
         self.start()
         self.launch()
@@ -800,7 +880,10 @@ class Dashboard(WatchCase):
         code, headers, body = self.request("/api/status")
         self.assertEqual((code, headers["Content-Type"]), (200, "application/json"))
         data = json.loads(body)
-        [run] = data["runs"]
+        [group] = data["checkouts"]
+        self.assertEqual(set(group), {"checkout", "label", "current", "runs", "skipped"})
+        self.assertEqual((group["checkout"], group["label"], group["current"]), (str(self.repo), self.repo.name, True))
+        [run] = group["runs"]
         [row] = run["workers"]
         self.assertEqual(set(row), {"run", "id", "live", "state", "worker", "provider", "model", "effort", "activity",
                                     "doing", "report", "elapsed_s", "tokens", "title"})
@@ -837,7 +920,7 @@ class Dashboard(WatchCase):
         code, _, body = self.request("/api/status")
         self.assertNotIn(b"<", body)
         self.assertNotIn(b">", body)
-        row = json.loads(body)["runs"][0]["workers"][0]
+        row = json.loads(body)["checkouts"][0]["runs"][0]["workers"][0]
         self.assertEqual(row["doing"], 'blocked: "</script><script>alert(1)</script> & more"')
         self.assertEqual(row["title"], "<img src=x onerror=alert(1)>")
 
@@ -967,6 +1050,24 @@ class LiveTmux(unittest.TestCase):
         subprocess.run(["tmux", "-L", self.socket, "kill-server"], capture_output=True)
         self.assertRegex(self.call("status", "--brief"),
                          r"  ● 01  fake:fake-1  unreachable: its tmux window is gone and it left no exit receipt")
+
+    def test_a_lost_tmux_server_counts_as_no_live_worker(self):
+        import argparse
+        self.plan_one()
+        self.call("launch", "demo", "--ready")
+        self.assertEqual(fleet.live_workers(self.repo), 1)
+        subprocess.run(["tmux", "-L", self.socket, "kill-server"], capture_output=True)
+        self.assertEqual(fleet.live_workers(self.repo), 0)  # the dashboard's idle check and the summary count it so
+        with patch.object(fleet, "OTHERS_TTL_S", 0):
+            self.assertEqual(fleet.others_live(None), [])  # no "+1 worker in 1 other repo" forever
+        lines, live = fleet.track_frame(self.repo, argparse.Namespace(run=None), None, fleet.TokenCache())
+        self.assertIn("unreachable", "\n".join(lines))  # still shown, so the owner sees it
+        self.assertFalse(live)  # but track --pane's idle clock runs
+        entry = self.cache / "agent-fleet" / "active" / f"{fleet.checkout_key(self.repo)}.json"
+        e = json.loads(entry.read_text())
+        entry.write_text(json.dumps(dict(e, seen=time.time() - 2 * 86400)))
+        self.assertEqual(fleet.active_entries(), [])
+        self.assertFalse(entry.exists())
 
     def test_a_worker_shows_working_then_handed_back(self):
         self.plan_one()

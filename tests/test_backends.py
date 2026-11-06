@@ -19,6 +19,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 for _var in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"):
     os.environ.pop(_var, None)
+os.environ["FLEET_NO_DASHBOARD"] = "1"  # init and launch start no background dashboard; tests that want one ask
 loader = importlib.machinery.SourceFileLoader("fleet_backend_tests", str(ROOT / "skill/bin/fleet"))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 fleet = importlib.util.module_from_spec(spec)
@@ -181,7 +182,8 @@ class TmuxLive(unittest.TestCase):
         self.addCleanup(os.chdir, cwd)
         for mocker in (patch.object(fleet, "load_config", side_effect=lambda: copy.deepcopy(self.cfg)),
                        patch.object(fleet, "LAUNCH_SETTLE_S", 0),
-                       patch.dict(os.environ, {"CLAUDECODE": "1"})):  # as if the lead were Claude Code
+                       patch.dict(os.environ, {"CLAUDECODE": "1",  # as if the lead were Claude Code
+                                               "XDG_CACHE_HOME": str(root / "cache")})):
             mocker.start()
             self.addCleanup(mocker.stop)
 

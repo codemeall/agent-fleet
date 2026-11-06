@@ -10,7 +10,7 @@ if (['setup', 'uninstall'].includes(args[0])) {
   console.log(require('../package.json').version);
 } else {
   if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
-    console.log('Skill installation: fleet setup --harness claude|codex|cursor|all [--scope user|project] [--root /absolute/base]');
+    console.log('Skill installation: fleet setup --harness claude|codex|cursor|all [--scope user|project] [--root /absolute/base] [--no-statusline]');
     console.log('Skill removal:      fleet uninstall (same options; preserves modified installations)\n');
   }
   const python = process.env.FLEET_PYTHON || 'python3';

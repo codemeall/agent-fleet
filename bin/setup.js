@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 const OWNER = '@codemeall/agent-fleet';
 const MARKER = '.fleet-install.json';
 const HARNESSES = { claude: '.claude', codex: '.agents', cursor: '.cursor' };
@@ -84,12 +85,41 @@ function install(target, files, quiet = false) {
   if (!quiet) console.log(`installed ${target}`);
 }
 
+// Claude Code's status line shows Fleet's workers under the prompt. With the claude harness, setup sets it through
+// the copied runtime (`fleet statusline --install`), which keeps an existing line by running it first and backs the
+// settings file up; uninstall puts the old line back first. It points at the installed copy, never npx's cache, and
+// goes in the settings file beside the skill: <base>/.claude/settings.local.json for project scope (wherever setup
+// runs from), <base>/.claude/settings.json for --root, else the user's own. A failed install only warns: the skill
+// is installed either way. A failed restore keeps the claude install, so the command the warning names still runs.
+function statusline(action, target, opts, base) {
+  const runtime = path.join(target, 'bin', 'fleet');
+  const python = process.env.FLEET_PYTHON || 'python3';
+  const settings = opts.scope === 'project' ? path.join(base, '.claude', 'settings.local.json')
+    : opts.root ? path.join(base, '.claude', 'settings.json') : null;
+  const args = [runtime, 'statusline', `--${action}`, ...(settings ? ['--settings', settings] : [])];
+  const result = spawnSync(python, args, { encoding: 'utf8' });
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (!result.error && result.status === 0) return true;
+  const why = (result.error ? result.error.message : (result.stderr || '').trim().split('\n').pop()) || `exit ${result.status}`;
+  const retry = `${python} ${args.map(a => (a === runtime || a === settings ? JSON.stringify(a) : a)).join(' ')}`;
+  if (action === 'install') {
+    console.warn(`warning: Fleet is installed, but Claude Code's status line was not set (${why}).`);
+    console.warn(`Retry with: ${retry}`);
+  } else {
+    console.warn(`warning: Claude Code's status line was not restored (${why}), so ${target} is kept: its runtime restores it.`);
+    console.warn(`Retry with: ${retry}`);
+    console.warn('then run this uninstall again (--no-statusline removes the copy and leaves the settings as they are).');
+  }
+  return false;
+}
+
 function run(action, args) {
   if (args.includes('--help') || args.includes('-h')) {
-    console.log(`fleet ${action} --harness claude|codex|cursor|all [--scope user|project] [--root /absolute/base]\nUser scope defaults to your home; project scope defaults to the current directory.\nCopies the skill and runtime. Does not change PATH, configuration, or plugin registries.\nModified or unowned installations are preserved and produce an error.`);
+    console.log(`fleet ${action} --harness claude|codex|cursor|all [--scope user|project] [--root /absolute/base] [--no-statusline]\nUser scope defaults to your home; project scope defaults to the current directory.\nCopies the skill and runtime. With the claude harness, setup also sets Claude Code's status line to show Fleet's\nworkers under the prompt, keeping a line you already have (backed up first); uninstall puts yours back.\n--no-statusline leaves Claude Code's settings alone. Does not change PATH or plugin registries.\nModified or unowned installations are preserved and produce an error.`);
     return;
   }
-  const opts = { scope: 'user' };
+  const opts = { scope: 'user', statusline: !args.includes('--no-statusline') };
+  args = args.filter(arg => arg !== '--no-statusline');
   for (let i = 0; i < args.length; i += 2) {
     const key = args[i].replace(/^--/, '');
     if (!['harness', 'scope', 'root'].includes(key) || args[i] !== `--${key}` || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error(`Invalid option: ${args[i]}. Use fleet ${action} --help.`);
@@ -106,11 +136,16 @@ function run(action, args) {
   const targets = harnesses.map(name => path.join(base, HARNESSES[name], 'skills', 'fleet'));
   for (const target of targets) { assertParents(base, target); if (exists(target)) assertOwned(target); }
   const files = action === 'setup' ? inventory(source, true) : null;
+  const claude = opts.statusline && harnesses.includes('claude') ? targets[harnesses.indexOf('claude')] : null;
+  const kept = action !== 'setup' && claude && exists(claude) && !statusline('uninstall', claude, opts, base) ? claude : null;
   for (const target of targets) {
     if (action === 'setup') install(target, files);
+    else if (target === kept) console.log(`kept ${target}`);
     else if (exists(target)) { assertOwned(target); fs.rmSync(target, { recursive: true }); console.log(`removed ${target}`); }
     else console.log(`absent ${target}`);
   }
+  if (kept) process.exitCode = 1;
+  if (action === 'setup' && claude) statusline('install', claude, opts, base);
   if (action === 'setup') {
     console.log('Restart your harness to discover Fleet. fleet is not added to PATH; use the copied runtime (or npx @codemeall/agent-fleet@preview):');
     console.log(path.join(targets[0], 'bin', 'fleet'));
