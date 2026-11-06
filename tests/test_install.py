@@ -19,7 +19,7 @@ class InstallTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='fleet-install-')
         self.addCleanup(self.temp.cleanup)
-        self.base = Path(self.temp.name)
+        self.base = Path(self.temp.name).resolve()  # setup prints real paths: on macOS /var is /private/var
         self.root = self.base / 'fresh root'
         # Setup also sets Claude Code's status line: its records, backups and caches stay in this test's folders.
         self.env = {k: v for k, v in os.environ.items() if k != 'CLAUDE_CONFIG_DIR'}

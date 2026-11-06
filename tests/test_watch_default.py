@@ -53,6 +53,7 @@ class Machine(WatchCase):
     def other_checkout(self, name="other", parent=None, live=True) -> Path:
         repo = (parent or self.claude_home) / name
         repo.mkdir(parents=True)
+        repo = repo.resolve()  # as git names it, and so the registry: on macOS /var is /private/var
         for args in (["init", "-q"], ["config", "user.email", "t@example.invalid"], ["config", "user.name", "t"]):
             subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
         (repo / "a.txt").write_text("base\n")
@@ -304,8 +305,8 @@ class AllCheckouts(Machine):
         two = self.other_checkout("app", parent=self.claude_home / "b")
         labels = {g["checkout"]: g["label"] for g in
                   json.loads(self.call("status", "--brief", "--all", "--json"))["checkouts"]}
-        self.assertEqual(labels[str(one)], f"app ({one})")
-        self.assertEqual(labels[str(two)], f"app ({two})")
+        self.assertEqual(labels[str(one)], fleet.one_line(f"app ({one})", 120))  # cut where a temp path is long
+        self.assertEqual(labels[str(two)], fleet.one_line(f"app ({two})", 120))
 
     def test_a_folder_name_never_reaches_the_terminal_raw(self):
         self.start()
@@ -470,6 +471,14 @@ class Background(Machine):
         new = fleet.dashboard_background(self.repo)  # init starts a dashboard of its own, never trusts that one
         self.assertNotIn(new["pid"], (sleeper.pid, server.pid))
         self.assertTrue(fleet.dashboard_answers(new))
+
+    def test_starting_never_looks_up_a_host_name(self):
+        """HTTPServer's own bind calls socket.getfqdn, which stalls for seconds on a Mac with slow reverse DNS."""
+        import socket
+        with patch.object(socket, "getfqdn", side_effect=AssertionError("looked up a host name")):
+            server = fleet.dashboard_server(self.repo, 0, None)
+        self.addCleanup(server.server_close)
+        self.assertEqual(server.server_address[0], "127.0.0.1")
 
     def test_another_start_or_a_reused_pid_is_told_apart(self):
         rec = fleet.dashboard_background(self.repo)

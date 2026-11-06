@@ -13497,6 +13497,14 @@ def dashboard_server(repo: Path, port: int, cfg: dict | None):
     class Server(ThreadingHTTPServer):
         daemon_threads = True
 
+        def server_bind(self) -> None:
+            """HTTPServer's own looks up this host's name (socket.getfqdn), which stalls for seconds where reverse DNS
+            is slow, as on many Macs: long enough that init's dashboard never answered in time. It serves 127.0.0.1
+            only, so no name is needed."""
+            import socketserver
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+
     server = Server(("127.0.0.1", port), Handler)
     server.board = DashboardBoard(repo, server.server_address[1], cfg)
     return server
