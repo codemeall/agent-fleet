@@ -415,6 +415,7 @@ class HeadlessRuntime(RuntimeCase):
     def test_wait_never_calls_a_headless_run_stalled(self):
         self.use_headless()
         self.reviewed()
+        self.started("review-01")  # its runner ran; one that never did wakes as never started (test_runtime)
         state = self.state()
         state["workers"]["review-01"]["launched_at"] = time.time() - 3600
         seen = self.repo / ".fleet/runs/demo/.seen"

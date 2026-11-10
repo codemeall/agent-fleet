@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.0-preview.35
+
+A cmux worker whose launch line never ran no longer looks launched.
+
+- **`launch` checks that the worker started.** cmux types the launch line into a new shell, and a line typed before the shell is ready can sit at its prompt without running. Before, launch printed that screen and said nothing, and the lead heard about it from `wait` minutes later as an ordinary `STALLED`. Now, with no start record 5 seconds in, launch presses Enter once in that pane. If the worker starts, it says so. If not, it prints `NOT STARTED <id>` and exits 1, with the way out: `peek`, `stop`, `recover`, launch again. tmux runs the launch line directly, so it is never checked.
+- **That Enter never reaches a worker's CLI.** Launch claims a nudge file before it checks, and the runner announces itself before it starts the CLI. A runner that starts meanwhile waits for the nudge to end, and every runner discards queued keystrokes before starting its CLI. If the nudge outlasts 45 seconds, or the Enter failed or timed out, an interactive runner refuses to start the CLI (exit 125) rather than risk a late Enter; headless CLIs read no keys.
+- **`--ready`, fan-outs and `--settle 0` check too.** `--settle 0` skips only the screen.
+- **`wait` names it too.** A cmux worker with no start record, headless or not, wakes `STALLED <id> never started` rather than pointing at an approval prompt that cannot exist.
+
 ## 0.1.0-preview.34
 
 The owner's views never spend an agent's tokens.

@@ -390,6 +390,7 @@ class WaitEvents(HookCase):
     def test_a_reported_prompt_does_not_also_wake_as_stalled(self):
         self.setup_run()
         self.launch()
+        self.started()  # its runner ran: a still screen is a prompt, not an unrun launch line
         seen = self.repo / ".fleet/runs/demo/.seen"
         self.assertEqual(fleet.scan_workers(self.repo, self.state(), seen, 60), [])  # the screen clock starts
         marker = seen / "01.screen"
@@ -413,6 +414,7 @@ class WaitEvents(HookCase):
         self.launch()
         self.assertNotIn("hooks", self.worker_rec())
         self.assertNotIn("--settings", self.worker_rec()["command"])
+        self.started()
         seen = self.repo / ".fleet/runs/demo/.seen"
         self.assertEqual(fleet.scan_workers(self.repo, self.state(), seen, 60), [])
         marker = seen / "01.screen"

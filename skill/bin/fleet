@@ -33,7 +33,7 @@ import time
 import tomllib
 from pathlib import Path
 
-VERSION = "0.1.0-preview.34"  # bump with package.json on release; tests/test_install.py checks they match
+VERSION = "0.1.0-preview.35"  # bump with package.json on release; tests/test_install.py checks they match
 SKILL_DIR = Path(__file__).resolve().parent.parent
 USER_CONFIG = Path(os.environ.get("FLEET_CONFIG", "~/.config/agent-fleet/config.toml")).expanduser()
 HARNESS_SKILL_DIRS = {
@@ -958,6 +958,7 @@ def terminal(state: dict):
 
 class Cmux:
     name = "cmux"
+    types_command = True  # the launch line is typed into a new shell, which can leave it unrun (LAUNCH_START_GRACE_S)
 
     def __init__(self, state: dict):
         self.ws = state.get("workspace")
@@ -1035,6 +1036,7 @@ class Tmux:
     defaults.tmux_socket names another. A window stays open after its worker exits (remain-on-exit), so its
     scrollback is still there for the lead; `fleet stop --close` closes it."""
     name = "tmux"
+    types_command = False  # tmux runs the launch line as the window's own command
 
     def __init__(self, state: dict):
         self.session = state["workspace"]
@@ -1442,6 +1444,10 @@ RETIRED_STATES = {"exited", "recovered"}  # exit confirmed, surface still open; 
 MAX_PANES = 8  # per workspace; past it, a finished worker's pane is replaced rather than split again
 LAUNCH_SETTLE_S = 5  # launch then shows the worker's screen: a login or trust prompt is up by now
 LAUNCH_SCREEN_LINES = 8
+# cmux types a worker's launch line into a new shell, and a line typed before that shell is ready can sit at its
+# prompt unrun. The runner writes its start record within a second of running, so none this long after launch means
+# the line never ran: launch presses Enter once, then waits this long again before saying NOT STARTED.
+LAUNCH_START_GRACE_S = 3
 # A prompt that stops a new worker shows in its first minutes, so its unchanged screen wakes the lead sooner.
 LAUNCH_STALL_S, LAUNCH_WATCH_S = 60, 240
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
@@ -2132,11 +2138,47 @@ def worker_env(receipt: Path) -> dict[str, str]:
     return dict(os.environ, **{FLEET_WORKER_ENV: f"{receipt.parent.parent.name}/{receipt.name.split('.')[0]}"})
 
 
+# How long a runner waits for launch to finish pressing Enter in its pane: past cmux's own 30-second call limit, so a
+# nudge still there by then is a launcher that died mid-send, and the runner refuses to start rather than guess.
+NUDGE_WAIT_S = 45
+NUDGE_REFUSED = 125  # the runner's exit code when it would not start its CLI past a nudge
+
+
+def runner_gate(receipt: Path, token: str) -> bool:
+    """Before the CLI starts: say the runner runs, wait while launch is pressing Enter in this pane (its nudge file
+    exists), then discard every keystroke still queued, so launch's Enter reaches the shell or nothing, never the
+    CLI. The announce comes first: launch claims the nudge, then checks for the announce before pressing Enter, so
+    an Enter it sends always lands before this discard. Nothing else is typed into a worker's pane before its CLI
+    runs: fleet send and the owner type into the CLI. False, without the discard, when the nudge outlasts
+    NUDGE_WAIT_S: its Enter could still arrive after any discard, so the caller must not start the CLI."""
+    try:
+        atomic_json(receipt.with_suffix(".runner.json"), {"token": token, "wrapper_pid": os.getpid()})
+    except OSError:
+        pass  # the start record after the spawn still reports it
+    nudge, deadline = receipt.with_suffix(".nudge.json"), time.time() + NUDGE_WAIT_S
+    while nudge.exists():
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.05)
+    try:
+        import termios
+        if sys.stdin.isatty():
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except (ImportError, OSError, ValueError):
+        pass
+    return True
+
+
 def run_child(args: list[str]) -> int:
     """Runs inside the worker terminal. Reports exit, never writes the shared run state."""
     if len(args) != 3:
         raise FleetError("internal runner expects receipt, token, command")
     path, token, command = args
+    if not runner_gate(Path(path), token):
+        print(f"fleet: launch was still pressing Enter in this pane after {NUDGE_WAIT_S}s; the worker was not "
+              "started, so that key cannot reach it. Relaunch it.", file=sys.stderr)
+        atomic_json(Path(path), {"token": token, "returncode": NUDGE_REFUSED})
+        return NUDGE_REFUSED
     child = subprocess.Popen(command, shell=True, executable="/bin/sh", env=worker_env(Path(path)))
     atomic_json(Path(path).with_suffix(".started.json"),
                 {"token": token, "wrapper_pid": os.getpid(), "child_pid": child.pid})
@@ -2305,6 +2347,7 @@ def headless_child(args: list[str]) -> int:
     previous = {sig: signal.getsignal(sig) for sig in caught}  # put back on return: ignored ones would be inherited
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, interrupt)
+    runner_gate(receipt, token)  # as _run, though its CLI reads no keys: stdin is empty, so a late Enter is harmless
     child = subprocess.Popen(command, shell=True, executable="/bin/sh", stdin=subprocess.DEVNULL, text=True,
                              errors="replace", stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
                              env=worker_env(receipt))
@@ -4430,8 +4473,9 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         print(f"warning: {a.id}'s prompt was written before {', '.join(stale)} was verified, so it does not hand "
               f"down that work. This worker can read the blocker's report in {d / 'reports'}; before {a.id}'s "
               f"next launch, regenerate its prompt with fleet prompt {a.run} {a.id} --force", file=sys.stderr)
-    if a.settle:  # outside the lock: a read-only look must not hold up the lead's next command
-        a.unlocked = lambda: print_start_screen(term, w, a.settle)
+    # Outside the lock: a read-only look must not hold up the lead's next command. --settle 0 skips the screen,
+    # never the start check.
+    a.unlocked = lambda: print_start_screen(term, w, a.settle or 0, a.run)
     return label, w
 
 
@@ -4535,6 +4579,7 @@ def launch_ready(a, cfg):
     picked, why = ready_tickets(state, load_live_state(repo, a.run), cfg, run_dir(repo, a.run) / "prompts",
                                 getattr(a, "only", None))
     launched = 0
+    started: list[dict] = []
     for i in picked:
         t = planned_route(state, {"fanout_of": fanout_of(state, i)}, i)  # its saved assignment, or its fanout entry
         one = argparse.Namespace(run=a.run, id=i, provider=t["provider"], tier=t["tier"], model=t["model"],
@@ -4558,12 +4603,26 @@ def launch_ready(a, cfg):
                 a.failed[i] = why[i]
             continue
         launched += 1
+        started.append(w)
         effort = f"@{w['effort']}" if w.get("effort") else ""
         print(f"LAUNCHED {i} {w['provider']}:{w['model']}{effort} {w['tier']} {w['surface']}")
     for i, reason in why.items():
         print(f"SKIPPED {i}: {reason}")
     if not launched:
         print("NONE ready")
+    if started:  # once main releases the lock, as a single launch's check
+        a.unlocked = lambda: confirm_starts(terminal(state), a.run, started)
+
+
+def confirm_starts(term, run: str, workers: list[dict]) -> int:
+    """launch --ready's start check: the line start_line prints for each worker whose launch line sat unrun, and 1
+    when any never started."""
+    code = 0
+    for w in workers:
+        if line := start_line(term, run, w, max(0.0, time.time() - w.get("launched_at", time.time()))):
+            print(line)
+            code = 1 if line.startswith("NOT STARTED") else code
+    return code
 
 
 def cmd_launch(a, cfg):
@@ -4595,18 +4654,97 @@ def screen_tail(screen: str, lines: int) -> str:
     return "\n".join(text.splitlines()[-lines:]).lstrip("\n")
 
 
-def print_start_screen(term, w: dict, settle: float) -> None:
+def runner_started(w: dict) -> bool:
+    """Whether this launch's runner ran: its announce, start record or exit receipt carries the launch's token."""
+    receipt = Path(w["exit_file"])
+    for path in (receipt.with_suffix(".runner.json"), receipt.with_suffix(".started.json"), receipt):
+        try:
+            if json.loads(read_bounded(path, RECEIPT_MAX)[0]).get("token") == w.get("token"):
+                return True
+        except (OSError, ValueError, AttributeError, RecursionError):  # a worker can write the run's folder
+            continue
+    return False
+
+
+def press_enter_unstarted(term, w: dict) -> bool:
+    """Press Enter in a worker's pane only while its runner has not run, so the key reaches the shell holding the
+    unrun launch line. The nudge file is claimed first and the runner announces itself before it looks for one
+    (runner_gate): a runner that starts meanwhile waits for this Enter and then discards it. False when it had
+    already started, so nothing was sent."""
+    nudge = Path(w["exit_file"]).with_suffix(".nudge.json")
+    fd = os.open(nudge, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, json.dumps({"token": w.get("token")}).encode())
+    finally:
+        os.close(fd)
+    if runner_started(w):
+        nudge.unlink(missing_ok=True)
+        return False
+    term.send(w, ["enter"])  # a failed or timed-out send keeps the nudge: a key cmux may still deliver late then
+    nudge.unlink(missing_ok=True)  # meets a runner that refuses to start its CLI (runner_gate), never the CLI
+    return True
+
+
+def runner_refused(w: dict) -> bool:
+    """Whether this launch's runner exited without starting its CLI because launch's Enter outlasted its wait."""
+    try:
+        data = json.loads(read_bounded(Path(w["exit_file"]), RECEIPT_MAX)[0])
+        return data.get("token") == w.get("token") and data.get("returncode") == NUDGE_REFUSED
+    except (OSError, ValueError, AttributeError, RecursionError):
+        return False
+
+
+def start_line(term, run: str, w: dict, waited: float) -> str | None:
+    """None once the runner has started. A terminal that types the launch line (cmux) can leave it at the new
+    shell's prompt unrun: with no start record, press Enter once in that pane and look again. Enter only reaches a
+    shell there: see press_enter_unstarted."""
+    if not getattr(term, "types_command", False) or not w.get("exit_file"):
+        return None
+    for _ in range(max(0, round(LAUNCH_START_GRACE_S - waited))):  # a short --settle still gives it the grace
+        if runner_started(w):
+            return None
+        time.sleep(1)
+    if runner_started(w):
+        return None
+    way_out = (f"its pane holds a shell, not the worker. fleet peek {run} {w['id']}, then fleet stop {run} {w['id']} "
+               f"and, once ps shows no `fleet _run` with token {w['token']}, fleet recover {run} {w['id']} --evidence "
+               "<file> before launching it again")
+    try:
+        if not press_enter_unstarted(term, w):
+            return None
+    except (FleetError, OSError, subprocess.TimeoutExpired) as e:
+        return f"NOT STARTED {w['id']}: no start record and Enter could not be sent ({one_line(e, 160)}); {way_out}"
+    time.sleep(LAUNCH_START_GRACE_S)
+    if runner_refused(w):
+        return (f"NOT STARTED {w['id']}: its runner would not start the worker while Fleet's Enter was still being "
+                f"sent; {way_out}")
+    if runner_started(w):
+        return (f"{w['id']}: its launch line sat unrun at the new shell's prompt; Fleet pressed Enter and its runner "
+                "started")
+    return (f"NOT STARTED {w['id']}: no start record {max(waited, LAUNCH_START_GRACE_S) + LAUNCH_START_GRACE_S:g}s "
+            f"after launch, even after Fleet pressed Enter: its launch line never ran; {way_out}")
+
+
+def print_start_screen(term, w: dict, settle: float, run: str | None = None) -> int:
     """Show what the new worker's screen holds a few seconds in, so the lead sees a login, trust, model or
-    permission prompt without spending a turn on fleet peek. Never fails the launch it follows."""
+    permission prompt without spending a turn on fleet peek; first, say whether the worker started at all.
+    The launch stands either way; 1 (the command's exit code) when its worker never started."""
     time.sleep(settle)
+    code = 0
+    if run and (line := start_line(term, run, w, settle)):
+        print(line)
+        code = 1 if line.startswith("NOT STARTED") else 0
+    if not settle:  # --settle 0: the start is still confirmed, the screen is not printed
+        return code
     try:
         screen = term.read(w, max(LAUNCH_SCREEN_LINES * 3, 60))  # as peek: padding must not hide it
     except (FleetError, OSError, subprocess.TimeoutExpired) as e:
         print(f"screen after {settle:g}s: unreadable ({str(e).strip()[:200]}); fleet peek it", file=sys.stderr)
-        return
+        return code
     tail = screen_tail(screen, LAUNCH_SCREEN_LINES)
     print(f"screen after {settle:g}s:\n" + "\n".join("  " + line if line else "" for line in tail.splitlines()) if tail
           else f"screen after {settle:g}s: empty; fleet peek it")
+    return code
 
 
 def pick_pane(panes: list[dict], retired: set[str], busy: set[str], lead_pane: str | None,
@@ -5602,7 +5740,8 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
                 events.append(f"UNREACHABLE {i} {w['surface']}: {str(e).strip()[:200]}; the tab may be closed")
             continue
         (seen / f"{i}.gone").unlink(missing_ok=True)  # readable again: a later failure is a new episode
-        if w.get("transport") == HEADLESS:
+        unrun = bool(getattr(terminal(state), "types_command", False) and w.get("exit_file")) and not runner_started(w)
+        if w.get("transport") == HEADLESS and not unrun:
             continue  # no prompt can stop it and its screen stays still while the CLI works; its exit wakes the lead
         marker = seen / f"{i}.screen"
         h = digest(screen.encode())
@@ -5616,7 +5755,11 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
             marker.write_text(f"{token}:{h}|{now}|0")
         elif flagged == "0" and now - since >= limit:
             marker.write_text(f"{token}:{h}|{since}|1")
-            if told < since:  # a PERMISSION or IDLE line already told the lead about this screen
+            if told < since and unrun:  # its launch line never ran: no CLI, so no prompt to answer
+                events.append(f"STALLED {i} never started: no start record after {int(now - since)}s, so its launch "
+                              f"line is sitting unrun at the shell prompt in its pane; fleet peek {state['run']} {i}, "
+                              f"then fleet stop and fleet recover before launching it again")
+            elif told < since:  # a PERMISSION or IDLE line already told the lead about this screen
                 events.append(f"STALLED {i} screen unchanged for {int(now - since)}s, likely at an approval prompt "
                               f"the owner answers in its pane (or a login, trust or usage limit screen); "
                               f"fleet peek {state['run']} {i}")
@@ -9149,9 +9292,12 @@ def launch_fanout(a, cfg) -> None:
                          f"entry; drop {', '.join(extra)}, or launch one {role} with {one}")
     if not unlaunched(state, a.id):
         raise FleetError(f"every {role} of {a.id} has launched; relaunch one with {one}")
-    launch_ready(argparse.Namespace(cmd="launch", run=a.run, ready=True, resume=False, pane=a.pane, id=None,
-                                    provider=None, tier=None, model=None, effort=None, family=None, settle=None,
-                                    extra_round=None, only={a.id}), cfg)
+    ready = argparse.Namespace(cmd="launch", run=a.run, ready=True, resume=False, pane=a.pane, id=None,
+                               provider=None, tier=None, model=None, effort=None, family=None, settle=None,
+                               extra_round=None, only={a.id})
+    launch_ready(ready, cfg)
+    if getattr(ready, "unlocked", None):  # its start check runs once main releases the lock
+        a.unlocked = ready.unlocked
 
 
 # ---------- fan-out wake ----------
@@ -13849,11 +13995,11 @@ def then_watch(a, cfg: dict, first: bool) -> None:
     start screen), so starting a dashboard never holds the lock."""
     repo, before = repo_root(), getattr(a, "unlocked", None)
 
-    def follow() -> None:
-        if before:
-            before()
+    def follow() -> int | None:
+        code = before() if before else None  # a launch's start check: 1 when its worker never started
         for line in watch_lines(repo, cfg, a.run, first):
             print(line)
+        return code
     a.unlocked = follow
 
 
@@ -14356,7 +14502,7 @@ def main(argv: list[str] | None = None) -> int:
             with mutation_lock(a):
                 code = a.fn(a, cfg) or 0
             if follow := getattr(a, "unlocked", None):
-                follow()
+                code = code or follow() or 0  # what runs after the lock can fail the command: NOT STARTED
             return code
         finally:
             if getattr(a, "run", None) is not None and a.cmd not in (*OWNER_VIEWS, "note") \

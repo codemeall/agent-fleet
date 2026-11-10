@@ -61,7 +61,7 @@ Give each ticket `context` (spec and testing decisions, glossary/ADR paths, owne
 - Resolve glossary/ADR paths from project configuration (`GLOSSARY.md`, `GLOSSARY-MAP.md` or, in older repositories, `CONTEXT.md`). Never invoke upstream `/implement`: it commits.
 - `fleet launch <run> <id> <provider> --tier <tier> [--model <model>] [--effort <effort>] [--family <family>]` must match the saved assignment. The CLI enforces blockers, active file ownership and capacity, and gives each worker its own pane ([placement](references/commands.md#launch)), never yours. With no free pane, launch refuses: stop a worker first. `--pane <ref|uuid|index>` picks the pane. Each launch runs its adapter's `worker` or `review` profile, and launch refuses one above `permission_ceiling`: tell the owner, never route around it.
 - `fleet hold [--reason <text>]` blocks new launches in this checkout while running workers continue; `fleet release` lifts it. Use either only when the owner asks. When launch refuses because of a hold, do not retry or stop workers: verify running ones as usual, tell the owner, and end your turn.
-- Launch prints the worker's screen a few seconds in: read it for a login, trust, model or permission prompt; never answer one. Don't peek to confirm a start (`fleet wait` reports a stuck one as `STALLED`); peek only when the launch screen or a wake line calls for it.
+- Launch prints the worker's screen a few seconds in: read it for a login, trust, model or permission prompt; never answer one. `NOT STARTED` (exit 1) means it never ran: stop, recover, relaunch. Don't peek to confirm a start; peek only when the launch screen or a wake line calls for it.
 
 ## 4. Watch and resolve blockers
 

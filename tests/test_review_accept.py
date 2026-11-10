@@ -74,14 +74,14 @@ class ReviewAccept(RuntimeCase):
         self.handed_back()
         seen = []
 
-        def screen(term, w, settle):
+        def screen(term, w, settle, run=None):
             with (self.repo / ".fleet/runs/.lock").open("a") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # raises while the review still holds it
                 fcntl.flock(lock, fcntl.LOCK_UN)
-            seen.append((w["id"], settle))
+            seen.append((w["id"], settle, run))
         with patch.object(fleet, "print_start_screen", side_effect=screen):
             self.review("--settle", "2")
-        self.assertEqual(seen, [("review-01", 2.0)])
+        self.assertEqual(seen, [("review-01", 2.0, "demo")])
 
     def test_review_takes_the_first_fitting_provider_in_prefer_then_pool_order(self):
         self.add_provider("second", "google")

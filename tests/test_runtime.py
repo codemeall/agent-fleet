@@ -28,6 +28,7 @@ loader = importlib.machinery.SourceFileLoader("fleet_runtime_tests", str(ROOT / 
 spec = importlib.util.spec_from_loader(loader.name, loader)
 fleet = importlib.util.module_from_spec(spec)
 loader.exec_module(fleet)
+REAL_START_LINE = fleet.start_line  # the harness stubs it: the fake cmux's runners always start
 
 
 class RuntimeCase(unittest.TestCase):
@@ -72,6 +73,7 @@ class RuntimeCase(unittest.TestCase):
 
         for mocker in (patch.object(fleet, "repo_root", return_value=self.repo),
                        patch.object(fleet, "LAUNCH_SETTLE_S", 0),  # no start-screen pause unless a test asks
+                       patch.object(fleet, "start_line", return_value=None),  # its runner started, unless a test asks
                        patch.object(fleet, "load_config", side_effect=lambda: copy.deepcopy(self.cfg)),
                        patch.object(fleet, "cmux", side_effect=self.fake_cmux),
                        patch.object(fleet, "sh", side_effect=shell)):
@@ -161,6 +163,12 @@ class RuntimeCase(unittest.TestCase):
     def receipt(self, ticket="01", returncode=0, token=None):
         worker = self.state()["workers"][ticket]
         Path(worker["exit_file"]).write_text(json.dumps({"token": token or worker["token"], "returncode": returncode}))
+
+    def started(self, ticket="01", token=None):
+        """What the worker's runner writes as it starts its CLI."""
+        worker = self.state()["workers"][ticket]
+        Path(worker["exit_file"]).with_suffix(".started.json").write_text(
+            json.dumps({"token": token or worker["token"], "wrapper_pid": 1, "child_pid": 2}))
 
     def verify(self, ticket="01", expected=0):
         return self.call("verify", "demo", ticket, "--evidence", str(self.evidence), expected=expected)
@@ -855,6 +863,7 @@ class Runtime(RuntimeCase):
     def test_wait_wakes_once_on_an_unchanged_screen_but_not_while_waiting_on_the_lead(self):
         self.setup_run()
         self.launch()
+        self.started()
         marker = self.repo / ".fleet/runs/demo/.seen/01.screen"
         self.assertEqual(self.scan(), [])                       # first sight starts the clock
         key, since, flagged = marker.read_text().split("|")
@@ -909,7 +918,8 @@ class Runtime(RuntimeCase):
                 return "banner\n" * 20 + "Do you trust the files in this folder?   \n\n\n\n  1. Yes, proceed\n" + "\n" * 30
             return real(*args, **kwargs)
 
-        with patch.object(fleet, "cmux", side_effect=cmux), patch.object(fleet.time, "sleep") as sleep:
+        with patch.object(fleet, "cmux", side_effect=cmux), patch.object(fleet.time, "sleep") as sleep, \
+                patch.object(fleet, "runner_started", return_value=True):          # its runner ran
             out = self.call("launch", "demo", "01", "writer", "--tier", "standard", "--settle", "3")
         self.assertIn("screen after 3s:\n", out)
         self.assertTrue(out.endswith("  Do you trust the files in this folder?\n\n    1. Yes, proceed\n"), out)
@@ -925,7 +935,8 @@ class Runtime(RuntimeCase):
                 raise fleet.FleetError("surface not found")
             return real(*args, **kwargs)
 
-        with patch.object(fleet, "cmux", side_effect=unreadable), patch.object(fleet.time, "sleep"):
+        with patch.object(fleet, "cmux", side_effect=unreadable), patch.object(fleet.time, "sleep"), \
+                patch.object(fleet, "runner_started", return_value=True):
             out = self.call("launch", "demo", "01", "writer", "--tier", "standard")   # LAUNCH_SETTLE_S is 0 here
             self.assertNotIn("screen after", out)
             self.call("stop", "demo", "01", "--timeout", "0", expected=1)
@@ -935,6 +946,211 @@ class Runtime(RuntimeCase):
         self.assertIn("screen after 1s: unreadable (surface not found); fleet peek it", out)  # the launch stands
         self.assertEqual(self.state()["workers"]["01"]["state"], "running")
         self.assertIn("settle must be between", self.call("launch", "demo", "02", "writer", "--settle", "31", expected=1))
+
+    def test_launch_presses_enter_once_when_the_launch_line_sits_unrun(self):
+        """cmux types the launch line into a new shell; typed before the shell is ready, it can sit at the prompt."""
+        self.setup_run()
+        real, enters = self.fake_cmux, []
+
+        def cmux(*args, **kwargs):
+            if args[:1] == ("send-key",) and args[-1] == "enter":
+                enters.append(args)
+                if runs_on_enter:
+                    self.started()
+            return real(*args, **kwargs)
+
+        def launch(expected=0):
+            enters.clear()
+            with patch.object(fleet, "cmux", side_effect=cmux), patch.object(fleet.time, "sleep"), \
+                    patch.object(fleet, "start_line", REAL_START_LINE):
+                return self.call("launch", "demo", "01", "writer", "--tier", "standard", "--settle", "5",
+                                 expected=expected)
+
+        def relaunch():
+            self.call("stop", "demo", "01", "--timeout", "0", expected=1)
+            self.receipt()
+            self.call("status", "demo")
+
+        runs_on_enter = True                       # Enter submits the parked line: the runner starts
+        out = launch()
+        self.assertEqual(len(enters), 1)
+        self.assertIn("01: its launch line sat unrun at the new shell's prompt; Fleet pressed Enter and its runner "
+                      "started", out)
+        self.assertNotIn("NOT STARTED", out)
+        self.assertIn("screen after 5s:", out)
+        relaunch()
+
+        runs_on_enter = False                      # Enter changes nothing: the lead hears it never ran, and it exits 1
+        out = launch(expected=1)
+        self.assertEqual(len(enters), 1)           # one Enter only, never a second keystroke
+        token = self.state()["workers"]["01"]["token"]
+        self.assertIn("NOT STARTED 01: no start record 8s after launch, even after Fleet pressed Enter", out)
+        self.assertIn(f"fleet peek demo 01, then fleet stop demo 01 and, once ps shows no `fleet _run` with token "
+                      f"{token}, fleet recover demo 01 --evidence <file>", out)
+        self.assertEqual(self.state()["workers"]["01"]["state"], "running")   # the launch stands for stop and recover
+        relaunch()
+
+        real_started = fleet.runner_started        # started on its own: no keystroke reaches the worker's CLI
+        with patch.object(fleet, "runner_started", side_effect=lambda w: True):
+            out = launch()
+        self.assertEqual(enters, [])
+        self.assertNotIn("Enter", out)
+        relaunch()
+        self.assertIs(fleet.runner_started, real_started)
+
+        with patch.object(fleet, "send_keys", side_effect=fleet.FleetError("surface not found")):
+            out = launch(expected=1)
+        self.assertIn("NOT STARTED 01: no start record and Enter could not be sent (surface not found)", out)
+        w = self.state()["workers"]["01"]                  # an uncertain send keeps its nudge: a late runner refuses
+        self.assertTrue(Path(w["exit_file"]).with_suffix(".nudge.json").exists())
+        relaunch()
+
+        def refused(*args, **kwargs):                      # the runner gave up on Enter and would not start its CLI
+            if args[:1] == ("send-key",):
+                w = self.state()["workers"]["01"]
+                self.started()
+                Path(w["exit_file"]).write_text(json.dumps({"token": w["token"], "returncode": fleet.NUDGE_REFUSED}))
+            return real(*args, **kwargs)
+        with patch.object(fleet, "cmux", side_effect=refused), patch.object(fleet.time, "sleep"), \
+                patch.object(fleet, "start_line", REAL_START_LINE):
+            out = self.call("launch", "demo", "01", "writer", "--tier", "standard", "--settle", "5", expected=1)
+        self.assertIn("NOT STARTED 01: its runner would not start the worker while Fleet's Enter was still being sent",
+                      out)
+
+    def test_enter_is_never_sent_once_the_runner_has_announced_itself(self):
+        """launch claims the nudge, then checks: a runner that announced first gets no keystroke, and one that
+        announces later finds the nudge and waits for it (runner_gate)."""
+        self.setup_run()
+        self.launch()
+        w = self.state()["workers"]["01"]
+        nudge = Path(w["exit_file"]).with_suffix(".nudge.json")
+        sent = []
+        term = fleet.Cmux({"workspace": "workspace:1"})
+
+        def send(workspace, surface, items):
+            sent.append(items)
+            self.assertTrue(nudge.exists())                     # claimed for the whole send
+        with patch.object(fleet, "send_keys", side_effect=send):
+            self.assertTrue(fleet.press_enter_unstarted(term, w))
+            self.assertEqual(sent, [["enter"]])
+            self.assertFalse(nudge.exists())                    # released after
+            fleet.atomic_json(Path(w["exit_file"]).with_suffix(".runner.json"), {"token": w["token"]})
+            self.assertFalse(fleet.press_enter_unstarted(term, w))
+        self.assertEqual(sent, [["enter"]])
+        self.assertFalse(nudge.exists())
+
+    def test_the_runner_waits_out_a_nudge_then_drops_queued_keys(self):
+        receipt = self.repo / "exits" / "01.tok.json"
+        receipt.parent.mkdir()
+        nudge = receipt.with_suffix(".nudge.json")
+        nudge.write_text("{}")
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        tty = os.fdopen(slave, "r")
+        self.addCleanup(tty.close)
+        os.write(master, b"\r")                                 # launch's Enter, queued for whatever reads next
+        threading.Timer(0.3, nudge.unlink).start()
+        began = time.monotonic()
+        with patch.object(fleet.sys, "stdin", tty):
+            fleet.runner_gate(receipt, "tok")
+        self.assertGreaterEqual(time.monotonic() - began, 0.25)  # it waited for the nudge to end
+        self.assertEqual(json.loads(receipt.with_suffix(".runner.json").read_text())["token"], "tok")
+        os.set_blocking(slave, False)
+        with self.assertRaises(BlockingIOError):
+            os.read(slave, 10)                                  # the queued Enter never reaches the CLI
+        os.write(master, b"\r")                                 # no nudge: it still drops what is queued
+        with patch.object(fleet.sys, "stdin", tty):
+            fleet.runner_gate(receipt, "tok")
+        with self.assertRaises(BlockingIOError):
+            os.read(slave, 10)
+
+    def test_a_nudge_that_outlasts_the_wait_keeps_the_cli_from_starting(self):
+        """A launcher that never finishes its Enter (died mid-send, or cmux slower than its call limit): the key
+        could land after any discard, so the runner refuses rather than start the CLI."""
+        receipt = self.repo / "exits" / "01.tok.json"
+        receipt.parent.mkdir()
+        receipt.with_suffix(".nudge.json").write_text("{}")
+        ran = self.repo / "ran"
+        with patch.object(fleet, "NUDGE_WAIT_S", 0.2):
+            self.assertFalse(fleet.runner_gate(receipt, "tok"))
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                code = fleet.run_child([str(receipt), "tok", f"touch {shlex.quote(str(ran))}"])
+        self.assertEqual(code, fleet.NUDGE_REFUSED)
+        self.assertFalse(ran.exists())                              # the CLI never started
+        self.assertEqual(json.loads(receipt.read_text()), {"token": "tok", "returncode": fleet.NUDGE_REFUSED})
+        self.assertIn("the worker was not started", err.getvalue())
+        receipt.unlink()
+        receipt.with_suffix(".nudge.json").unlink()                 # no nudge: it starts as always
+        self.assertEqual(fleet.run_child([str(receipt), "tok", f"touch {shlex.quote(str(ran))}"]), 0)
+        self.assertTrue(ran.exists())
+
+    def test_settle_zero_and_ready_launches_still_confirm_the_start(self):
+        self.setup_run()
+
+        def stop():
+            self.call("stop", "demo", "01", "--timeout", "0", expected=1)
+            self.receipt()
+            self.call("status", "demo")
+        with patch.object(fleet, "start_line", REAL_START_LINE), patch.object(fleet.time, "sleep"):
+            out = self.call("launch", "demo", "--ready", expected=1)
+            self.assertIn("LAUNCHED 01", out)
+            self.assertIn("NOT STARTED 01:", out)
+            self.assertNotIn("screen after", out)
+            stop()
+            out = self.call("launch", "demo", "01", "writer", "--tier", "standard", "--settle", "0", expected=1)
+            self.assertIn("NOT STARTED 01:", out)
+            self.assertNotIn("screen after", out)
+            stop()
+            with patch.object(fleet, "runner_started", return_value=True):
+                self.assertNotIn("STARTED", self.call("launch", "demo", "--ready"))
+
+    def test_runner_started_reads_only_this_launchs_records(self):
+        self.setup_run()
+        self.launch()
+        w = self.state()["workers"]["01"]
+        self.assertFalse(fleet.runner_started(w))
+        self.started(token="an-earlier-launch")
+        self.assertFalse(fleet.runner_started(w))
+        Path(w["exit_file"]).with_suffix(".started.json").write_text("[1]")   # a worker can write the run's folder
+        self.assertFalse(fleet.runner_started(w))
+        Path(w["exit_file"]).with_suffix(".started.json").write_text("[" * 20000 + "]" * 20000)  # too deep to parse
+        self.assertFalse(fleet.runner_started(w))
+        self.receipt()                                                        # exited already: it ran
+        self.assertTrue(fleet.runner_started(w))
+        Path(w["exit_file"]).unlink()
+        self.started()
+        self.assertTrue(fleet.runner_started(w))
+
+    def test_wait_says_a_worker_never_started_when_its_runner_left_no_record(self):
+        self.setup_run()
+        self.launch()
+        marker = self.repo / ".fleet/runs/demo/.seen/01.screen"
+        self.assertEqual(self.scan(), [])
+        key, since, flagged = marker.read_text().split("|")
+        marker.write_text(f"{key}|{float(since) - 61}|{flagged}")
+        events = self.scan()
+        self.assertEqual(len(events), 1)
+        self.assertIn("STALLED 01 never started: no start record after 6", events[0])
+        self.assertIn("fleet peek demo 01, then fleet stop and fleet recover", events[0])
+        self.assertNotIn("approval prompt", events[0])
+
+    def test_wait_says_a_headless_worker_never_started_too(self):
+        self.setup_run()
+        self.launch()
+        state = self.state()
+        state["workers"]["01"]["transport"] = fleet.HEADLESS
+        fleet.save_run(self.repo, "demo", state)
+        marker = self.repo / ".fleet/runs/demo/.seen/01.screen"
+        self.assertEqual(self.scan(), [])
+        key, since, flagged = marker.read_text().split("|")
+        marker.write_text(f"{key}|{float(since) - 61}|{flagged}")
+        [line] = self.scan()
+        self.assertIn("STALLED 01 never started", line)
+        marker.unlink()
+        self.started()                                          # running: a headless screen stays still while it works
+        self.assertEqual(self.scan(), [])
+        self.assertFalse(marker.exists())
 
     def test_wait_names_the_lines_of_a_summary_first_report(self):
         self.setup_run()
