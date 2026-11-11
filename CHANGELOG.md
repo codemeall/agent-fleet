@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.0-preview.36
+
+Workers no longer inherit the lead's session, `fleet cost` counts Claude and Codex workers' tokens, and a Codex worker no longer wakes the lead with a false `IDLE`.
+
+- **Workers drop the lead's session markers.** Fleet's tmux server keeps the environment of the lead that started it, so every later worker got that lead's `CLAUDE_CODE_CHILD_SESSION`, messaging socket and token, plugin data and session IDs. Each worker's runner now removes them before its CLI starts, under tmux and cmux. Gate checks drop them too. Your own settings (`CLAUDE_CONFIG_DIR`, Bedrock, API keys in your shell) pass through as before.
+- **Claude workers' tokens are counted again.** `CLAUDE_CODE_CHILD_SESSION` made an interactive Claude worker write no transcript, so `fleet cost` showed its tokens as unknown. With the markers gone the transcript is written. The Stop hook also records the transcript's path, which `cost` reads when the log is not under the session ID.
+- **Codex workers' tokens are counted.** The notify program now gets the worker's Codex home and records its thread's rollout. `cost` reads the launch's tokens from the rollout's `token_count` totals (`tokens_source: rollout`), cached input as cache reads.
+- **No false `IDLE` from Codex's title thread.** Codex names each session in a side thread of its own, whose turn also completes. A turn whose thread has no rollout, or whose last message is only `{"title": …}`, now logs `side-turn`, which `wait` ignores. A turn Fleet cannot place still wakes `IDLE`.
+- **Workers are told not to load the fleet skill.** The launch prompt says the prompt file is complete, so a worker does not read the fleet skill or memory files first, as a Codex worker did.
+- **Light-tier Codex runs at `medium` effort**, not `high`, like Claude's light tier. Set `[providers.codex] tiers.light` to keep `high`.
+
 ## 0.1.0-preview.35
 
 A cmux worker whose launch line never ran no longer looks launched.

@@ -250,3 +250,23 @@ class TmuxLive(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LeadMarkers(unittest.TestCase):
+    """A worker never inherits the lead's session markers, from its terminal or a tmux server a lead started."""
+
+    def test_worker_env_drops_markers_and_keeps_the_owners_settings(self):
+        lead = {"CLAUDE_CODE_CHILD_SESSION": "1", "CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/cc-socks/1.sock",
+                "CLAUDE_CODE_MESSAGING_TOKEN": "t", "CLAUDE_CODE_SESSION_ATTENDED": "1", "CLAUDE_PID": "1",
+                "CLAUDE_EFFORT": "high", "CLAUDE_PLUGIN_DATA": "/p", "CLAUDE_CODE_EXECPATH": "/x",
+                "CODEX_COMPANION_SESSION_ID": "s", "CLAUDE_AGENT_SDK_VERSION": "0.3", "CLAUDECODE": "1",
+                "CODEX_THREAD_ID": "t"}
+        owner = {"PATH": "/usr/bin", "CLAUDE_CONFIG_DIR": "/c", "CODEX_HOME": "/h", "CLAUDE_CODE_USE_BEDROCK": "1",
+                 "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+                 "ANTHROPIC_API_KEY": "k", "TMUX": "/tmp/tmux,1,0", "CMUX_SURFACE_ID": "s1"}
+        receipt = Path("/r/.fleet/runs/demo/exits/01.abc.json")
+        with patch.dict(os.environ, {**lead, **owner}, clear=True):
+            env = fleet.worker_env(receipt)
+            checks = fleet.check_env()
+        self.assertEqual(env, {**owner, "FLEET_WORKER": "demo/01"})
+        self.assertEqual(checks, {k: v for k, v in owner.items() if k not in ("TMUX", "CMUX_SURFACE_ID")})

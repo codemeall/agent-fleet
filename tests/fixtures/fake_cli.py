@@ -158,15 +158,17 @@ NOTIFY = []  # codex's notify program, once its -c override parsed
 
 def codex_notify(value: str) -> list[str]:
     """Codex parses a -c value as TOML (codex-rs/utils/cli/src/config_override.rs) and `notify` must be an array of
-    strings (config_toml.rs). Fleet's is exactly <python> <fleet> _notify <events file> <token>, with absolute paths
-    to files that exist (the events file's folder) and an events file named <ticket>.jsonl under events/."""
+    strings (config_toml.rs). Fleet's is exactly <python> <fleet> _notify <events file> <token> [<codex home>], with
+    absolute paths to files that exist (the events file's folder) and an events file named <ticket>.jsonl under
+    events/."""
     try:
         argv = tomllib.loads("notify = " + value)["notify"]
     except tomllib.TOMLDecodeError as e:
         raise Refused(f"-c notify value {value!r} is not TOML: {e}") from None
-    if not (isinstance(argv, list) and len(argv) == 5 and all(isinstance(a, str) for a in argv)):
-        raise Refused(f"-c notify {argv!r} is not [python, fleet, _notify, events file, token]")
-    python, fleet, sub, events, token = argv
+    if not (isinstance(argv, list) and len(argv) in (5, 6) and all(isinstance(a, str) for a in argv)
+            and (len(argv) == 5 or os.path.isabs(argv[5]))):
+        raise Refused(f"-c notify {argv!r} is not [python, fleet, _notify, events file, token, (codex home)]")
+    python, fleet, sub, events, token = argv[:5]
     if sub != "_notify" or not re.fullmatch(r"[0-9a-f]{32}", token):
         raise Refused(f"-c notify {argv!r} does not run `fleet _notify <events file> <token>`")
     for path in (python, fleet):
