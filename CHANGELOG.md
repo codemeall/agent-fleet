@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.36
 
 Workers no longer inherit the lead's session, `fleet cost` counts Claude and Codex workers' tokens, and a Codex worker no longer wakes the lead with a false `IDLE`.
 
