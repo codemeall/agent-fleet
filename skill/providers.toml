@@ -138,7 +138,7 @@ plugins = false
 max = 2
 tiers.heavy = { model = "gpt-6.1-sol", effort = "high" }
 tiers.standard = { model = "gpt-6.1-sol", effort = "medium" }
-tiers.light = { model = "gpt-6-luna", effort = "high" }
+tiers.light = { model = "gpt-6-luna", effort = "medium" }
 tiers.review = { model = "gpt-6.1-sol", effort = "high" }
 
 [providers.cursor]

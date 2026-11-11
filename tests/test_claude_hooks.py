@@ -336,6 +336,14 @@ class WaitEvents(HookCase):
         self.assertEqual([e["event"] for e in self.events()], ["turn-ended", "idle"])
         self.assertEqual(self.keystrokes(), [])
 
+    def test_stop_logs_the_transcript_it_names(self):
+        self.setup_run()
+        self.launch()
+        self.hook("Stop", stop("Working."))
+        [e] = self.events()
+        self.assertEqual((e["event"], e["transcript"]),
+                         ("turn-ended", "/home/user/.claude/projects/x/transcript.jsonl"))
+
     def test_idle_after_a_hand_back_is_quiet(self):
         self.setup_run()
         self.launch()

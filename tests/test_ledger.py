@@ -172,6 +172,55 @@ class Tokens(LedgerCase):
         self.assertNotIn("in 0", out)
 
 
+    def log_event(self, ticket, **fields):
+        """An event the worker's Stop hook or notify program appended, for its current launch."""
+        events = self.repo / ".fleet/runs/demo/events" / f"{ticket}.jsonl"
+        events.parent.mkdir(exist_ok=True)
+        with events.open("a") as fh:
+            fh.write(json.dumps({"event": "turn-ended", "token": self.state()["workers"][ticket]["token"],
+                                 "at": time.time(), **fields}) + "\n")
+
+    def test_the_transcript_a_stop_hook_named_counts_when_the_session_log_is_missing(self):
+        self.claude_writer()
+        self.setup_run()
+        self.launch()
+        start = self.state()["workers"]["01"]["launched_at"]
+        elsewhere = Path(tempfile.mkdtemp(dir=self.temp.name)) / "renamed.jsonl"
+        elsewhere.write_text(json.dumps(self.call_line("m1", start + 5, 40, 9, cache_read=300)) + "\n")
+        self.log_event("01", transcript=str(elsewhere))
+        self.exit_at("01", start + 30)
+        self.call("cost", "demo")
+        e = self.state()["ledger"][0]
+        self.assertEqual(e["tokens"], {"input": 40, "output": 9, "cache_read": 300, "cache_write": 0})
+        self.assertEqual(e["tokens_source"], "session log")
+
+    @staticmethod
+    def token_count(at, inp, cached, out):
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(at))
+        return {"timestamp": stamp, "type": "event_msg", "payload": {"type": "token_count", "info": {
+            "total_token_usage": {"input_tokens": inp, "cached_input_tokens": cached, "cache_write_input_tokens": 0,
+                                  "output_tokens": out, "reasoning_output_tokens": 1, "total_tokens": inp + out}}}}
+
+    def test_a_codex_workers_tokens_come_from_its_rollout(self):
+        self.setup_run()
+        self.launch()                                       # no session: Codex names its own thread
+        start = self.state()["workers"]["01"]["launched_at"]
+        rollout = Path(tempfile.mkdtemp(dir=self.temp.name)) / "rollout-2026-11-11T13-57-40-t1.jsonl"
+        lines = [self.token_count(start - 600, 1000, 800, 50),   # an earlier launch on the same thread
+                 {"timestamp": "2026-11-11T08:28:00Z", "type": "event_msg", "payload": {"type": "agent_message"}},
+                 self.token_count(start + 5, 31000, 28000, 300),
+                 self.token_count(start + 20, 128075, 105856, 1384),
+                 self.token_count(start + 900, 999999, 0, 9)]  # after this launch ended
+        rollout.write_text("".join(json.dumps(x) + "\n" for x in lines) + "{cut off")
+        self.log_event("01", rollout=str(rollout))
+        self.exit_at("01", start + 30)
+        out = self.call("cost", "demo")
+        e = self.state()["ledger"][0]
+        self.assertEqual(e["tokens"], {"input": 22019, "output": 1334, "cache_read": 105056})
+        self.assertEqual(e["tokens_source"], "rollout")
+        self.assertNotIn("tokens unknown", out)
+
+
 class Cost(LedgerCase):
     def test_cost_prints_tickets_totals_and_caps_as_text_and_json(self):
         self.claude_writer()

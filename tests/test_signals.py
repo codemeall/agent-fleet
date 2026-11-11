@@ -177,6 +177,44 @@ class Notify(unittest.TestCase):
         self.assertLess(elapsed, 5)
         self.assertEqual(len(self.logged()), 1)
 
+    def codex_home(self, *threads) -> Path:
+        """A Codex home whose sessions folder holds a rollout for each of `threads`."""
+        home = self.dir.parent / "codex home"
+        day = home / "sessions/2026/11/11"
+        day.mkdir(parents=True)
+        for thread in threads:
+            (day / f"rollout-2026-11-11T13-57-40-{thread}.jsonl").write_text("{}\n")
+        return home
+
+    def test_a_turn_on_the_workers_thread_logs_its_rollout(self):
+        thread = "b5f6c1c2-1111-2222-3333-444455556666"
+        home = self.codex_home(thread)
+        self.assertEqual(self.notify(str(self.events), "tok", str(home), turn_complete("Done.")).returncode, 0)
+        [e] = self.logged()
+        self.assertEqual(e["event"], "turn-ended")
+        self.assertEqual(e["rollout"], str(home / f"sessions/2026/11/11/rollout-2026-11-11T13-57-40-{thread}.jsonl"))
+
+    def test_a_side_thread_with_no_rollout_logs_side_turn(self):
+        home = self.codex_home("01a1c9b8-49ac-7df2-8761-bf8b100b93ab")  # the worker's thread, not this one
+        self.notify(str(self.events), "tok", str(home), turn_complete("Reading the task."))
+        self.notify(str(self.events), "tok", turn_complete('{"title":"Follow worker instructions"}'))  # no home
+        self.assertEqual([e["event"] for e in self.logged()], ["side-turn", "side-turn"])
+
+    def test_a_turn_it_cannot_place_still_ends_the_turn(self):
+        for home in (str(self.dir.parent / "no such home"), ""):
+            with self.subTest(home=home):
+                self.notify(str(self.events), "tok", home, turn_complete("Should I go on?"))
+        self.notify(str(self.events), "tok", str(self.codex_home()), turn_complete("x", **{"thread-id": "../../etc"}))
+        stale = self.dir.parent / "stale home"  # rollouts there, none written lately: Codex may write elsewhere now
+        (stale / "sessions/2026/01/01").mkdir(parents=True)
+        old = stale / "sessions/2026/01/01/rollout-2026-01-01T00-00-00-other.jsonl"
+        old.write_text("{}\n")
+        os.utime(old, (time.time() - 3600, time.time() - 3600))
+        self.notify(str(self.events), "tok", str(stale), turn_complete("Still working?"))
+        self.notify(str(self.events), "tok", turn_complete('{"title": "x", "more": 1}'))
+        self.assertEqual([e["event"] for e in self.logged()], ["turn-ended"] * 5)
+        self.assertNotIn("rollout", self.logged()[0])
+
 
 class Doctor(unittest.TestCase):
     def fake(self, tmp: str, text: str) -> str:
@@ -250,6 +288,21 @@ class CodexWait(RuntimeCase):
         self.assertNotIn("hooks", w)  # no Claude settings, scope file or guard
         self.assertEqual(notify_argv(w["command"]),
                          [sys.executable, str(FLEET.resolve()), "_notify", str(d / "events/01.jsonl"), w["token"]])
+
+    def test_a_codex_side_thread_never_wakes_idle(self):
+        home = Path(tempfile.mkdtemp(dir=self.temp.name)) / "codex-home"
+        (home / "sessions/2026/11/11").mkdir(parents=True)
+        worker = home / "sessions/2026/11/11/rollout-x-01a1c9b8-49ac-7df2-8761-bf8b100b93ab.jsonl"
+        worker.write_text("{}\n")  # the worker's own thread, written as it works
+        self.cfg["providers"]["writer"].update(account_env="CODEX_HOME", env={"CODEX_HOME": str(home)})
+        self.setup_run()
+        self.launch()
+        self.assertEqual(notify_argv(self.worker_rec()["command"])[-1], str(home))  # the worker's own home
+        self.end_turn("Reading the task.")  # turn_complete's thread has no rollout here: Codex's title thread
+        self.assertIn("TIMEOUT", self.wait(2))
+        worker.rename(home / "sessions/2026/11/11/rollout-x-b5f6c1c2-1111-2222-3333-444455556666.jsonl")
+        self.end_turn("Should I go on?")
+        self.assertIn("IDLE 01: Codex ended its turn", self.wait())
 
     def test_a_turn_that_ends_without_a_hand_back_wakes_idle_with_its_last_words(self):
         self.setup_run()
