@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.37
 
 Fleet no longer approves a worker's pending command. A Codex worker near its usage limit stops on the first `fleet stop` and keeps its model, and a stale `defaults.workspace` no longer fails `fleet init`.
 
