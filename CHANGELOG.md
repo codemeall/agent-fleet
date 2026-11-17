@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.38
 
 The Claude Code plugin shows your workers at the prompt with no install step, and Cursor's CLI can show them in its status line.
 
