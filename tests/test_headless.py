@@ -6,7 +6,9 @@ saved as its report, its usage recorded in the ledger by reconcile. These tests 
 (tests/fixtures/fake_headless.py) that accept only the shipped headless lines and print JSON shaped like the real
 CLIs' output; they prove the lines' shape and Fleet's handling, not that a real CLI version or account accepts them.
 """
+import contextlib
 import copy
+import io
 import json
 import os
 import re
@@ -246,7 +248,11 @@ class HeadlessRuntime(RuntimeCase):
         return self.call("wait", "demo", "--timeout", "5", "--interval", "1", "--settle", "0", "--stall", "0")
 
     def ledger(self, i="review-01"):
-        return [e for e in json.loads(self.call("cost", "demo", "--json"))["ledger"] if e["worker"] == i][-1]
+        out = io.StringIO()  # stdout alone, as a program reading the JSON takes it: stderr is for notices
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()) as err:
+            code = fleet.main(["cost", "demo", "--json"])
+        self.assertEqual(code, 0, err.getvalue())
+        return [e for e in json.loads(out.getvalue())["ledger"] if e["worker"] == i][-1]
 
     def test_a_headless_reviewers_final_message_is_its_report_and_wait_wakes_on_it(self):
         # The headless reviewer is what this covers; the writer's report has no header, so the run starts

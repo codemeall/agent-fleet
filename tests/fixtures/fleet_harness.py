@@ -37,6 +37,10 @@ class FleetCase(unittest.TestCase):
         self.git("config", "user.email", "t@example.invalid")
         self.git("config", "user.name", "t")
         self.git("config", "commit.gpgsign", "false")
+        # No background maintenance after the commit below: its .git/objects/maintenance.lock comes and goes while
+        # a test compares the repository's files before and after.
+        self.git("config", "maintenance.auto", "false")
+        self.git("config", "gc.auto", "0")
         (self.repo / "a.txt").write_text("base\n")
         self.git("add", "a.txt")
         self.git("commit", "-qm", "base")
