@@ -92,7 +92,7 @@ class Field(unittest.TestCase):
     def test_the_codex_line_carries_notify_only_with_signals(self):
         p = SHIPPED["providers"]["codex"]
         before = ("env -u CODEX_HOME codex -m m -c model_reasoning_effort=high -c check_for_update_on_startup=false "
-                  "-s workspace-write -a on-request go")
+                  "-c notice.hide_rate_limit_model_nudge=true -s workspace-write -a on-request go")
         self.assertEqual(fleet.build_launch(p, "m", "high", "go"), before)  # the line from before signals
         events = "/r/.fleet/runs/demo/events/01.jsonl"
         line = fleet.build_launch(p, "m", "high", "go", signals=fleet.notify_args(events, "ab" * 16))

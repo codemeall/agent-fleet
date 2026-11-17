@@ -351,6 +351,23 @@ class Lifecycle(RuntimeCase):
         self.init()
         self.assertEqual((self.repo / ".fleet/.gitignore").read_text(), "notes/\nruns/\n")
 
+    def init_named(self, run):
+        return self.call("init", run, "--workspace", "workspace:1", "--review", "off", *self.off_reason("off"))
+
+    def test_init_asks_the_owner_about_an_untracked_fleet_gitignore_until_it_is_settled(self):
+        note = "note: .fleet/.gitignore keeps run state out of Git"
+        self.assertIn(note, self.init_named("demo"))
+        self.assertIn("Ask them which", self.init_named("demo-2"))  # still undecided: said again
+        self.git("add", ".fleet/.gitignore")
+        self.git("commit", "-qm", "track Fleet's ignore file")
+        self.assertNotIn(note, self.init_named("demo-3"))
+
+    def test_init_says_nothing_once_fleet_is_excluded_locally(self):
+        exclude = self.repo / ".git/info/exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text(".fleet/\n")
+        self.assertNotIn(".fleet/.gitignore keeps", self.init_named("demo"))
+
 
 if __name__ == "__main__":
     import unittest

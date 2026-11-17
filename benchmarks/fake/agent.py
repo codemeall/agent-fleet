@@ -201,7 +201,7 @@ def worker(cli: str, argv: list[str]) -> int:
                                    "message": {"id": "msg_fake", "usage": usage}}) + "\n")
     print(f"fake {cli} {wid} handed back", flush=True)
     for line in sys.stdin:
-        if line.strip() in ("/exit", "/quit"):
+        if line.strip().lstrip("\x1b") in ("/exit", "/quit"):  # the quit keys start with Escape, glued to the line
             return 0
     return 0
 

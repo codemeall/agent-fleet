@@ -25,6 +25,11 @@ only when the expectation's "warm_after" names that earlier ticket, the line nam
 and report, and the session is resumed (--resume), and it refuses a warm line nobody expected. A --resume of a
 session listed in "unknown_sessions" prints Claude's "No conversation found" line and exits 1, as a lost session does.
 
+An Escape key reaches the fake glued to the next line it reads (`\x1b/quit`); it is a no-op unless a prompt is open.
+"approval_prompt": true makes the fake end its turn on an approval prompt after its report, as a real CLI asks before
+a command: its screen shows the CLI's own prompt footer, Escape cancels it (No), and any other input answers Yes,
+which the fake logs as an error, since Fleet must never approve a command for the owner.
+
 For tests/test_smoke.py: $FAKE_CLI_EXPECT may hold one expectation per CLI under "by_cli"; a writer whose prompt
 carries a `fleet smoke` check (`grep -qx '<line>' smoke/<name>.txt`) writes that file first; and a CLI named in
 $FAKE_CLI_STALL (comma-separated) never writes its report, like a CLI stuck at a login or trust prompt.
@@ -57,6 +62,12 @@ GRAMMAR = {
     "opencode": {"flags": {"--model": True, "--prompt": True}, "prompt": "--prompt", "quit": "/exit"},
 }
 QUITS = {"/exit", "/quit"}
+# What each CLI's approval prompt shows, as checked live (Claude Code 2.1.326, Codex 0.167.0).
+APPROVAL_PROMPTS = {
+    "claude": "Do you want to proceed?\n> 1. Yes\n  2. No\nEsc to cancel \u00b7 Tab to amend",
+    "codex": "Would you like to run the following command?\n> 1. Yes, proceed (y)\n  2. No (esc)\n"
+             "Press enter to confirm or esc to cancel",
+}
 
 
 class Refused(Exception):
@@ -235,7 +246,8 @@ def check(cli: str, flags: dict, positional: list[str], want: dict) -> str:
             if not eq or key in overrides:
                 raise Refused(f"bad or repeated -c override {item!r}")
             overrides[key] = value
-        expected = {"model_reasoning_effort": effort, "check_for_update_on_startup": "false"}
+        expected = {"model_reasoning_effort": effort, "check_for_update_on_startup": "false",
+                    "notice.hide_rate_limit_model_nudge": "true"}
         if want.get("trust_repo"):
             expected["projects"] = "{" + json.dumps(want["trust_repo"]) + '={trust_level="trusted"}}'
         if "notify" in overrides:
@@ -375,9 +387,24 @@ def main() -> int:
                            "session_crons": []})
         codex_turn_complete(f"Report written for {ticket}.", ticket)
         print(f"fake {cli} working on {ticket}", flush=True)
+    asking = bool(want.get("approval_prompt"))
+    if asking:
+        print(APPROVAL_PROMPTS[cli], flush=True)
     quit_word = GRAMMAR[cli]["quit"]
     for line in sys.stdin:
         line = line.strip()
+        escaped = line.startswith("\x1b")
+        line = line.lstrip("\x1b")
+        if asking:
+            asking = False
+            if escaped:
+                print(f"fake {cli} prompt cancelled (No)", flush=True)
+            else:
+                message = f"FAKE {cli}: the approval prompt was answered Yes by {line!r}"
+                print(message, flush=True)
+                with (log / f"{cli}.errors").open("a") as fh:
+                    fh.write(message + "\n")
+                continue  # the keys went to the prompt, not to the composer
         if line == quit_word:
             print(f"fake {cli} quits", flush=True)
             return 0

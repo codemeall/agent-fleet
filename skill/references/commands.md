@@ -429,6 +429,8 @@ Appends the message as `## Message N (<time>)` to the ticket's inbox, `.fleet/ru
 Lead message 2: read "## Message 2" in /repo/.fleet/runs/settings/inbox/api-client.md, then continue.
 ```
 
+While the worker's screen shows an approval prompt or a menu (its adapter's [`prompt_marks`](providers.md#prompts-fleet-never-answers)), send refuses, saves nothing and prints the bottom of the screen: the Enter would answer the prompt for the owner, usually Yes. The owner answers it in the worker's pane (`fleet agents`); then send the same message again. `grant` and `approve` refuse the same way.
+
 A [fan-out](#fan-out) or [best-of-two](#best-of-two) ticket's own ID has no worker to read its inbox, so send refuses it and names the IDs that do: its investigators or writers, and its judges. `--findings` on a best-of-two ticket is refused too, since its judge is its review.
 
 So a message can span lines and still arrive as one input, and every message stays on record. Numbers continue across relaunches of the same ticket. Every worker, investigator and reviewer prompt, and the `launch --resume` line, names the inbox and tells the worker to read it when it starts. `wait` then expects a response, so a silent worker shows as `STALLED`.
@@ -1001,7 +1003,7 @@ accept_checks = [{run = "npm test", cwd = ".", timeout = 900}, {run = "npm run t
 fleet stop <run> <id ...> | --all [--close] [--timeout <seconds>]
 ```
 
-A [fan-out](#fan-out) ticket's ID stands for its launched investigators and judges. Sends each worker its quit keys (Ctrl-C for a [headless](providers.md#headless-reviewers) run, whose runner then ends the CLI and leaves no report) and waits up to `--timeout` seconds (default 10, at most 60) for a confirmed exit. A failed stop marks the worker `stop-failed` and keeps its slot. `--close` closes the tab or tmux window, only after a confirmed exit; one already closed counts as closed.
+A [fan-out](#fan-out) ticket's ID stands for its launched investigators and judges. Sends each worker its quit keys (Ctrl-C for a [headless](providers.md#headless-reviewers) run, whose runner then ends the CLI and leaves no report) and waits up to `--timeout` seconds (default 10, at most 60) for a confirmed exit. Claude's and Codex's quit keys start with Escape, which answers an open approval prompt No, so a stop never approves a pending command ([why](providers.md#prompts-fleet-never-answers)). A failed stop marks the worker `stop-failed`, keeps its slot and prints the last 5 lines of its screen, so you can see what it is showing without a `peek` ([recover](examples.md#7-recover-a-worker-whose-exit-cannot-be-confirmed)). `--close` closes the tab or tmux window, only after a confirmed exit; one already closed counts as closed.
 
 **Use:** before capturing a review diff, before verifying, after a reviewer finishes, and with `--all` before the machine, cmux or the tmux server shuts down.
 

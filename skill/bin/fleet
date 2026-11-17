@@ -33,7 +33,7 @@ import time
 import tomllib
 from pathlib import Path
 
-VERSION = "0.1.0-preview.36"  # bump with package.json on release; tests/test_install.py checks they match
+VERSION = "0.1.0-preview.37"  # bump with package.json on release; tests/test_install.py checks they match
 SKILL_DIR = Path(__file__).resolve().parent.parent
 USER_CONFIG = Path(os.environ.get("FLEET_CONFIG", "~/.config/agent-fleet/config.toml")).expanduser()
 HARNESS_SKILL_DIRS = {
@@ -166,7 +166,7 @@ ADAPTER_FIELDS = (  # every adapter field the providers.toml header documents, p
     "enabled", "placeholder", "extends", "bin", "bin_aliases", "launch", "profiles", "session", "resume", "quit",
     "login", "login_ok", "account_env", "env", "trust", "models", "model_config", "default_home", "model_note",
     "models_allow", "model_families", "family_prefixes", "efforts", "family", "plugins", "max", "tiers",
-    "hooks", "signals", "headless", "review_transport", "add_dir")
+    "hooks", "signals", "headless", "review_transport", "add_dir", "prompt_marks")
 TIER_FIELDS = ("model", "effort", "family")
 PROFILE_FIELDS = ("args", "level")
 
@@ -329,6 +329,9 @@ def load_config(user_path: Path | None = None) -> dict:
         aliases = adapter.get("bin_aliases", [])
         if not (isinstance(aliases, list) and all(isinstance(b, str) for b in aliases)):
             raise FleetError(f"{name}.bin_aliases must be a list of executable names")
+        marks = adapter.get("prompt_marks", [])
+        if not (isinstance(marks, list) and all(isinstance(m, str) and m.strip() for m in marks)):
+            raise FleetError(f"{name}.prompt_marks must be a list of screen text that only an open prompt shows")
     cfg["lead_context"] = lead_context_config(cfg.get("lead_context", {}))
     return cfg
 
@@ -3248,16 +3251,10 @@ def cmd_init(a, cfg):
     for name in routing_pool(a.routing or cfg["defaults"]["routing"], cfg) or {}:
         usable_provider(cfg, name)  # an explicit choice that is off or a placeholder needs the owner first
     backend = pick_backend(a.backend, cfg, a.workspace or cfg["defaults"]["workspace"])
-    extra = {"backend": backend}
     if backend == "cmux":
-        workspace = a.workspace or cfg["defaults"]["workspace"] or os.environ.get("CMUX_WORKSPACE_ID")
-        if not workspace:
-            raise FleetError("no cmux workspace: pass --workspace or run inside cmux (or --backend tmux for headless workers)")
-        # Fail before creating state for an invalid workspace. Keep its UUID: cmux renumbers refs like workspace:2
-        # when it restarts, and the ref could then name another project's workspace.
-        listing = json.loads(cmux("--json", "--id-format", "both", "list-panes", "--workspace", workspace))
-        given, workspace = workspace, listing.get("workspace_id") or workspace
-    else:
+        backend, given, workspace = init_cmux_workspace(a, cfg)
+    extra = {"backend": backend}
+    if backend == "tmux":
         if a.workspace:
             raise FleetError("--workspace names a cmux workspace; a tmux run gets its own session")
         Tmux.check(cfg)  # fail before creating state when tmux is missing
@@ -3291,7 +3288,56 @@ def cmd_init(a, cfg):
     if isolated(state):
         print(f"isolation: worktree; each implement ticket's worker runs in its own tree under {options['worktree_dir']}, "
               f"and fleet accept applies its diff to this checkout's working tree (fleet merge)")
+    if untracked_fleet_ignore(repo):
+        print("note: .fleet/.gitignore keeps run state out of Git, and shows as untracked `.fleet/` until the owner "
+              "decides once per project: commit it (every clone then ignores .fleet/runs/), or add `.fleet/` to "
+              ".git/info/exclude to keep Fleet local. Ask them which.", file=sys.stderr)
     print(f"Next: fleet plan {a.run} --file <plan.json>")
+
+
+def untracked_fleet_ignore(repo: Path) -> bool:
+    """Whether .fleet/.gitignore is neither tracked nor ignored, so `git status` lists `.fleet/` as untracked."""
+    try:
+        out = sh(["git", "status", "--porcelain", "--untracked-files=all", "--", ".fleet/.gitignore"], cwd=repo,
+                 timeout=30)
+    except (FleetError, OSError, subprocess.TimeoutExpired):
+        return False
+    return out.startswith("?? ")
+
+
+def init_cmux_workspace(a, cfg: dict) -> tuple[str, str | None, str | None]:
+    """The backend, the workspace as given and its UUID for a new cmux run, checked before any state exists. The
+    UUID is kept: cmux renumbers refs like workspace:2 when it restarts, and the ref could then name another
+    project's workspace. An explicit --workspace that cmux does not list fails. One pinned in defaults.workspace
+    that cmux no longer lists falls back, with a note, to the lead's own workspace, and under backend auto then to
+    headless tmux, so a stale pin costs the lead no second init."""
+    pinned, own = cfg["defaults"]["workspace"], os.environ.get("CMUX_WORKSPACE_ID")
+    tries = [a.workspace] if a.workspace else list(dict.fromkeys(w for w in (pinned, own) if w))
+    if not tries:
+        raise FleetError("no cmux workspace: pass --workspace or run inside cmux (or --backend tmux for headless workers)")
+    failed, fix = [], f" {STALE_PIN_FIX}" if pinned and not a.workspace else ""
+    for given in tries:
+        try:
+            listing = json.loads(cmux("--json", "--id-format", "both", "list-panes", "--workspace", given))
+        except (FleetError, OSError, ValueError, subprocess.TimeoutExpired) as e:
+            if a.workspace:
+                raise
+            failed.append(f"{given} ({one_line(str(e), 160)})")
+            continue
+        if failed:
+            print(f"note: defaults.workspace {pinned} is not a cmux workspace now: {failed[0]}. Workers open in "
+                  f"the lead's own workspace {given} instead.{fix}", file=sys.stderr)
+        return "cmux", given, listing.get("workspace_id") or given
+    if (a.backend or cfg["defaults"]["backend"]) == "auto" and shutil.which("tmux"):
+        print(f"note: no cmux workspace to use: {'; '.join(failed)}. Workers run headless in tmux instead "
+              f"(backend auto).{fix}", file=sys.stderr)
+        return "tmux", None, None
+    raise FleetError(f"no cmux workspace to use: {'; '.join(failed)}.{fix} Or pass --workspace, "
+                     "or --backend tmux for headless workers.")
+
+
+STALE_PIN_FIX = (f"cmux renumbers refs like workspace:2 when it restarts: set defaults.workspace in {USER_CONFIG} to "
+                 "a workspace UUID, or remove it so workers open beside the lead.")
 
 
 def review_off_reason(a, cfg) -> str | None:
@@ -3886,6 +3932,7 @@ def cmd_grant(a, cfg):
         print(f"{a.id}: {', '.join(files)} already in its scope; nothing granted")
         return
     check_grantable(state, a.id, new)
+    refuse_on_prompt(state, cfg, a.id, "granted")
     d = run_dir(repo, a.run)
     snapshot = d / "snapshots" / f"{a.id}.json"
     current = []
@@ -5053,6 +5100,7 @@ def cmd_send(a, cfg):
     if sent:  # checked first: a retried --changes would otherwise trip over the report it already parked
         print(f"{a.id}: key {a.key} was already sent as message {sent}; nothing sent")
         return
+    refuse_on_prompt(state, cfg, a.id, "sent")
     text = send_text(repo, state, a)
     report = run_dir(repo, a.run) / "reports" / f"{a.id}.md"
     if a.changes and a.id in state["tickets"] and report_status(report) == PLAN_READY:
@@ -6541,6 +6589,47 @@ def quit_keys(cfg: dict, w: dict) -> list[str]:
     return provider(cfg, w["provider"]).get("quit", ["/exit", "enter"])
 
 
+STOP_SCREEN_LINES = 5  # of the worker's screen a failed stop prints, so the lead sees why without a peek turn
+PROMPT_SCREEN_LINES = 8  # of the worker's screen the prompt check reads: an open prompt sits at its bottom
+
+
+def open_prompt(state: dict, cfg: dict, w: dict | None) -> str | None:
+    """The end of a live worker's screen while it shows one of its adapter's prompt_marks, else None. Such a prompt
+    (an approval, a menu) takes the next Enter as its answer, usually its highlighted Yes, and typed text goes
+    nowhere, so Fleet never types into one. A screen Fleet cannot read is no prompt: typing then fails by itself.
+    A prompt that opens between this read and the Enter, about a second later, is not caught."""
+    if not w or w.get("state") not in ACTIVE_STATES or w.get("transport") == HEADLESS:
+        return None
+    try:
+        marks = provider(cfg, w["provider"]).get("prompt_marks") or []
+        if not marks:
+            return None
+        tail = screen_tail(terminal(state).read(w, 60), PROMPT_SCREEN_LINES)
+    except (FleetError, OSError, KeyError, subprocess.TimeoutExpired):
+        return None
+    return tail if any(m in tail for m in marks) else None
+
+
+def refuse_on_prompt(state: dict, cfg: dict, i: str, what: str) -> None:
+    """Refuse before anything is saved or typed while worker `i` shows a prompt, so the lead can simply run the
+    same command again once the owner has answered it."""
+    tail = open_prompt(state, cfg, state["workers"].get(i))
+    if tail is not None:
+        raise FleetError(f"{i} is showing a prompt, so nothing was {what}: its Enter would answer the prompt for the "
+                         f"owner. The owner answers it in the worker's pane (fleet agents {state['run']}); then run "
+                         f"this again.\n{PEEK_HEAD.format(id=i, lines=PROMPT_SCREEN_LINES)}\n{tail}")
+
+
+def stop_screen(state: dict, w: dict, i: str) -> str:
+    """The end of a worker's screen after its quit keys did not end it, labeled as data like peek's; empty when
+    the screen cannot be read."""
+    try:
+        tail = screen_tail(terminal(state).read(w, 60), STOP_SCREEN_LINES)
+    except (FleetError, OSError, subprocess.TimeoutExpired):
+        return ""
+    return f"\n{PEEK_HEAD.format(id=i, lines=STOP_SCREEN_LINES)}\n{tail}" if tail.strip() else ""
+
+
 def cmd_stop(a, cfg):
     repo = repo_root()
     state = load_run(repo, a.run)
@@ -6561,7 +6650,7 @@ def cmd_stop(a, cfg):
                     if w["state"] in ACTIVE_STATES:
                         time.sleep(0.2)
                 if w["state"] in ACTIVE_STATES:
-                    raise FleetError("quit sent but process exit unconfirmed; slot retained")
+                    raise FleetError("quit sent but process exit unconfirmed; slot retained" + stop_screen(state, w, i))
             if a.close and w["state"] != "closed":
                 terminal(state).close(w)
                 w["state"] = "closed"
@@ -7099,11 +7188,13 @@ def gate_message(report: Path, g: dict, n: int, cap: int) -> str:
     return "\n".join(lines)
 
 
-def send_gate_round(repo: Path, run: str, i: str, key: str, g: dict, cap: int, seen: Path) -> tuple:
+def send_gate_round(repo: Path, run: str, i: str, key: str, g: dict, cap: int, seen: Path,
+                    cfg: dict | None = None) -> tuple:
     """Send a failing gate back to ticket `i`'s worker: park its report as send --changes does, append the message
     to its inbox, count the round and type the pointer. All of it happens under the checkout's lock, taken without
     waiting, with run state reloaded inside it: ("busy",) means the lead holds the lock, so nothing changed and
-    the caller retries on its next poll. ("stale",) means the report changed since it was gated."""
+    the caller retries on its next poll. ("stale",) means the report changed since it was gated. ("prompt", screen)
+    means the worker shows a prompt, so nothing was saved or typed and the lead gets the hand-back as it stands."""
     with try_lock(repo) as held:
         if not held:
             return ("busy",)
@@ -7117,6 +7208,8 @@ def send_gate_round(repo: Path, run: str, i: str, key: str, g: dict, cap: int, s
         n = gate_rounds_used(t, i) + 1
         if n > cap:
             return ("out", n - 1)
+        if cfg is not None and (screen := open_prompt(state, cfg, w)) is not None:
+            return ("prompt", screen)
         try:  # the message is on record before the report is parked, so a failure never parks it for nothing
             msg, path = inbox_append(repo, state, i, gate_message(f, g, n, cap), key=f"fleet-gate-{n}")
             set_gate_rounds(t, i, n)
@@ -7220,7 +7313,7 @@ class GateLoop:
         return self.out_of_rounds(i, used, g, out) if used >= cap else self.send(state, i, key, g, cap, out)
 
     def send(self, state: dict, i: str, key: str, g: dict, cap: int, out: Path) -> bool:
-        result = send_gate_round(self.repo, self.run, i, key, g, cap, self.seen)
+        result = send_gate_round(self.repo, self.run, i, key, g, cap, self.seen, self.cfg)
         self.deferred.pop(i, None)
         if result[0] == "busy":  # retried next poll: forget the marker so the scan returns this report again
             self.deferred[i] = (key, (g["after"]["head"], g["after"]["paths"]), g)
@@ -7233,6 +7326,10 @@ class GateLoop:
             return True
         if result[0] == "unsent":  # the gate ran and failed, but could not go back: the lead gets it as it stands
             self.notes[i] = f"gate {g['summary']}; could not send it back to the worker ({result[1]})"
+            return True
+        if result[0] == "prompt":  # typing would answer the worker's prompt: the lead gets the hand-back instead
+            self.notes[i] = (f"gate {g['summary']}; not sent back: {i} is showing a prompt the owner answers "
+                             f"(fleet peek {self.run} {i})")
             return True
         self.notes.pop(i, None)  # sent, or stale: the changed report comes back on the next scan
         if result[0] == "untyped":
@@ -7370,9 +7467,9 @@ def stop_live(a, cfg, state: dict, ids: list[str], unchanged: str) -> None:
     """Stop those of `ids` still running, through fleet stop, and refuse unless every exit is confirmed."""
     live = [i for i in ids if state["workers"].get(i, {}).get("state") in ACTIVE_STATES]
     if live and cmd_stop(sub_args(a, ids=live, all=False, close=False, timeout=STOP_WAIT_S), cfg):
-        raise FleetError(f"stop failed, so {unchanged}. A failed stop keeps the worker's slot: see why with fleet "
-                         f"peek {a.run} <id> ({', '.join(live)}); if it must go, confirm its exit and use fleet recover "
-                         "(examples.md 7)")
+        raise FleetError(f"stop failed, so {unchanged}. A failed stop keeps the worker's slot: its screen lines above "
+                         f"show why (fleet peek {a.run} <id> for more: {', '.join(live)}); if it must go, confirm its "
+                         "exit and use fleet recover (examples.md 7)")
 
 
 def latest_reviewer(state: dict, i: str) -> dict | None:
@@ -9108,6 +9205,7 @@ def cmd_approve(a, cfg):
                          f"them (or asks the worker to, with fleet send {a.run} {a.id}), or approve with --unowned-ok "
                          "\"<owner's words>\", which records them in decisions and in the saved plan. Nothing was "
                          "changed")
+    refuse_on_prompt(state, cfg, a.id, "approved")
     state = stop_plan_reviewers(a, cfg, repo, state, reviewers, f"{a.id}'s plan is not approved")
     t = state["tickets"][a.id]
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -11199,6 +11297,10 @@ def cmd_doctor(a, cfg):
                 print("              Check host socket permissions; do not bypass a denied permission through another harness.")
     if chosen in BACKENDS and chosen not in usable or chosen == "auto" and not usable:
         ok = False
+    pinned = cfg.get("defaults", DEFAULTS).get("workspace")
+    if pinned and WORKSPACE_REF_RE.match(pinned):  # a warning, not a failure: init falls back when it is gone
+        print(f"workspace     WARNING: defaults.workspace = {pinned!r} is a cmux ref. {STALE_PIN_FIX} After a "
+              "restart the ref can vanish or name another project's workspace.")
     print(f"config        {USER_CONFIG if USER_CONFIG.exists() else 'none (built-in defaults)'}")
     names = a.providers or list(cfg["providers"])
     for name in names:
