@@ -28,6 +28,8 @@
     "skill/references/*.md",
     "skill/agents/*.yaml",
     ".claude-plugin/plugin.json",
+    "hooks/hooks.json",
+    "hooks/register.tsx",
     "install.sh",
     "config.example.toml",
     "skill/LICENSE",

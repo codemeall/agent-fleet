@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Claude Code's status-line command for Fleet, as `fleet statusline --install` writes it:
+"""The status-line command for Fleet, as `fleet statusline --install` writes it for Claude Code or Cursor's CLI, and
+as the Claude Code plugin's hooks module runs it:
 
-    fleet-statusline [--then COMMAND] [--rows N]
+    fleet-statusline [--footer] [--then COMMAND] [--rows N]
 
 Claude Code runs it every refreshInterval seconds in every session, Fleet's own workers' too, so it does as little
-as it can. Inside a Fleet worker (FLEET_WORKER) it runs only the owner's own command, without loading Fleet. Elsewhere
-it loads `fleet` beside it with its bytecode kept under the user's cache, never in this folder (the installer owns
-it), and runs `fleet statusline`. It always exits 0; if Fleet cannot load, the owner's command still runs."""
+as it can. Inside a Fleet worker (FLEET_WORKER) it runs only the owner's own command, without loading Fleet, unless
+--footer asks for the model and folder line, which Fleet prints. Elsewhere it loads `fleet` beside it with its
+bytecode kept under the user's cache, never in this folder (the installer owns it), and runs `fleet statusline`.
+It always exits 0; if Fleet cannot load, the owner's command still runs."""
 import os
 import sys
 
@@ -98,8 +100,8 @@ def load_fleet():
 
 
 def main(args):
-    if os.environ.get("FLEET_WORKER"):  # a worker's status line: the owner's command alone, Fleet never loaded
-        own_line(then_of(args))
+    if os.environ.get("FLEET_WORKER") and "--footer" not in args:
+        own_line(then_of(args))  # a worker's status line: the owner's command alone, Fleet never loaded
         return
     try:  # fleet statusline prints all its lines at once, at its end: one that raised has printed nothing
         load_fleet().main(["statusline", *args])

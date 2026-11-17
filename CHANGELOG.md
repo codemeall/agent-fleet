@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+The Claude Code plugin shows your workers at the prompt with no install step, and Cursor's CLI can show them in its status line.
+
+- **The plugin draws the worker rows itself.** A plugin cannot set Claude Code's status line, so a plugin install needed `fleet statusline --install` before the owner saw any worker. The plugin now ships a hooks module (`hooks/register.tsx`) that runs the same launcher and draws its rows in the band directly above the prompt: a row per live worker of any provider and the line for your other repos, refreshed every 2 seconds while workers are live and every 10 seconds otherwise, outside the model's context. It draws nothing inside a Fleet worker, in a session with nobody at the prompt, or where Fleet's status line is already installed. It needs Claude Code 2.1.326 or later; the status line is unchanged and still works everywhere. Checked live with two fake workers in headless tmux: the rows appeared, their clocks moved, and they cleared when the run ended.
+- **The lead says where the rows are.** While the module draws, it sets `FLEET_PROMPT_ROWS=1` for the lead's commands, and `fleet init` prints `WATCH your workers show above Claude Code's prompt (Fleet plugin)` instead of asking for `fleet statusline --install`. Workers do not inherit the variable.
+- **`fleet statusline --install --harness cursor`** puts the rows in the status line of Cursor's CLI (`~/.cursor/cli-config.json`, backed up first; `--uninstall --harness cursor` undoes it). It is opt-in, and setup does not run it, because Cursor's status line replaces Cursor's own footer and runs when the conversation moves, not on a timer: the new `--footer` flag prints the model and folder in the footer's place, and the rows are as of the lead's last step. `fleet init` under Cursor then prints `WATCH your workers show under Cursor's prompt`. Checked live in Cursor's CLI 2026.11.13 with two fake workers.
+- **The status line finds the checkout in Cursor's JSON.** Cursor names its own data folder as `workspace.project_dir`; the command now takes the first of `project_dir`, `current_dir` and `cwd` that is inside a Git checkout. Claude Code's JSON reads as before.
+- Codex's CLI is unchanged: its status line and terminal title take built-in items only, so `fleet track` and the dashboard remain its views.
+
 ## 0.1.0-preview.37
 
 Fleet no longer approves a worker's pending command. A Codex worker near its usage limit stops on the first `fleet stop` and keeps its model, and a stale `defaults.workspace` no longer fails `fleet init`.

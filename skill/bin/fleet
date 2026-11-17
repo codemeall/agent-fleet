@@ -987,7 +987,7 @@ LEAD_ENV = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "C
 # CLAUDE_CODE_USE_BEDROCK, API keys and the like) are not markers and pass through; so do a worker's own CMUX_* and TMUX.
 LEAD_MARKERS = {"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION",
                 "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_EXECPATH", "CLAUDE_PID", "CLAUDE_EFFORT",
-                "CLAUDE_PROJECT_DIR", "CLAUDE_ENV_FILE", "CODEX_THREAD_ID"}
+                "CLAUDE_PROJECT_DIR", "CLAUDE_ENV_FILE", "CODEX_THREAD_ID", "FLEET_PROMPT_ROWS"}
 LEAD_MARKER_PREFIXES = ("CLAUDE_CODE_MESSAGING_", "CLAUDE_PLUGIN_", "CLAUDE_AGENT_SDK_", "CODEX_COMPANION_")
 
 
@@ -13359,14 +13359,31 @@ def statusline_input(raw: bytes) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def in_git(path: Path) -> bool:
+    """Whether a folder is inside a Git checkout, by its .git alone: no git process on a status-line refresh."""
+    path = Path(os.path.abspath(path))
+    return any((p / ".git").exists() for p in (path, *path.parents))
+
+
 def statusline_dir(data: dict) -> Path:
-    """The session's checkout from Claude Code's JSON: the folder it started in (workspace.project_dir), so a lead
-    that cd's into a worker's tree still shows its run, else workspace.current_dir, else cwd, else this process's."""
+    """The session's checkout from the host's JSON: the folder it started in (workspace.project_dir), so a lead
+    that cd's into a worker's tree still shows its run, else workspace.current_dir, else cwd, else this process's.
+    A folder outside every Git checkout is passed over for a later one inside one: Cursor's project_dir is its own
+    data folder under ~/.cursor/projects, never the checkout."""
     workspace = dict_of(data.get("workspace"))
-    for value in (workspace.get("project_dir"), workspace.get("current_dir"), data.get("cwd")):
-        if isinstance(value, str) and os.path.isabs(value) and os.path.isdir(value):
-            return Path(value)
-    return Path.cwd()
+    found = [Path(v) for v in (workspace.get("project_dir"), workspace.get("current_dir"), data.get("cwd"))
+             if isinstance(v, str) and os.path.isabs(v) and os.path.isdir(v)]
+    return next((path for path in found if in_git(path)), found[0] if found else Path.cwd())
+
+
+def statusline_footer(data: dict) -> list[str]:
+    """One line in place of the footer a host stops drawing once it has a status line: the session's model and
+    folder, from its JSON. Cursor's CLI shows its own model and folder only while no status line is set."""
+    model = dict_of(data.get("model")).get("display_name")
+    folder, home = str(statusline_dir(data)), str(Path.home())
+    if folder == home or folder.startswith(home + os.sep):
+        folder = "~" + folder[len(home):]
+    return [" · ".join([one_line(model, 60)] * bool(isinstance(model, str) and model.strip()) + [one_line(folder, 120)])]
 
 
 def statusline_then(command: str, raw: bytes) -> list[str]:
@@ -13401,6 +13418,11 @@ def statusline_show(a) -> int:
     except (OSError, ValueError, AttributeError):
         raw = b""
     lines = statusline_then(a.then, raw) if a.then else []
+    if a.footer and not lines:  # the owner's own line, when it printed one, is the footer
+        try:
+            lines = statusline_footer(statusline_input(raw))
+        except Exception:  # noqa: BLE001 - a status line never shows an error
+            lines = []
     if not os.environ.get(FLEET_WORKER_ENV):
         lines += statusline_rows(raw, max(0, a.rows))
     if lines:
@@ -13441,21 +13463,47 @@ def claude_settings_file(scope: str) -> Path:
     return Path(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude").expanduser() / "settings.json"
 
 
-STATUSLINE_LAUNCHER = "fleet-statusline"  # beside fleet: the small command Claude Code's statusLine runs
+def cursor_settings_file() -> Path:
+    """The file Cursor's CLI reads its statusLine from: its user config (CURSOR_CONFIG_DIR, else ~/.cursor). Cursor
+    takes only permissions from a project's .cursor/cli.json, so there is no project scope."""
+    return Path(os.environ.get("CURSOR_CONFIG_DIR") or "~/.cursor").expanduser() / "cli-config.json"
 
 
-def statusline_command(then: str | None) -> str:
+STATUSLINE_LAUNCHER = "fleet-statusline"  # beside fleet: the small command a host's statusLine runs
+STATUSLINE_HOSTS = {"claude": "Claude Code", "cursor": "Cursor's CLI"}
+
+
+def argv_word(word: str) -> str:
+    """A word as Cursor's CLI reads its statusLine command: split on spaces with no shell, a quoted stretch taken
+    whole and no escapes, so a word holding both kinds of quote cannot be written."""
+    if word and not re.search(r"[\s'\"]", word):
+        return word
+    if "'" not in word:
+        return f"'{word}'"
+    if '"' not in word and not re.search(r"[\\$`]", word):  # what Fleet's own reading (shlex) would change
+        return f'"{word}"'
+    raise FleetError(f"Cursor's CLI cannot run {one_line(word, 120)} as part of a status line: it reads no escapes, "
+                     "so a quote inside quotes cannot be written. Put the command in a script and set that as your "
+                     "status line first. Nothing was changed")
+
+
+def statusline_command(then: str | None, harness: str = "claude") -> str:
     """This Fleet's status-line command: the launcher beside it (fleet-statusline, which skips loading Fleet inside
     a worker and keeps Fleet's bytecode cached), by its absolute path, or the interpreter and path when `python3`
     on PATH is not the Python running it (its shebang could find an older one); `fleet statusline` itself when
-    there is no launcher. An owner's command it chains also runs on its own after `||`, so their line survives this
-    Fleet's folder going away (a plugin update deletes the old one)."""
+    there is no launcher. Under Claude Code an owner's command it chains also runs on its own after `||`, so their
+    line survives this Fleet's folder going away (a plugin update deletes the old one). Cursor's CLI runs the
+    command with no shell, so there it has no `||`; and it stops drawing its own footer once a status line is set,
+    so --footer prints the model and folder in its place when the owner's command prints nothing."""
     here = Path(__file__).resolve()
     launcher = here.parent / STATUSLINE_LAUNCHER
     run, sub = (launcher, []) if launcher.is_file() else (here, ["statusline"])
     python3 = shutil.which("python3")
     plain = os.access(run, os.X_OK) and python3 and Path(python3).resolve() == Path(sys.executable).resolve()
-    base = shlex.join([str(run), *sub]) if plain else shlex.join([sys.executable, str(run), *sub])
+    words = [str(run), *sub] if plain else [sys.executable, str(run), *sub]
+    if harness == "cursor":
+        return " ".join(argv_word(w) for w in [*words, "--footer", *(["--then", then] if then else [])])
+    base = shlex.join(words)
     if not then:
         return base
     return f"{base} --then {shlex.quote(then)} || sh -c {shlex.quote(then)}"
@@ -13463,7 +13511,8 @@ def statusline_command(then: str | None) -> str:
 
 def fleet_statusline(value) -> tuple[bool, str | None]:
     """(True, the owner's command it chains, if any) when a statusLine is exactly a Fleet status line as --install
-    writes it, now or before the launcher: `[<python>] <.../fleet-statusline> [--then Q] [--rows N] [|| sh -c Q]`,
+    writes it, now or before the launcher: `[<python>] <.../fleet-statusline> [--footer] [--then Q] [--rows N]
+    [|| sh -c Q]`,
     or the same with `<.../fleet> statusline`. Anything else, even a command that runs `fleet statusline` among
     others, is (False, None): the owner's own, which --install chains whole."""
     command = dict_of(value).get("command")
@@ -13481,6 +13530,9 @@ def fleet_statusline(value) -> tuple[bool, str | None]:
         return False, None
     then = None
     while rest and rest[0] != "||":
+        if rest[0] == "--footer":
+            rest = rest[1:]
+            continue
         flag, sep, inline = rest[0].partition("=")
         if flag not in ("--then", "--rows") or (not sep and len(rest) < 2):
             return False, None
@@ -13588,7 +13640,7 @@ def statusline_project_check(path: Path) -> None:
           "running workers", file=sys.stderr)
 
 
-def statusline_install(path: Path, undo: str = "") -> None:
+def statusline_install(path: Path, undo: str = "", harness: str = "claude") -> None:
     data, raw = read_settings(path)
     old = data.get("statusLine")
     ours, then = fleet_statusline(old)  # already Fleet's: keep what it chains, and point it at this Fleet
@@ -13598,8 +13650,10 @@ def statusline_install(path: Path, undo: str = "") -> None:
             raise FleetError(f"{path}: its statusLine {one_line(json.dumps(old), 160)} is not a command Fleet can run "
                              "first; change it by hand. Nothing was changed")
         then = old["command"]
-    new = {"type": "command", "command": statusline_command(then), "refreshInterval": STATUSLINE_REFRESH_S}
-    new.update({k: v for k, v in dict_of(old).items() if k not in new})  # padding, and keys newer Claude Codes add
+    new = {"type": "command", "command": statusline_command(then, harness)}
+    if harness == "claude":  # Cursor's CLI has no timer: it runs the command when the conversation moves
+        new["refreshInterval"] = STATUSLINE_REFRESH_S
+    new.update({k: v for k, v in dict_of(old).items() if k not in new})  # padding, and keys newer hosts add
     if old == new:
         print(f"Fleet's status line is already in {path}; nothing changed.")
         return
@@ -13608,9 +13662,15 @@ def statusline_install(path: Path, undo: str = "") -> None:
     data["statusLine"] = new
     backup = write_settings(path, data, raw)
     statusline_said(path, old, new, backup)
-    print("Claude Code shows it from its next refresh: one row per live Fleet worker in the session's checkout, below "
-          f"{'your own line' if then else 'the prompt'}, and a line for your other active repos. Undo with: fleet "
-          f"statusline --uninstall{undo}")
+    rows = (f"one row per live Fleet worker in the session's checkout, below {'your own line' if then else 'the prompt'}"
+            ", and a line for your other active repos")
+    if harness == "cursor":
+        print(f"Cursor's CLI shows it from its next session: {rows}. It runs the line when the conversation moves, "
+              "not on a timer, so rows and clocks wait for the lead's next step; and it stops drawing its own footer "
+              f"once a status line is set, so Fleet prints {'your line' if then else 'the model and folder'} there. "
+              f"Undo with: fleet statusline --uninstall{undo}")
+        return
+    print(f"Claude Code shows it from its next refresh: {rows}. Undo with: fleet statusline --uninstall{undo}")
 
 
 def statusline_uninstall(path: Path) -> None:
@@ -13642,11 +13702,17 @@ def cmd_statusline(a, cfg):
         raise FleetError("--install or --uninstall, not both")
     if a.settings is not None and not os.path.isabs(a.settings):
         raise FleetError("--settings takes an absolute path")
-    path = Path(a.settings) if a.settings else claude_settings_file(a.scope)
-    if a.scope == "project" or a.settings:
+    if a.harness == "cursor":
+        if a.scope == "project":
+            raise FleetError("Cursor's CLI reads its status line from its user config only; drop --scope project")
+        path = Path(a.settings) if a.settings else cursor_settings_file()
+    else:
+        path = Path(a.settings) if a.settings else claude_settings_file(a.scope)
+    if a.scope == "project" or (a.settings and a.harness == "claude"):
         statusline_project_check(path)
-    undo = f" --settings {shlex.quote(str(path))}" if a.settings else " --scope project" if a.scope == "project" else ""
-    statusline_install(path, undo) if a.install else statusline_uninstall(path)
+    undo = " --harness cursor" if a.harness == "cursor" else ""
+    undo += f" --settings {shlex.quote(str(path))}" if a.settings else " --scope project" if a.scope == "project" else ""
+    statusline_install(path, undo, a.harness) if a.install else statusline_uninstall(path)
 
 
 # ---------- dashboard ----------
@@ -14159,6 +14225,17 @@ def watch_host(env=None) -> str | None:
     return "app" if host == "claude" and entry and entry != "cli" else host
 
 
+PROMPT_ROWS_ENV = "FLEET_PROMPT_ROWS"  # set in a Claude Code lead by the plugin's hooks module while it draws the rows
+
+
+def cursor_statusline_installed() -> bool:
+    """Whether the status line Cursor's CLI shows is Fleet's. A file Fleet cannot read sets none."""
+    try:
+        return fleet_statusline(read_settings(cursor_settings_file())[0].get("statusLine"))[0]
+    except (FleetError, OSError):
+        return False
+
+
 def statusline_installed(repo: Path) -> bool:
     """Whether the status line Claude Code shows in this checkout is Fleet's: the first settings file that sets one
     decides, in Claude Code's order (the checkout's settings.local.json, its settings.json, then the user's), so a
@@ -14205,9 +14282,14 @@ def watch_lines(repo: Path, cfg: dict, run: str, first: bool) -> list[str]:
         if watch_host() == "claude":
             if statusline_installed(repo):
                 line = f"WATCH your workers show under Claude Code's prompt (fleet status line) · {agents}"
+            elif os.environ.get(PROMPT_ROWS_ENV):
+                line = f"WATCH your workers show above Claude Code's prompt (Fleet plugin) · {agents}"
             else:
                 line = f"WATCH fleet statusline --install shows them under the prompt; meanwhile {TRACK_HINT}"
             return [line] if first else []
+        if os.environ.get("CURSOR_AGENT") and cursor_statusline_installed():
+            return [f"WATCH your workers show under Cursor's prompt (fleet status line), as of the lead's last step "
+                    f"· live: {TRACK_HINT}"] if first else []
         if inside_checkout(dashboard_home(), repo):  # its record would hold the token in this checkout
             return [f"WATCH {TRACK_HINT} (no dashboard: its files would land inside this checkout)"] if first else []
         rec = read_dashboard()
@@ -14578,13 +14660,20 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--list", action="store_true", help="print the workers and how to open each, without the browser")
     s.set_defaults(fn=cmd_agents)
 
-    s = sub.add_parser("statusline", help="owner's view in Claude Code's status line: a row per live Fleet worker "
-                                          "below your own line; --install puts it in Claude Code's settings")
+    s = sub.add_parser("statusline", help="owner's view in Claude Code's or Cursor's status line: a row per live Fleet "
+                                          "worker below your own line; --install puts it in the host's settings")
     s.add_argument("--then", metavar="COMMAND", help="your own status-line command: run first with the same input, "
                                                      "its output printed above Fleet's rows")
     s.add_argument("--rows", type=int, default=BRIEF_ROWS, help=f"worker rows before +k more (default {BRIEF_ROWS})")
+    s.add_argument("--footer", action="store_true",
+                   help="print the session's model and folder first when no --then command printed a line: for a "
+                        "host that stops drawing its own footer once a status line is set (Cursor's CLI)")
     s.add_argument("--install", action="store_true",
-                   help="set Claude Code's statusLine to this, chaining the one there now; the file is backed up first")
+                   help="set the host's statusLine to this, chaining the one there now; the file is backed up first")
+    s.add_argument("--harness", choices=sorted(STATUSLINE_HOSTS), default="claude",
+                   help="with --install or --uninstall: Claude Code (default), or cursor for Cursor's CLI "
+                        "(~/.cursor/cli-config.json; it replaces Cursor's own footer and runs when the conversation "
+                        "moves, not on a timer)")
     s.add_argument("--uninstall", action="store_true", help="put back the statusLine --install replaced")
     s.add_argument("--scope", choices=["user", "project"], default="user",
                    help="with --install or --uninstall: ~/.claude/settings.json (default) or this checkout's "

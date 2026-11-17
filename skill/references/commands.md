@@ -52,7 +52,7 @@ The lead runs these commands. The owner may run any of them too, most often `hol
 | [`agents`](#agents) | Owner's browser: every worker, its live screen, attach to any one | The owner wants to see what a worker is doing |
 | [`attach`](#attach) | Owner opens one worker's terminal | The owner wants to type into or watch one worker |
 | [`track`](#track) | Owner's live view of every active session, redrawn in a terminal; `--pane` opens it below, in tmux or cmux | The owner leads from Codex or another terminal host |
-| [`statusline`](#statusline) | Owner's rows of live workers in Claude Code's status line, after their own line; setup installs it | The owner leads from Claude Code and wants the workers in view |
+| [`statusline`](#statusline) | Owner's rows of live workers in Claude Code's status line, after their own line; setup installs it, and the plugin draws them with no install. `--harness cursor` for Cursor's CLI | The owner leads from Claude Code or Cursor's CLI and wants the workers in view |
 | [`dashboard`](#dashboard) | Owner's local, read-only web page of every active checkout's workers and their screens; init starts it in the background | The owner leads from Codex or a desktop app, or has no terminal open |
 
 **Similar names:** `hold` and `release` pause and continue *launches*. `resume` reloads a *run* into the lead's memory. `launch --resume` continues a stopped *worker's* own CLI session. There is no `pause` command: `hold` is the pause.
@@ -173,7 +173,9 @@ Creates `.fleet/runs/<run>/`, adds it to `.fleet/.gitignore`, and records the HE
 | Lead | `WATCH` line |
 | --- | --- |
 | Claude Code with Fleet's [status line](#statusline) as the one it shows (the first `statusLine` in this checkout's `.claude/settings.local.json`, its `.claude/settings.json`, then the user's) | `WATCH your workers show under Claude Code's prompt (fleet status line) · in a terminal: fleet agents <run>` |
-| Claude Code without it | `WATCH fleet statusline --install shows them under the prompt; meanwhile run fleet track in another terminal tab …` |
+| Claude Code without it, as a plugin whose [hooks module](#the-plugin-draws-them-itself) draws the rows (it sets `FLEET_PROMPT_ROWS` for the lead's commands) | `WATCH your workers show above Claude Code's prompt (Fleet plugin) · in a terminal: fleet agents <run>` |
+| Claude Code with neither | `WATCH fleet statusline --install shows them under the prompt; meanwhile run fleet track in another terminal tab …` |
+| Cursor's CLI (`CURSOR_AGENT` set) with Fleet's status line [installed for it](#cursors-cli) | `WATCH your workers show under Cursor's prompt (fleet status line), as of the lead's last step · live: run fleet track in another terminal tab …` |
 | Codex (CLI or desktop), a desktop app (ChatGPT, Claude desktop, T3 Code, Antigravity), any other or unknown host | `WATCH run fleet track in another terminal tab to see your workers live (fleet track --pane opens it below, in tmux or cmux) · in a desktop app: http://127.0.0.1:<port>/?t=<token> (live, read-only; fleet dashboard --stop ends it)`: [`fleet track`](#track) for a terminal, and the [background dashboard](#dashboard), started then or the one already running, for an app |
 
 A Claude Code session outside its terminal interface (an SDK or app entrypoint: `CLAUDE_CODE_ENTRYPOINT` other than `cli`) counts as an app, since only the terminal shows a status line. Fleet cannot tell Codex's CLI from its desktop app, so every lead other than Claude Code's terminal gets both the `fleet track` hint and the dashboard link. Init never splits a terminal: `fleet track --pane` is the owner's own command. With `[defaults] watch = "off"` init prints only `WATCH in a terminal: fleet agents <run>` and starts nothing. No dashboard starts inside a Fleet worker (`FLEET_WORKER` set), in CI (`CI` set), or with `FLEET_NO_DASHBOARD` set (the test suites and the smoke and benchmark kits set it); the line then says why. When the cache is inside the checkout (a home folder kept in Git), no dashboard starts, since its record would put the token there: the line is the `fleet track` hint and `(no dashboard: its files would land inside this checkout)`. The dashboard starts after init releases the checkout's lock, and nothing about it can fail init: on any error the line names `fleet track`, with a one-line note. Init also records the checkout in the machine's [registry of active checkouts](#every-active-checkout).
@@ -1192,7 +1194,8 @@ Native subagent panels (Claude Code's agent panel, Codex's, Antigravity's Agent 
 
 | Where you talk to the lead | Where you see its workers |
 | --- | --- |
-| Claude Code | [`statusline`](#statusline): a row per live worker under the prompt, after your own status line |
+| Claude Code | [`statusline`](#statusline): a row per live worker under the prompt, after your own status line; from a plugin install, the same rows directly above the prompt with nothing to install |
+| Cursor CLI | [`statusline --install --harness cursor`](#cursors-cli): the same rows under its prompt, as of the lead's last step; else `track` |
 | Codex CLI | [`track`](#track) in another tab, or `track --pane` below the lead in tmux or cmux; Codex's status line takes its built-in items only, no command |
 | A desktop app: ChatGPT or Codex desktop, Claude desktop, T3 Code, Antigravity, the Cursor IDE | [`dashboard`](#dashboard), in any browser |
 | Any terminal | [`track`](#track) for a live view, [`agents`](#agents) to watch and attach to one worker, or [`status --brief`](#the-brief-view) for one look |
@@ -1270,12 +1273,12 @@ Opens one worker's terminal. Under tmux it attaches to the run's session with th
 ### statusline
 
 ```text
-fleet statusline --install [--scope user|project]
-fleet statusline --uninstall [--scope user|project]
-fleet statusline [--then '<your command>'] [--rows N]
+fleet statusline --install [--harness claude|cursor] [--scope user|project]
+fleet statusline --uninstall [--harness claude|cursor] [--scope user|project]
+fleet statusline [--then '<your command>'] [--rows N] [--footer]
 ```
 
-Puts the [brief view](#the-brief-view)'s rows in Claude Code's status line, below the prompt, the way its own agent panel lists its subagents. It is for Claude Code only. Codex's status line takes its built-in items only, with no command of your own, so under Codex use [`track`](#track) or the [`dashboard`](#dashboard).
+Puts the [brief view](#the-brief-view)'s rows in Claude Code's status line, below the prompt, the way its own agent panel lists its subagents. [Cursor's CLI](#cursors-cli) takes the same command with `--harness cursor`. Codex's status line takes its built-in items only, with no command of your own, so under Codex use [`track`](#track) or the [`dashboard`](#dashboard). A row is a worker of any provider: the rows come from the run's state, not from the host you lead from.
 
 ```text
 ~/src/app  main  Opus 5.5
@@ -1295,9 +1298,23 @@ The command itself reads the checkout from the session's `workspace.project_dir`
 
 Claude Code runs a status line in every session that reads the file, Fleet's own Claude workers included. So the launcher does as little as it can. Inside a Fleet worker it runs only your own line, without loading Fleet: about 25 ms of CPU a run. Elsewhere it loads Fleet with its compiled bytecode kept under the cache (`agent-fleet/pycache`, never beside the runtime, whose folder the installer owns, and never inside a Git checkout): about 60 ms a run with a live worker here and four other active checkouts, where running `fleet statusline` itself took about 230 ms, almost all of it Python compiling Fleet. If Fleet cannot load (a Python older than 3.11, a folder half-updated), your own line still shows. The brief view itself takes about 10 ms for ten workers.
 
-**Setup installs it.** `fleet setup --harness claude` (or `all`, from npm or `install.sh`) runs `--install` with the copied runtime, so the line points at the installed copy, never npm's cache; it goes in the settings file beside the skill: `<base>/.claude/settings.local.json` for `--scope project` (the folder setup ran in, even below a Git checkout's root), `<base>/.claude/settings.json` for `--root`, else your own. `--no-statusline` skips it, and `fleet uninstall` puts your own line back first. If setup cannot set it (a settings file that is not JSON, no Python 3.11), setup still succeeds and prints a warning with the command to run. If uninstall cannot put your line back, it keeps the claude copy, since the line still runs it, removes the rest, exits non-zero and prints the command to run before uninstalling again. A Claude Code plugin cannot set a status line (a plugin's settings apply only `agent` and `subagentStatusLine`), so after a plugin or `npx skills add` install, run `fleet statusline --install` once.
+**Setup installs it.** `fleet setup --harness claude` (or `all`, from npm or `install.sh`) runs `--install` with the copied runtime, so the line points at the installed copy, never npm's cache; it goes in the settings file beside the skill: `<base>/.claude/settings.local.json` for `--scope project` (the folder setup ran in, even below a Git checkout's root), `<base>/.claude/settings.json` for `--root`, else your own. `--no-statusline` skips it, and `fleet uninstall` puts your own line back first. If setup cannot set it (a settings file that is not JSON, no Python 3.11), setup still succeeds and prints a warning with the command to run. If uninstall cannot put your line back, it keeps the claude copy, since the line still runs it, removes the rest, exits non-zero and prints the command to run before uninstalling again. A Claude Code plugin cannot set a status line (a plugin's settings apply only `agent` and `subagentStatusLine`), so the plugin draws the rows itself (below); after an `npx skills add` install, run `fleet statusline --install` once.
 
-**Use:** nothing, after setup; after a plugin or skills-CLI install, once: `fleet statusline --install`.
+#### The plugin draws them itself
+
+The Claude Code plugin ships a hooks module (`hooks/register.tsx`, named by `hooks/hooks.json`), which Claude Code 2.1.326 and later load with the plugin. It runs `fleet-statusline --rows 6` with the session's folder and draws what it prints in the band directly above the prompt, which `ctrl+x ctrl+a` collapses: the same rows, for workers of every provider, with nothing to install and nothing added to your settings. It refreshes every 2 seconds while rows show and every 10 seconds while none do, outside the model's context. It draws nothing inside a Fleet worker, in a session with nobody at the prompt (`claude -p`, the SDK), or where Fleet's own status line is installed, so the rows never show twice. While it draws, it sets `FLEET_PROMPT_ROWS=1` for the commands the session runs, which is how `fleet init` knows to print `WATCH your workers show above Claude Code's prompt (Fleet plugin)`; a worker never inherits it. Claude Code's hooks-module API is early access, so a later Claude Code may need a newer Fleet; an older Claude Code ignores the module, and `fleet statusline --install` still works there. Its tests run with `claude plugin test <the plugin's folder>`.
+
+#### Cursor's CLI
+
+`fleet statusline --install --harness cursor` sets `statusLine` in Cursor's user config, `~/.cursor/cli-config.json` (in `$CURSOR_CONFIG_DIR` when that is set), to `{"type": "command", "command": "<this fleet's folder>/fleet-statusline --footer"}`, backing the file up first; `--uninstall --harness cursor` puts back what was there. Cursor takes a status line from its user config only, so `--scope project` is refused, and setup never installs it: it is yours to turn on, because Cursor's status line differs from Claude Code's in three ways.
+
+- **It replaces Cursor's footer.** Once a status line is set, Cursor stops drawing its own footer (model, run mode, folder and branch), even while the command prints nothing. So `--footer` prints the session's model and folder as the first line, from the session's JSON, unless your own chained command printed a line. A Cursor worker of Fleet's gets that line too, and no rows.
+- **It has no timer.** Cursor runs the command when the conversation moves (a turn starts or ends, tokens arrive), not every few seconds, so the rows and their clocks are as of the lead's last step and stand still while the lead waits. `fleet track` in another tab stays live.
+- **It runs no shell.** Cursor splits the command into words itself and reads no escapes. A status line you already had is chained with `--then`, as for Claude Code, but without the `|| sh -c` fallback; one that holds a quote inside quotes is refused with nothing changed: put it in a script first.
+
+Cursor's JSON names its own data folder (`~/.cursor/projects/…`) as `workspace.project_dir`, so the command takes the first of `project_dir`, `current_dir` and `cwd` that is inside a Git checkout. Write the file while no Cursor session is running, or start a new session after: a running one keeps the settings it started with. `fleet uninstall` leaves Cursor's config alone, so run `fleet statusline --uninstall --harness cursor` before removing the Fleet folder the line points at; otherwise the line runs nothing and Cursor's footer stays empty until you do.
+
+**Use:** nothing, after setup or a plugin install; after a skills-CLI install, once: `fleet statusline --install`; to lead from Cursor's CLI, once: `fleet statusline --install --harness cursor`.
 
 ### dashboard
 
