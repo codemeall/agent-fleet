@@ -230,6 +230,9 @@ class InstallTests(unittest.TestCase):
             self.assertIn('package/skill/LICENSE', names)
             self.assertIn('package/dist/codex/agent-fleet/skills/fleet/LICENSE', names)
             self.assertIn('package/.claude-plugin/plugin.json', names)
+            self.assertIn('package/hooks/hooks.json', names)  # the Claude Code plugin's hooks module
+            self.assertIn('package/hooks/register.tsx', names)
+            self.assertNotIn('package/hooks/register.test.tsx', names)
             self.assertIn('package/dist/codex/agent-fleet/.codex-plugin/plugin.json', names)
             self.assertIn('package/dist/codex/agent-fleet/skills/fleet/SKILL.md', names)
             self.assertNotIn('package/dist/codex/agent-fleet/skills/fleet/.fleet-install.json', names)
@@ -269,6 +272,17 @@ class InstallTests(unittest.TestCase):
                              env={**os.environ, 'FLEET_PYTHON': str(self.base / 'missing-python')})
         self.assertNotEqual(run.returncode, 0)
         self.assertIn('Python 3.11+', run.stderr)
+
+    def test_the_claude_plugins_hooks_module_is_where_its_manifest_says(self):
+        hooks = json.loads((REPO / 'hooks/hooks.json').read_text())
+        # One path, relative to hooks.json. The empty `hooks` map is for a Claude Code that reads only that key.
+        self.assertEqual(hooks, {'hooks': {}, 'modules': ['./register.tsx']})
+        module = (REPO / 'hooks/register.tsx').read_text()
+        self.assertIn('/skill/bin/fleet-statusline', module)  # the launcher it runs, beside the skill
+        self.assertTrue((REPO / 'skill/bin/fleet-statusline').is_file())
+        for name in ('FLEET_WORKER', 'FLEET_PROMPT_ROWS'):  # the variables the runtime sets and reads
+            self.assertIn(f"'{name}'", module)
+            self.assertIn(f'"{name}"', (REPO / 'skill/bin/fleet').read_text())
 
     def test_plugin_metadata_matches_package(self):
         package = json.loads((REPO / 'package.json').read_text())

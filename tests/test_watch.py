@@ -542,6 +542,28 @@ class Statusline(WatchCase):
         self.assertEqual(lines[-1], "+1 more: fleet status --brief")
         self.assertEqual(len(lines), 4)
 
+    def test_cursors_json_names_its_own_data_folder_first(self):
+        self.start()
+        self.launch()
+        data = Path(tempfile.mkdtemp(dir=self.temp.name))  # ~/.cursor/projects/<slug>: a folder, never a checkout
+        payload = {"cwd": str(self.repo), "workspace": {"project_dir": str(data), "current_dir": str(self.repo)}}
+        self.assertEqual(self.statusline(payload).splitlines()[0], "fleet demo · 1 live")
+        self.assertEqual(fleet.statusline_dir({"workspace": {"project_dir": str(data)}}), data)  # nothing better
+
+    def test_footer_prints_the_model_and_folder_unless_the_owners_line_printed(self):
+        self.start()
+        self.launch()
+        payload = {"cwd": str(self.repo), "model": {"display_name": "Grok 4.7\n256K"}}
+        with patch.dict(os.environ, {"HOME": str(self.repo.parent)}):
+            lines = self.statusline(payload, "--footer").splitlines()
+            self.assertEqual(lines[:2], [f"Grok 4.7 256K · ~/{self.repo.name}", "fleet demo · 1 live"])
+            self.assertEqual(self.statusline(payload, "--footer", "--then", "true").splitlines()[0], lines[0])
+        self.assertEqual(self.statusline(payload, "--footer", "--then", "echo mine").splitlines()[:2],
+                         ["mine", "fleet demo · 1 live"])
+        self.assertEqual(self.statusline({"cwd": str(self.repo)}, "--footer").splitlines()[0], str(self.repo))
+        with patch.dict(os.environ, {"FLEET_WORKER": "demo/01"}):  # a Cursor worker keeps a footer, and no rows
+            self.assertEqual(self.statusline({"cwd": str(self.repo)}, "--footer"), f"{self.repo}\n")
+
     def test_inside_a_fleet_worker_only_the_owners_line_shows(self):
         self.start()
         self.launch()
@@ -617,6 +639,48 @@ class Install(unittest.TestCase):
         self.assertEqual(json.loads(self.settings.read_text()), {})
         self.assertIn("is not in", self.run_fleet("--uninstall"))
         self.assertIn("statusLine in", self.run_fleet("--inst"))  # an abbreviated flag installs, never just shows
+
+    def test_cursors_cli_gets_a_line_with_no_shell_no_timer_and_a_footer(self):
+        cursor = self.root / "cursor"
+        cursor.mkdir()
+        config, mine = cursor / "cli-config.json", {"type": "command", "command": "my-line --wide", "padding": 2}
+        config.write_text(json.dumps({"version": 1, "statusLine": mine}))
+        with patch.dict(os.environ, {"CURSOR_CONFIG_DIR": str(cursor)}):
+            self.assertFalse(fleet.cursor_statusline_installed())
+            out = self.run_fleet("--install", "--harness", "cursor")
+            line = json.loads(config.read_text())["statusLine"]
+            words = shlex.split(line["command"])
+            at = words.index("--footer")
+            self.assertEqual(Path(words[at - 1]).resolve(), LAUNCHER.resolve())
+            self.assertEqual(words[at:], ["--footer", "--then", "my-line --wide"])  # no `||`: Cursor runs no shell
+            self.assertEqual({k: v for k, v in line.items() if k != "command"}, {"type": "command", "padding": 2})
+            self.assertEqual(fleet.fleet_statusline(line), (True, "my-line --wide"))
+            self.assertTrue(fleet.cursor_statusline_installed())
+            self.assertIn("Undo with: fleet statusline --uninstall --harness cursor", out)
+            self.assertIn("not on a timer", out)
+            self.assertFalse(self.settings.exists())  # Claude Code's settings are left alone
+            self.assertEqual(len(self.backups()), 1)
+            self.assertIn("nothing changed", self.run_fleet("--install", "--harness", "cursor"))
+            self.assertIn("user config only", self.run_fleet("--install", "--harness", "cursor", "--scope", "project",
+                                                              expected=1))
+            self.run_fleet("--uninstall", "--harness", "cursor")
+            self.assertEqual(json.loads(config.read_text()), {"version": 1, "statusLine": mine})
+            self.assertFalse(fleet.cursor_statusline_installed())
+
+    def test_a_command_cursors_cli_cannot_read_is_refused_before_anything_changes(self):
+        self.assertEqual([fleet.argv_word(w) for w in ("/a/b", "/a b/c", "it's mine", "")],
+                         ["/a/b", "'/a b/c'", '"it\'s mine"', "''"])
+        cursor = self.root / "cursor"
+        cursor.mkdir()
+        config = cursor / "cli-config.json"
+        for mine in ("say \"it's\"", "echo 'it'\"'\"'s $HOME'"):
+            with self.subTest(mine=mine):
+                before = json.dumps({"statusLine": {"type": "command", "command": mine}})
+                config.write_text(before)
+                with patch.dict(os.environ, {"CURSOR_CONFIG_DIR": str(cursor)}):
+                    self.assertIn("Nothing was changed", self.run_fleet("--install", "--harness", "cursor", expected=1))
+                self.assertEqual(config.read_text(), before)
+        self.assertEqual(self.backups(), [])
 
     def test_it_chains_the_owners_line_keeps_every_key_and_backs_up_first(self):
         mine = "bash -c 'echo \"$(whoami)\"' # it's mine"
@@ -768,6 +832,11 @@ class Launcher(unittest.TestCase):
         self.assertEqual(res.stdout, "rows of statusline --then echo mine --rows 2\n")  # elsewhere: fleet statusline
         self.assertTrue(loaded.exists())
 
+    def test_a_footer_is_fleets_to_print_inside_a_worker_too(self):
+        (self.bin / "fleet").write_text("def main(argv):\n    print('rows of ' + ' '.join(argv))\n")
+        res = self.show("--footer", FLEET_WORKER="demo/01")  # Cursor's CLI draws no footer of its own beside it
+        self.assertEqual((res.returncode, res.stdout), (0, "rows of statusline --footer\n"))
+
     def test_a_fleet_that_cannot_load_still_shows_the_owners_line(self):
         for broken in ("this is not Python (\n", "raise SystemExit(3)\n", "import os\nos.kill(os.getpid(), 0)\n"
                        "def main(argv):\n    raise RuntimeError('boom')\n", None):
@@ -796,6 +865,7 @@ class Launcher(unittest.TestCase):
         for command, then in ((f"{LAUNCHER}", None), (f"python3 {LAUNCHER} --then x || sh -c x", "x"),
                               (f"'{LAUNCHER}' --rows 2 --then 'my line' || sh -c 'my line'", "my line"),
                               ("/old/fleet statusline --then x || sh -c x", "x"),
+                              (f"{LAUNCHER} --footer", None), (f"'{LAUNCHER}' --footer --then 'my line'", "my line"),
                               ("/usr/bin/python3.11 /old/fleet statusline", None)):
             with self.subTest(command=command):
                 self.assertEqual(fleet.fleet_statusline({"command": command}), (True, then))

@@ -1,6 +1,6 @@
 {
   "name": "@codemeall/agent-fleet",
-  "version": "0.1.0-preview.37",
+  "version": "0.1.0-preview.38",
   "description": "Coordinate coding-agent CLIs in cmux or headless tmux with a portable Fleet skill.",
   "license": "MIT",
   "author": "codemeall",
@@ -28,6 +28,8 @@
     "skill/references/*.md",
     "skill/agents/*.yaml",
     ".claude-plugin/plugin.json",
+    "hooks/hooks.json",
+    "hooks/register.tsx",
     "install.sh",
     "config.example.toml",
     "skill/LICENSE",

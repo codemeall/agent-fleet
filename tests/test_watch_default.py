@@ -44,7 +44,7 @@ print(server.server_address[1], flush=True)
 server.serve_forever()
 """  # any process's server, here one that even answers /api/id with its own pid and the record's nonce
 # What the suite inherits from a lead it may run under, and the switches these tests set themselves.
-HOST_ENV = ("FLEET_NO_DASHBOARD", "CI", "FLEET_WORKER", "CLAUDE_CODE_ENTRYPOINT")
+HOST_ENV = ("FLEET_NO_DASHBOARD", "CI", "FLEET_WORKER", "CLAUDE_CODE_ENTRYPOINT", "FLEET_PROMPT_ROWS", "CURSOR_AGENT")
 
 
 class Machine(WatchCase):
@@ -128,7 +128,14 @@ class Watch(Machine):
         out, more = self.init_with("a2", host="claude")
         self.assertEqual(self.watch(out), [f"WATCH fleet statusline --install shows them under the prompt; meanwhile "
                                            f"{track}"])
-        self.assertEqual(calls + more, [])  # a Claude Code terminal lead never gets a dashboard
+        out, plugin = self.init_with("a6", host="claude", env={"FLEET_PROMPT_ROWS": "1"})  # the plugin's hooks module
+        self.assertEqual(self.watch(out), ["WATCH your workers show above Claude Code's prompt (Fleet plugin) "
+                                           "· in a terminal: fleet agents a6"])
+        with patch.object(fleet, "cursor_statusline_installed", return_value=True):
+            out, cursor = self.init_with("a7", env={"CURSOR_AGENT": "1"})
+        self.assertEqual(self.watch(out), [f"WATCH your workers show under Cursor's prompt (fleet status line), as of "
+                                           f"the lead's last step · live: {track}"])
+        self.assertEqual(calls + more + plugin + cursor, [])  # a lead with rows at its prompt never gets a dashboard
         for run, host, env in (("a3", "codex", {}), ("a4", None, {}),
                                ("a5", "claude", {"CLAUDE_CODE_ENTRYPOINT": "sdk-ts"})):  # T3 Code, an app or IDE
             with self.subTest(host=host, env=env):

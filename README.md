@@ -4,7 +4,7 @@ Run a fleet of coding-agent CLIs (Claude Code, Codex, Cursor) led by the agent y
 
 The lead turns approved tickets into a saved execution plan, picks a worker model and effort for each ticket, watches progress, and verifies every result before dependents start. Workers share one Git checkout with explicit file ownership, or each work in their own Git worktree when you ask. **You keep control of commits and publishing.**
 
-> **Preview `0.1.0-preview.37`.** Bundled adapters exist for Claude Code, Codex and Cursor, plus Antigravity and OpenCode (disabled by default). Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
+> **Preview `0.1.0-preview.38`.** Bundled adapters exist for Claude Code, Codex and Cursor, plus Antigravity and OpenCode (disabled by default). Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
 
 - [Quick start](#quick-start)
 - [Installation](#installation)
@@ -116,7 +116,7 @@ claude plugin marketplace add codemeall/agent-fleet
 claude plugin install agent-fleet@agent-fleet
 ```
 
-Plugin skills are namespaced, so you invoke this one as `/agent-fleet:fleet`. To update, run `claude plugin marketplace update agent-fleet`, then `claude plugin update agent-fleet@agent-fleet`. The plugin does not add `fleet` to your PATH. The skill finds its bundled runtime itself, and you can [add a PATH command](#put-fleet-on-your-path-optional) if you want one. A plugin cannot set Claude Code's status line, so to see your workers under the prompt, run `fleet statusline --install` once (the same after a skills CLI install).
+Plugin skills are namespaced, so you invoke this one as `/agent-fleet:fleet`. To update, run `claude plugin marketplace update agent-fleet`, then `claude plugin update agent-fleet@agent-fleet`. The plugin does not add `fleet` to your PATH. The skill finds its bundled runtime itself, and you can [add a PATH command](#put-fleet-on-your-path-optional) if you want one. A plugin cannot set Claude Code's status line, so the plugin draws your workers itself, in the band directly above the prompt, with no step of yours (Claude Code 2.1.326 or later; on an older one, or after a skills CLI install, run `fleet statusline --install` once).
 
 #### Option 4: Git clone
 
@@ -313,7 +313,7 @@ The lead drives Fleet through the `fleet` CLI; you rarely need to, but you can r
 | `fleet doctor` | Check the terminal backend, logins, models and installed skills |
 | `fleet agents [<run>]` | Browse the workers, watch any one live, attach to it (yours; the lead never runs it) |
 | `fleet attach <run> <id>` | Open one worker's terminal (headless runs) |
-| `fleet statusline --install` | Show live workers in Claude Code's status line, below your own line; `fleet setup` does it for you (`--uninstall` undoes it) |
+| `fleet statusline --install` | Show live workers in Claude Code's status line, below your own line; `fleet setup` does it for you (`--uninstall` undoes it). `--harness cursor` does it for Cursor's CLI |
 | `fleet dashboard [--background\|--stop]` | A local, read-only web page of every repo's workers and their screens, for desktop apps; it starts on its own with a run, and `--stop` ends it until the next run starts one |
 | `fleet provider enable\|disable <name>` | Turn a provider on or off in your config |
 
@@ -448,7 +448,8 @@ The agent panels hosts build in (Claude Code's agent panel, Codex's, Antigravity
 
 | You lead from | You see the workers in |
 | --- | --- |
-| Claude Code | Its status line: a row per live worker under the prompt, below your own line, and one line for your other repos. `fleet setup` installs it; after a plugin or `npx skills add` install, run `fleet statusline --install` once |
+| Claude Code | A row per live worker at the prompt, and one line for your other repos. `fleet setup` puts them in its status line, under the prompt and below your own line; the plugin draws them itself, directly above the prompt; after an `npx skills add` install, run `fleet statusline --install` once |
+| Cursor CLI | Its status line, once you run `fleet statusline --install --harness cursor`: the same rows under the prompt. Cursor runs a status line when the conversation moves, not on a timer, so the rows are as of the lead's last step, and it stops drawing its own footer, so Fleet prints the model and folder there. Without it, `fleet track` as under Codex |
 | Codex CLI | `fleet track` in another terminal tab: a live list of every repo's workers. In tmux or cmux, `fleet track --pane` opens it in a short pane below yours. Codex's status line takes its built-in items only, so it can't run Fleet's |
 | A desktop app: ChatGPT or Codex desktop, Claude desktop, T3 Code, Antigravity, the Cursor IDE | The dashboard, which starts in the background with the run: open the link in the `WATCH` line |
 | Any terminal | `fleet track` for a live view, `fleet agents` to watch or attach to one worker, `fleet status --brief --all` for one look |
