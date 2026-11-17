@@ -10,8 +10,8 @@ What each shipped adapter was last checked against, from the changelog and the r
 
 | Adapter | CLI (`bin`) | Version | Checked | How |
 | --- | --- | --- | --- | --- |
-| `claude`, `claude-co` | Claude Code (`claude`) | 2.1.318 (2.1.284 earlier) | 2026-11-04 (2026-09-30) | Flags read from `--help` only |
-| `codex` | Codex CLI (`codex`) | 0.156.1; tier models from 0.159's catalog | 2026-09-30 | Flags read from `--help` only |
+| `claude`, `claude-co` | Claude Code (`claude`) | 2.1.318 (2.1.284 earlier); 2.1.326 for the quit sequence and the permission prompt | 2026-11-04 (2026-09-30; 2026-11-17) | Flags read from `--help` only; on 2.1.326, `/exit` was live-checked in tmux at an idle prompt and at a Bash permission prompt, with and without `escape` first |
+| `codex` | Codex CLI (`codex`) | 0.156.1; tier models from 0.159's catalog; 0.167.0 for the quit sequence and the rate-limit menu | 2026-09-30 (2026-11-17) | Flags read from `--help` only; on 0.167.0, `/quit` was live-checked in tmux after a turn, with and without `notice.hide_rate_limit_model_nudge`, and at an approval prompt, with and without `escape` first |
 | `cursor` | Cursor Agent (`cursor-agent`) | 2026.09.28-64d2043 | 2026-09-30 | Flags read from `--help` only |
 | `agy` | Antigravity (`agy`) | 1.3.0 live; models and efforts listed on 1.3.1 and 1.4.8 | 2026-10-06 (listing 2026-10-27) | Live-checked on 1.3.0; 1.4.8 only listed, not launched |
 | `opencode` | OpenCode (`opencode`) | 1.18.34 | 2026-10-06 | Live-checked |
@@ -286,6 +286,17 @@ Checked on 2026-11-05 in the source of `openai/codex` at `main` commit `0327a3e`
 
 **Assumption, not checked live:** that a released `codex` binary runs `notify` in its TUI as `main` does. `notify` is marked legacy in the source; if a later Codex drops it, the override does nothing and `wait` falls back to `STALLED`. `tests/test_signals.py` feeds `fleet _notify` the documented JSON, and the strict fake parses the `-c notify` value as TOML and runs it after its turn, with paths that contain spaces and quotes. Those tests prove Fleet's half, not Codex's.
 
+## Prompts Fleet never answers
+
+Claude Code and Codex take Enter at an approval prompt as its highlighted **Yes**, and ignore text typed into it. Until 0.1.0-preview.37, `fleet stop` typed its quit command and Enter into such a prompt, and `fleet send`, `grant`, `approve` and the gate loop typed their one-line pointer and Enter. Each one approved the worker's pending command for the owner. Checked live in tmux with a one-line `touch ~/probe` command (2026-11-17): Claude Code 2.1.326 (`--permission-mode default`, "Do you want to proceed?") and Codex 0.167.0 (`-s workspace-write -a on-request`, "Would you like to run the following command?") both ran it. Claude also stayed open, because its `/exit` reached the prompt and not the composer.
+
+Two adapter fields now stop that:
+
+- **`quit` opens with `escape`.** At either prompt Esc is **No**, so `fleet stop` denies the pending command, then quits. At an idle prompt Esc changes nothing, and mid-turn it interrupts the turn, which a stop ends anyway. Both checked live: the command did not run, and Claude exited in 2.0 s and Codex in 2.3 s.
+- **`prompt_marks`** lists text that only an open prompt shows: Claude's permission prompt footer (`Esc to cancel`), and Codex's approval and menu footers (`Press enter to confirm or esc to cancel`, `enter select`). Before typing, `send`, `grant` and `approve` read the bottom of the worker's screen. While a mark shows there they refuse, save nothing and print the screen lines, so the lead can run the same command again once the owner has answered. The gate loop gives the lead the hand-back instead of sending the failure back. Marks stay ASCII because tmux can mangle other characters outside a UTF-8 locale.
+
+Limits: a prompt that opens in the second between the screen read and the Enter is not caught. Only Claude's Bash permission prompt and Codex's command approval and rate-limit menu were seen live; other prompts with the same footer are covered, and differently worded ones are not. Cursor, Antigravity and OpenCode were not checked and keep their quit sequences without `escape` and without marks. An owner adapter for them can add both once its prompts are known. Owner `quit` overrides in the user config replace the shipped list, so copy the `escape` too.
+
 ## Extra subscriptions
 
 An adapter's `account_env` names the CLI's account-directory variable (`CLAUDE_CONFIG_DIR` for Claude Code, `CODEX_HOME` for Codex). Fleet clears that variable for the launch and the login check unless the adapter's own `env` sets it, so no adapter silently uses the account the lead runs under. An extra account is an adapter that `extends` another and sets `env`:
@@ -305,16 +316,18 @@ max = 1
 
 Both of the example adapter's [profiles](#permission-profiles) use `workspace-write` with `on-request` approval. Effective network and filesystem permissions still come from the host configuration; neither the adapter nor the preamble guarantees OS isolation. Fleet's worker contract prohibits network calls and package installation regardless of those capabilities. Request owner help for a necessary permission instead of weakening the sandbox.
 
-A Codex worker that needs an approval waits in its pane until the owner answers, because the lead never accepts a prompt for them. Codex 0.159+ can route those prompts to its own reviewer instead: `approvals_reviewer = "auto_review"` (`--approve-for-me` on the command line). It reviews sandbox escalations against the policy and does not widen what the sandbox allows. It is the owner's choice, made once in the user config rather than per run, and it is not a way past a decision the owner owes:
+A Codex worker that needs an approval waits in its pane until the owner answers, because the lead never accepts a prompt for them. Fleet never types into that prompt either: see [prompts Fleet never answers](#prompts-fleet-never-answers). Codex 0.159+ can route those prompts to its own reviewer instead: `approvals_reviewer = "auto_review"` (`--approve-for-me` on the command line). It reviews sandbox escalations against the policy and does not widen what the sandbox allows. It is the owner's choice, made once in the user config rather than per run, and it is not a way past a decision the owner owes:
 
 ```toml
 [providers.codex]
-launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c check_for_update_on_startup=false -c approvals_reviewer=auto_review {signals} {profile} {prompt}"
+launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c check_for_update_on_startup=false -c notice.hide_rate_limit_model_nudge=true -c approvals_reviewer=auto_review {signals} {profile} {prompt}"
 ```
 
 An older copy of this line that spells out `-s workspace-write -a on-request` instead of `{profile}` still works; both roles then run it as written. A copy without `{signals}` also works, without Codex's [turn signals](#turn-signals): `wait` then watches its screen, as before.
 
 This is approval routing inside Codex. It is unrelated to Fleet's cross-family review of a ticket's diff, which `review=` controls.
+
+Keep `-c notice.hide_rate_limit_model_nudge=true` in any launch line of your own. Near a usage limit, Codex ends each turn on an "Approaching rate limits" menu that offers a cheaper model, with the switch highlighted. Anything Fleet types while that menu is open goes nowhere, and its Enter picks the switch. `fleet stop`'s `/quit` then fails to stop the worker (`stop-failed`), and a `fleet send` reply is lost while the worker's remaining turns run on the cheaper model. Checked on Codex 0.167.0 in tmux. The menu appeared after a one-line turn at 8% of the weekly limit. With the flag, it never opened and `/quit` exited in about a second. The choice applies only to that session; `~/.codex/config.toml` was not changed. An unknown `notice` key only adds a startup warning, so an older Codex still starts.
 
 Codex workers have no `session` or `resume`, so `launch --resume` and [warm workers](commands.md#warm-workers) (`launch --after`) refuse them. Codex can resume a session by its ID (`codex resume <SESSION_ID> [PROMPT]`), but it picks that ID itself: no public flag names a new session at launch, so Fleet cannot record one. Checked in the source of `openai/codex` at `main` commit `49f0c60` (2026-11-05): `codex-rs/cli/src/main.rs` (`ResumeCommand`) and `codex-rs/tui/src/cli.rs` (`resume_session_id` is internal and set only by `codex resume`). Codex is not installed here and its docs site was blocked from this session, so neither `codex --help` nor the docs were read.
 
@@ -380,7 +393,7 @@ For every new adapter, test a harmless local ticket, multiple waves, a required 
 | --- | --- |
 | Top level | `defaults`, `providers`, `lead_context` |
 | `[defaults]` | `workspace`, `routing`, `prefer`, `max_parallel`, `review`, `review_rounds`, `gate`, `gate_rounds`, `supervise`, `auto_trust`, `backend`, `tmux_socket`, `max_workers`, `max_wall_minutes`, `scope_ignore`, `permission_ceiling`, `check_policy`, `scope_permissions`, `review_transport`, `headless_timeout_minutes`, `worktree_root`, `worktree_setup`, `warm_max`, `warm_context_tokens`, `plan_first`, `acceptance`, `accept_checks`, `watch` |
-| `[providers.<name>]` | `enabled`, `placeholder`, `extends`, `bin`, `bin_aliases`, `launch`, `profiles`, `session`, `resume`, `quit`, `login`, `login_ok`, `account_env`, `env`, `trust`, `models`, `model_config`, `default_home`, `model_note`, `models_allow`, `model_families`, `family_prefixes`, `efforts`, `family`, `plugins`, `max`, `tiers`, `hooks`, `signals`, `headless`, `review_transport`, `add_dir` |
+| `[providers.<name>]` | `enabled`, `placeholder`, `extends`, `bin`, `bin_aliases`, `launch`, `profiles`, `session`, `resume`, `quit`, `login`, `login_ok`, `account_env`, `env`, `trust`, `models`, `model_config`, `default_home`, `model_note`, `models_allow`, `model_families`, `family_prefixes`, `efforts`, `family`, `plugins`, `max`, `tiers`, `hooks`, `signals`, `headless`, `review_transport`, `add_dir`, `prompt_marks` |
 | `[providers.<name>.tiers.<tier>]` | `model`, `effort`, `family` (any tier name) |
 | `[providers.<name>.profiles.<role>]` | `args`, `level`; the roles are `worker` and `review` |
 | `[lead_context.<host>]` | `warn_at`, `dumb_at`; the hosts are `claude` and `codex`. Here another host or key is already an error |

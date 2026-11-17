@@ -42,7 +42,7 @@ class ProviderConfig(unittest.TestCase):
         self.assertEqual(
             fleet.build_launch(p["codex"], "gpt-6-sol", "high", "go"),
             "env -u CODEX_HOME codex -m gpt-6-sol -c model_reasoning_effort=high -c check_for_update_on_startup=false "
-            "-s workspace-write -a on-request go")
+            "-c notice.hide_rate_limit_model_nudge=true -s workspace-write -a on-request go")
         self.assertEqual(
             fleet.build_launch(p["cursor"], "grok-4.7-high", None, "go"),
             "cursor-agent --model grok-4.7-high --trust go")

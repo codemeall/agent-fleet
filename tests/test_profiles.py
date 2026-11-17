@@ -49,7 +49,8 @@ class Profiles(unittest.TestCase):
         home = str(Path("~/.claude-co").expanduser())
         expected = {
             "codex": ("gpt-6-sol", "high", "env -u CODEX_HOME codex -m gpt-6-sol -c model_reasoning_effort=high "
-                                           "-c check_for_update_on_startup=false -s workspace-write -a on-request go"),
+                                           "-c check_for_update_on_startup=false "
+                                           "-c notice.hide_rate_limit_model_nudge=true -s workspace-write -a on-request go"),
             "cursor": ("grok-4.7-high", None, "cursor-agent --model grok-4.7-high --trust go"),
             "claude": ("opus", "high", "env -u CLAUDE_CONFIG_DIR claude --session-id " + SID + " --model opus --effort high go"),
             "claude-co": ("opus", "high", f"env CLAUDE_CONFIG_DIR={home} claude --model opus --effort high go"),
@@ -131,10 +132,22 @@ class Profiles(unittest.TestCase):
                             ('[providers.codex.profiles.review]\nlevel = "sandboxed"\n', "codex.profiles must be"),
                             ('[providers.x]\nbin = "x"\nlaunch = "{bin}"\nprofiles.worker = { args = "-a" }\n',
                              "x.profiles must be"),
-                            ('[providers.cursor]\nbin_aliases = "agent"\n', "cursor.bin_aliases")):
+                            ('[providers.cursor]\nbin_aliases = "agent"\n', "cursor.bin_aliases"),
+                            ('[providers.codex]\nprompt_marks = "Press enter"\n', "codex.prompt_marks must be"),
+                            ('[providers.codex]\nprompt_marks = ["", "enter select"]\n', "codex.prompt_marks must be")):
             with self.subTest(toml), self.assertRaises(fleet.FleetError) as caught:
                 shipped(toml)
             self.assertIn(words, str(caught.exception))
+
+    def test_the_shipped_tui_adapters_cancel_a_prompt_before_quitting(self):
+        """Claude and Codex take Enter at an approval prompt as Yes, so their quit opens with Escape (No) and their
+        prompt_marks stop send from typing into one; both were checked live."""
+        cfg = shipped("")["providers"]
+        for name, word in (("claude", "/exit"), ("codex", "/quit")):
+            with self.subTest(name):
+                self.assertEqual(cfg[name]["quit"], ["escape", word, "enter"])
+                self.assertTrue(cfg[name]["prompt_marks"])
+                self.assertTrue(all(m.isascii() for m in cfg[name]["prompt_marks"]))
 
     def test_launch_profile_follows_the_role(self):
         self.assertEqual(fleet.launch_profile({"role": "implementation"}, {"kind": "implement"}), "worker")

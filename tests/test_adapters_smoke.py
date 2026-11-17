@@ -73,7 +73,7 @@ class ShippedAdapters(unittest.TestCase):
                                                            "0" * 8 + "-0000-4000-8000-" + "0" * 12),
                        "no Fleet prompt": fleet.build_launch(p, model, effort, "do the thing")}
                 with self.subTest(name):
-                    quit_word = p["quit"][0]
+                    quit_word = next(k for k in p["quit"] if k not in fleet.TMUX_KEYS)  # its text, not a key
                     res = subprocess.run(good, shell=True, env=env, input=f"hello\n{quit_word}\n", text=True,
                                          capture_output=True, timeout=30)
                     self.assertEqual(res.returncode, 0, f"{good}\n{res.stdout}{res.stderr}")
@@ -163,6 +163,34 @@ class AdapterSmoke(FleetCase):
     def test_codex(self):
         self.launch_report_stop("codex", notify=True)  # the fake requires Fleet's exact -c notify program
         self.assertEqual(len(self.calls("codex")), 1)
+
+    def stop_at_an_approval_prompt(self, name: str, **extra) -> None:
+        """A worker that hands back and then waits at an approval prompt: send refuses to type into it, saving
+        nothing, and stop answers No (Escape) before it quits, so no command is ever approved for the owner."""
+        self.expectations(name, approval_prompt=True, **extra)
+        self.write_config(f'review = "off"\nprefer = ["{name}"]\n[providers.{name}]\nenabled = true\n')
+        self.fleet("init", "smoke")
+        (self.repo / "01.md").write_text("# Smoke\nChange a.txt.\n")
+        (self.repo / "plan.json").write_text(json.dumps({"tickets": [
+            {"id": "01", "ticket": "01.md", "files": ["a.txt"], "provider": name, "tier": "standard",
+             "context": "A smoke test.", "checks": {"manual": "manual prose review is sufficient"}}]}))
+        self.fleet("plan", "smoke", "--file", str(self.repo / "plan.json"))
+        self.fleet("launch", "smoke", "--ready")
+        self.wait_for("smoke", r"^REPORT 01\b")
+        out = self.fleet("send", "smoke", "01", "please also check b.txt", expected=1)
+        self.assertIn("01 is showing a prompt, so nothing was sent", out)
+        self.assertFalse((self.repo / ".fleet/runs/smoke/inbox/01.md").exists(), "a refused send saves nothing")
+        self.assertRegex(self.fleet("stop", "smoke", "01", "--timeout", "10"), r"01: exited \(@\d+\)")
+        screen = self.fleet("peek", "smoke", "01", "--lines", "40")
+        self.assertIn(f"fake {SHIPPED[name]['bin']} prompt cancelled (No)", screen)
+        self.assertIn(f"fake {SHIPPED[name]['bin']} quits", screen)
+        self.assertEqual(self.errors(name), "")  # nothing answered the prompt Yes
+
+    def test_claude_stop_and_send_never_approve_a_prompt(self):
+        self.stop_at_an_approval_prompt("claude")
+
+    def test_codex_stop_and_send_never_approve_a_prompt(self):
+        self.stop_at_an_approval_prompt("codex", notify=True)
 
     def test_codex_with_auto_trust(self):
         """auto_trust adds Codex's session-only trust override, a third -c."""

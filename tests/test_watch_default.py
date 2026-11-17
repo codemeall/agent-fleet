@@ -116,7 +116,8 @@ class Watch(Machine):
         return out, calls
 
     def watch(self, out: str) -> list[str]:
-        return [line for line in out.splitlines() if line.startswith(("WATCH", "note:"))]
+        return [line for line in out.splitlines() if line.startswith(("WATCH", "note:"))
+                and not line.startswith("note: .fleet/.gitignore")]  # a fresh test repo always gets that one
 
     def test_each_host_gets_its_view(self):
         track = ("run fleet track in another terminal tab to see your workers live (fleet track --pane opens it below, "

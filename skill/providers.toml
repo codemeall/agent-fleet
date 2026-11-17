@@ -3,7 +3,11 @@
 #
 # launch placeholders: {bin} is trusted shell setup; model/effort/prompt are quoted data.
 # Shipped model IDs are account-dependent examples; verify them before routing.
-# quit: sequence sent to the pane; "enter" and "ctrl+c" are keys, anything else is text.
+# quit: sequence sent to the pane; "enter", "escape", "tab" and "ctrl+c" are keys, anything else is text.
+#   Start it with "escape" when the CLI's prompts treat Esc as No: an approval prompt takes the quit's Enter as its
+#   highlighted Yes, so without it `fleet stop` would approve the worker's pending command.
+# prompt_marks: screen text that only an open prompt shows (an approval, a menu). While one is on the worker's
+#   screen, send, grant, approve and the gate loop type nothing: its Enter would answer the prompt for the owner.
 # login: a cheap command that needs no model call; ready when its output contains login_ok.
 # models: lists the account's model IDs (a JSON catalog, or `id<TAB>name` / `id - name` lines);
 #   doctor checks every tier model, and effort where the catalog lists efforts, against it. model_config + default_home: where a CLI that cannot list
@@ -78,7 +82,12 @@ profiles.review = { args = "--permission-mode manual", level = "read-only" }
 headless = "{bin} -p --output-format json --model {model} --effort {effort} --permission-mode manual --permission-prompts none {prompt}"
 session = "--session-id {id}"
 resume = "--resume {id}"
-quit = ["/exit", "enter"]
+# Esc first: at a permission prompt ("Do you want to proceed? > 1. Yes") Esc is No and /exit's Enter would be Yes.
+# Checked on Claude Code 2.1.326 in tmux: Esc at an idle prompt changes nothing, and at a permission prompt it denies
+# the command before /exit quits.
+quit = ["escape", "/exit", "enter"]
+# The permission prompt's footer reads "Esc to cancel · Tab to amend"; marks stay ASCII, which tmux never mangles.
+prompt_marks = ["Esc to cancel"]
 login = "claude auth status"
 login_ok = '"loggedIn": true'
 account_env = "CLAUDE_CONFIG_DIR"
@@ -110,7 +119,11 @@ max = 1
 enabled = true
 bin = "codex"
 # check_for_update_on_startup=false: an "Update available" screen would stall a worker before its prompt runs.
-launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c check_for_update_on_startup=false {signals} {profile} {prompt}"
+# notice.hide_rate_limit_model_nudge=true: near a usage limit, Codex ends each turn on an "Approaching rate limits:
+# switch to a cheaper model?" menu with the switch highlighted. Keys Fleet types then (stop's /quit, fleet send's
+# reply) go nowhere and their Enter switches the worker's model for the rest of its session. Checked on Codex 0.167;
+# an older Codex warns about an unknown notice key and starts anyway.
+launch = "{bin} -m {model} -c model_reasoning_effort={effort} -c check_for_update_on_startup=false -c notice.hide_rate_limit_model_nudge=true {signals} {profile} {prompt}"
 # notify (openai/codex, codex-rs/hooks/src/legacy_notify.rs): runs in the TUI and in exec, after each turn, with an
 # agent-turn-complete JSON as its last argument. Any -c also keeps the TUI off a shared app-server daemon.
 signals = "codex-notify"
@@ -122,7 +135,12 @@ profiles.review = { args = "-s workspace-write -a on-request", level = "workspac
 # (exec's default, which an owner's auto_review would otherwise lift), so a write fails instead of escalating and
 # nothing waits for an answer. Its final message is the report; --json streams events and usage.
 headless = "{bin} exec --json -m {model} -c model_reasoning_effort={effort} -s read-only -c approval_policy=never {prompt}"
-quit = ["/quit", "enter"]
+# Esc first: at an approval prompt ("Would you like to run the following command? > 1. Yes, proceed") Esc is No and
+# /quit's Enter would be Yes. Checked on Codex 0.167.0 in tmux: Esc at an idle prompt changes nothing, and at an
+# approval prompt it denies the command before /quit quits.
+quit = ["escape", "/quit", "enter"]
+# The approval prompt's footer, and the footer of a menu such as the rate-limit one ("enter select · esc back").
+prompt_marks = ["Press enter to confirm or esc to cancel", "enter select"]
 login = "codex login status"
 login_ok = "Logged in"
 account_env = "CODEX_HOME"
