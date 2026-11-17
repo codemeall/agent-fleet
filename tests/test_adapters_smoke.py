@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -164,6 +165,17 @@ class AdapterSmoke(FleetCase):
         self.launch_report_stop("codex", notify=True)  # the fake requires Fleet's exact -c notify program
         self.assertEqual(len(self.calls("codex")), 1)
 
+    def wait_for_prompt(self, name: str, timeout: int = 20) -> None:
+        """Until the worker's screen shows one of the adapter's prompt_marks: what send, grant and approve look for."""
+        deadline = time.monotonic() + timeout
+        while True:
+            screen = self.fleet("peek", "smoke", "01", "--lines", "40")
+            if any(mark in screen for mark in SHIPPED[name]["prompt_marks"]):
+                return
+            if time.monotonic() > deadline:
+                self.fail(f"no approval prompt on 01's screen:\n{screen}{self.diagnostics()}")
+            time.sleep(0.2)
+
     def stop_at_an_approval_prompt(self, name: str, **extra) -> None:
         """A worker that hands back and then waits at an approval prompt: send refuses to type into it, saving
         nothing, and stop answers No (Escape) before it quits, so no command is ever approved for the owner."""
@@ -177,6 +189,7 @@ class AdapterSmoke(FleetCase):
         self.fleet("plan", "smoke", "--file", str(self.repo / "plan.json"))
         self.fleet("launch", "smoke", "--ready")
         self.wait_for("smoke", r"^REPORT 01\b")
+        self.wait_for_prompt(name)  # the report is saved before the prompt is drawn
         out = self.fleet("send", "smoke", "01", "please also check b.txt", expected=1)
         self.assertIn("01 is showing a prompt, so nothing was sent", out)
         self.assertFalse((self.repo / ".fleet/runs/smoke/inbox/01.md").exists(), "a refused send saves nothing")
