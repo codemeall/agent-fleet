@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.0-preview.39
+
+Codex workers start in cmux panes again. Their launch line had grown past what a terminal holds for a shell that is not ready yet, so it reached the shell cut.
+
+- **The launch line no longer carries the worker's command.** cmux types the line into the new pane at once. Until the shell's line editor is up, the terminal holds typed input one line at a time and drops what a line holds past 1024 bytes on macOS (4096 on Linux), its newline included: a cmux pane on macOS ran a 1023-byte command and dropped a 1024-byte one. Codex's line passed 1024 bytes once preview.30 added its `notify` signals, so under cmux on macOS every Codex launch since reached the shell cut inside a quote: launch's Enter left the pane at `cmdand quote>`, and each retry printed `NOT STARTED`. Claude and Cursor lines stayed under 900 bytes and started. Launch now saves the runner's arguments beside the exit receipt (`exits/<id>.<token>.launch.json`) and types only their SHA-256, so the line is a few hundred bytes whatever the command holds. tmux runs use the same line.
+- **The runner starts only what launch saved.** A worker can write the run's folder, so the runner checks the saved arguments against the digest in its line and starts nothing when they are missing or differ. Its receipt says so (exit 124 and a `refused` reason, so a CLI's own exit 124 is never taken for one), and launch prints `NOT STARTED <id>: its runner would not start the worker (<reason>)`. The exit is on record, so the next launch needs no `stop` or `recover`; like any launch that reached its pane, the refused one counts toward the run's caps and a reviewer's rounds.
+- **`--settle` cannot help it.** cmux types the line as the pane opens whatever `--settle` says; `--settle` only moves launch's start check and screen later. A lead had retried a `NOT STARTED` Codex launch with `--settle 12`.
+
 ## 0.1.0-preview.38
 
 The Claude Code plugin shows your workers at the prompt with no install step, and Cursor's CLI can show them in its status line.

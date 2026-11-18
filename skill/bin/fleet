@@ -33,7 +33,7 @@ import time
 import tomllib
 from pathlib import Path
 
-VERSION = "0.1.0-preview.38"  # bump with package.json on release; tests/test_install.py checks they match
+VERSION = "0.1.0-preview.39"  # bump with package.json on release; tests/test_install.py checks they match
 SKILL_DIR = Path(__file__).resolve().parent.parent
 USER_CONFIG = Path(os.environ.get("FLEET_CONFIG", "~/.config/agent-fleet/config.toml")).expanduser()
 HARNESS_SKILL_DIRS = {
@@ -2235,8 +2235,66 @@ def runner_gate(receipt: Path, token: str) -> bool:
     return True
 
 
+# A runner's arguments after its receipt and token (the worker's command; a headless runner's report, usage file and
+# time limit too) are saved beside the receipt, and the launch line carries their SHA-256 in their place. cmux types
+# the line into the new pane at once, before the shell's line editor is up; until then the terminal holds typed input
+# one line at a time and drops what a line holds past 1024 bytes on macOS (4096 on Linux), its newline included. A
+# Codex worker's command alone passes that, so the line must not carry it. The run's folder is one a worker can write,
+# so the digest in the line is what the runner trusts: it runs nothing when the saved arguments are missing or are
+# not the ones launch saved.
+RUNNER_ARGS_REF = "sha256:"
+RUNNER_ARGS_MAX = 1 << 20  # bytes of saved arguments read: far past any launch line
+LAUNCH_REFUSED = 124  # the runner's exit code when it would not run what its launch line names
+
+
+def save_runner_args(receipt: Path, rest: list[str]) -> str:
+    """Save a runner's arguments after its token beside its receipt; returns what the launch line carries instead:
+    the digest of the saved bytes."""
+    data = json.dumps(rest).encode()
+    write_text_atomic(receipt.with_suffix(".launch.json"), data)
+    return RUNNER_ARGS_REF + digest(data)
+
+
+def runner_line(runner: str, receipt: Path, token: str, ref: str) -> str:
+    """The shell line that starts a runner (`_run` or `_headless`) on its saved arguments."""
+    return shlex.join([sys.executable, str(Path(__file__).resolve()), runner, str(receipt), token, ref])
+
+
+def runner_args(args: list[str]) -> list[str]:
+    """A runner's arguments in full. [receipt, token, sha256:<digest>] names the rest, saved by launch; any other
+    list is already whole, as a launch line from before the digest was."""
+    if len(args) == 3 and args[2] and RUNNER_ARGS_REF.startswith(args[2]) and args[2] != RUNNER_ARGS_REF:
+        raise FleetError(f"its launch line ends in {args[2]!r}: it reached the shell cut")
+    if len(args) != 3 or not args[2].startswith(RUNNER_ARGS_REF):
+        return args
+    saved = Path(args[0]).with_suffix(".launch.json")
+    try:
+        data = read_bounded(saved, RUNNER_ARGS_MAX + 1)[0]
+    except OSError as e:
+        raise FleetError(f"{saved} could not be read ({one_line(e, 160)})") from None
+    if len(data) > RUNNER_ARGS_MAX or RUNNER_ARGS_REF + digest(data) != args[2]:
+        raise FleetError(f"{saved} does not match its launch line's digest")
+    return [*args[:2], *json.loads(data)]  # launch's own JSON: the digest says so
+
+
+def runner_args_or_refuse(args: list[str]) -> list[str] | None:
+    """A runner's whole arguments, or None once it has refused them: the reason is on its screen and in its receipt
+    (`refused`, beside returncode LAUNCH_REFUSED), so launch reports a worker that never started, and why. The
+    field, not the code, marks a refusal: a worker's own CLI may exit 124 too."""
+    try:
+        return runner_args(args)
+    except FleetError as e:  # raised only for [receipt, token, digest]
+        why = one_line(e, 300)
+        print(f"fleet: {why}; the worker was not started. Relaunch it.", file=sys.stderr)
+        atomic_json(Path(args[0]), {"token": args[1], "returncode": LAUNCH_REFUSED, "refused": why})
+        return None
+
+
 def run_child(args: list[str]) -> int:
     """Runs inside the worker terminal. Reports exit, never writes the shared run state."""
+    args = runner_args_or_refuse(args)
+    if args is None:
+        return LAUNCH_REFUSED
     if len(args) != 3:
         raise FleetError("internal runner expects receipt, token, command")
     path, token, command = args
@@ -2399,6 +2457,9 @@ def headless_child(args: list[str]) -> int:
     """`fleet _headless`: runs inside the worker terminal. Writes the report, the usage sidecar and the exit receipt,
     never the shared run state. An interrupt (`fleet stop` sends Ctrl-C) stops the CLI and leaves no report; one that
     comes after the CLI has exited is ignored, so the report, usage and receipt are always written."""
+    args = runner_args_or_refuse(args)
+    if args is None:
+        return LAUNCH_REFUSED
     if len(args) not in (5, 6):
         raise FleetError("internal headless runner expects receipt, token, report, usage file, command[, seconds]")
     receipt, token, report, usage_file, command = Path(args[0]), args[1], Path(args[2]), Path(args[3]), args[4]
@@ -4593,15 +4654,15 @@ def launch_one(a, cfg) -> tuple[str, dict]:
                                hooks and hooks["settings"], notify)
         exit_file = d / "exits" / f"{a.id}.{token}.json"
         headless = {}
+        runner, rest = "_run", [command]
         if profile == HEADLESS:  # its runner writes the report, usage and receipt; reconcile records the usage
             usage_file = d / "usage" / f"{a.id}.{token}.json"
             usage_file.parent.mkdir(exist_ok=True)
             headless = {"transport": HEADLESS, "usage_file": str(usage_file)}
             limit = state["options"].get("headless_timeout_minutes", cfg["defaults"]["headless_timeout_minutes"])
-            wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_headless", str(exit_file), token,
-                                  str(report), str(usage_file), command, str(int(limit) * 60)])
-        else:
-            wrapped = shlex.join([sys.executable, str(Path(__file__).resolve()), "_run", str(exit_file), token, command])
+            runner, rest = "_headless", [str(report), str(usage_file), command, str(int(limit) * 60)]
+        # The line names the saved arguments by digest, so its length never follows the command's (save_runner_args).
+        wrapped = runner_line(runner, exit_file, token, save_runner_args(exit_file, rest))
         # A review launch that reaches the terminal is a round; resuming its session is the same one, and a plan
         # review is no round.
         new_round = meta["role"] != "implementation" and not meta.get("plan_of") and not a.resume
@@ -4865,33 +4926,49 @@ def press_enter_unstarted(term, w: dict) -> bool:
     return True
 
 
-def runner_refused(w: dict) -> bool:
-    """Whether this launch's runner exited without starting its CLI because launch's Enter outlasted its wait."""
+def this_receipt(w: dict) -> dict:
+    """This launch's exit receipt, or {} while there is none (or it is another launch's, or unreadable)."""
     try:
         data = json.loads(read_bounded(Path(w["exit_file"]), RECEIPT_MAX)[0])
-        return data.get("token") == w.get("token") and data.get("returncode") == NUDGE_REFUSED
     except (OSError, ValueError, AttributeError, RecursionError):
-        return False
+        return {}
+    return data if isinstance(data, dict) and data.get("token") == w.get("token") else {}
+
+
+def runner_refused(w: dict) -> bool:
+    """Whether this launch's runner exited without starting its CLI because launch's Enter outlasted its wait."""
+    return this_receipt(w).get("returncode") == NUDGE_REFUSED
+
+
+def args_refused_line(w: dict) -> str | None:
+    """What launch says of a runner that ran: None, or NOT STARTED when it refused the arguments its line names
+    (runner_args_or_refuse). That runner has exited with a receipt, so nothing needs a stop or recover first."""
+    why = this_receipt(w).get("refused")
+    if not why:
+        return None
+    return (f"NOT STARTED {w['id']}: its runner would not start the worker ({one_line(str(why), 240)}). Either the "
+            "saved launch arguments beside its exit receipt were missing or changed, or its launch line reached the "
+            "pane's shell cut, which very long paths can cause. Its exit is on record: launch it again as you did")
 
 
 def start_line(term, run: str, w: dict, waited: float) -> str | None:
-    """None once the runner has started. A terminal that types the launch line (cmux) can leave it at the new
-    shell's prompt unrun: with no start record, press Enter once in that pane and look again. Enter only reaches a
-    shell there: see press_enter_unstarted."""
+    """None once the runner has started its worker. A terminal that types the launch line (cmux) can leave it at
+    the new shell's prompt unrun: with no start record, press Enter once in that pane and look again. Enter only
+    reaches a shell there: see press_enter_unstarted."""
     if not getattr(term, "types_command", False) or not w.get("exit_file"):
         return None
     for _ in range(max(0, round(LAUNCH_START_GRACE_S - waited))):  # a short --settle still gives it the grace
         if runner_started(w):
-            return None
+            return args_refused_line(w)
         time.sleep(1)
     if runner_started(w):
-        return None
+        return args_refused_line(w)
     way_out = (f"its pane holds a shell, not the worker. fleet peek {run} {w['id']}, then fleet stop {run} {w['id']} "
                f"and, once ps shows no `fleet _run` with token {w['token']}, fleet recover {run} {w['id']} --evidence "
                "<file> before launching it again")
     try:
         if not press_enter_unstarted(term, w):
-            return None
+            return args_refused_line(w)
     except (FleetError, OSError, subprocess.TimeoutExpired) as e:
         return f"NOT STARTED {w['id']}: no start record and Enter could not be sent ({one_line(e, 160)}); {way_out}"
     time.sleep(LAUNCH_START_GRACE_S)
@@ -4899,8 +4976,8 @@ def start_line(term, run: str, w: dict, waited: float) -> str | None:
         return (f"NOT STARTED {w['id']}: its runner would not start the worker while Fleet's Enter was still being "
                 f"sent; {way_out}")
     if runner_started(w):
-        return (f"{w['id']}: its launch line sat unrun at the new shell's prompt; Fleet pressed Enter and its runner "
-                "started")
+        return args_refused_line(w) or (f"{w['id']}: its launch line sat unrun at the new shell's prompt; Fleet "
+                                        "pressed Enter and its runner started")
     return (f"NOT STARTED {w['id']}: no start record {max(waited, LAUNCH_START_GRACE_S) + LAUNCH_START_GRACE_S:g}s "
             f"after launch, even after Fleet pressed Enter: its launch line never ran; {way_out}")
 
