@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.39
 
 Codex workers start in cmux panes again. Their launch line had grown past what a terminal holds for a shell that is not ready yet, so it reached the shell cut.
 
