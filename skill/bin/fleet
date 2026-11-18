@@ -2290,6 +2290,56 @@ def runner_args_or_refuse(args: list[str]) -> list[str] | None:
         return None
 
 
+# A launch whose runner never ran (launch said NOT STARTED, wait said `never started`) is flagged UNSTARTED beside its
+# receipt, and `fleet stop` then cancels it rather than typing quit keys into a shell: it writes CANCEL, checks that
+# no runner has announced itself, and records the exit. A runner announces itself (runner_gate) before it looks for
+# CANCEL, so one that runs later anyway, from an Enter pressed in that pane, always finds it and starts nothing.
+UNSTARTED, CANCEL = ".unstarted.json", ".cancel.json"
+CANCELLED = "fleet stop cancelled this launch before its runner ran"
+
+
+def runner_cancelled(receipt: Path, token: str) -> bool:
+    """After runner_gate's announce: whether fleet stop cancelled this launch. A cancelled runner writes its receipt
+    and starts nothing."""
+    try:
+        cancelled = json.loads(read_bounded(receipt.with_suffix(CANCEL), RECEIPT_MAX)[0]).get("token") == token
+    except (OSError, ValueError, AttributeError, RecursionError):
+        return False
+    if cancelled:
+        print(f"fleet: {CANCELLED}; the worker was not started. Relaunch it with fleet launch.", file=sys.stderr)
+        atomic_json(receipt, {"token": token, "returncode": LAUNCH_REFUSED, "refused": CANCELLED})
+    return cancelled
+
+
+def flag_unstarted(w: dict) -> None:
+    """Mark this launch as one whose runner never ran, so fleet stop may cancel it (stop_unstarted)."""
+    try:
+        atomic_json(Path(w["exit_file"]).with_suffix(UNSTARTED), {"token": w["token"]})
+    except (OSError, KeyError, TypeError):
+        pass  # stop then takes its usual path: quit keys, and stop-failed for a shell
+
+
+def stop_unstarted(w: dict) -> bool:
+    """fleet stop's path for a launch flagged UNSTARTED: write CANCEL, then, while no runner has announced itself,
+    record the exit as launch's own refusal would (LAUNCH_REFUSED, `refused`). False, with nothing recorded, when it
+    is not flagged or a runner did announce itself first: stop then quits it as any worker, and a runner that
+    announced before CANCEL and found it refuses and writes the receipt that stop waits for."""
+    if not w.get("exit_file") or not w.get("token"):
+        return False
+    receipt = Path(w["exit_file"])
+    try:
+        flagged = json.loads(read_bounded(receipt.with_suffix(UNSTARTED), RECEIPT_MAX)[0]).get("token") == w["token"]
+    except (OSError, ValueError, AttributeError, RecursionError):
+        return False
+    if not flagged:
+        return False
+    atomic_json(receipt.with_suffix(CANCEL), {"token": w["token"]})
+    if runner_started(w):
+        return False
+    atomic_json(receipt, {"token": w["token"], "returncode": LAUNCH_REFUSED, "refused": CANCELLED})
+    return True
+
+
 def run_child(args: list[str]) -> int:
     """Runs inside the worker terminal. Reports exit, never writes the shared run state."""
     args = runner_args_or_refuse(args)
@@ -2303,6 +2353,8 @@ def run_child(args: list[str]) -> int:
               "started, so that key cannot reach it. Relaunch it.", file=sys.stderr)
         atomic_json(Path(path), {"token": token, "returncode": NUDGE_REFUSED})
         return NUDGE_REFUSED
+    if runner_cancelled(Path(path), token):
+        return LAUNCH_REFUSED
     child = subprocess.Popen(command, shell=True, executable="/bin/sh", env=worker_env(Path(path)))
     atomic_json(Path(path).with_suffix(".started.json"),
                 {"token": token, "wrapper_pid": os.getpid(), "child_pid": child.pid})
@@ -2475,6 +2527,10 @@ def headless_child(args: list[str]) -> int:
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, interrupt)
     runner_gate(receipt, token)  # as _run, though its CLI reads no keys: stdin is empty, so a late Enter is harmless
+    if runner_cancelled(receipt, token):
+        for sig, handler in previous.items():
+            signal.signal(sig, signal.SIG_DFL if handler is None else handler)
+        return LAUNCH_REFUSED
     child = subprocess.Popen(command, shell=True, executable="/bin/sh", stdin=subprocess.DEVNULL, text=True,
                              errors="replace", stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
                              env=worker_env(receipt))
@@ -4963,13 +5019,13 @@ def start_line(term, run: str, w: dict, waited: float) -> str | None:
         time.sleep(1)
     if runner_started(w):
         return args_refused_line(w)
-    way_out = (f"its pane holds a shell, not the worker. fleet peek {run} {w['id']}, then fleet stop {run} {w['id']} "
-               f"and, once ps shows no `fleet _run` with token {w['token']}, fleet recover {run} {w['id']} --evidence "
-               "<file> before launching it again")
+    way_out = (f"its pane holds a shell, not the worker. fleet stop {run} {w['id']} cancels the launch and records "
+               "its exit (no ps check or recover needed); then launch it again")
     try:
         if not press_enter_unstarted(term, w):
             return args_refused_line(w)
     except (FleetError, OSError, subprocess.TimeoutExpired) as e:
+        flag_unstarted(w)
         return f"NOT STARTED {w['id']}: no start record and Enter could not be sent ({one_line(e, 160)}); {way_out}"
     time.sleep(LAUNCH_START_GRACE_S)
     if runner_refused(w):
@@ -4978,6 +5034,7 @@ def start_line(term, run: str, w: dict, waited: float) -> str | None:
     if runner_started(w):
         return args_refused_line(w) or (f"{w['id']}: its launch line sat unrun at the new shell's prompt; Fleet "
                                         "pressed Enter and its runner started")
+    flag_unstarted(w)
     return (f"NOT STARTED {w['id']}: no start record {max(waited, LAUNCH_START_GRACE_S) + LAUNCH_START_GRACE_S:g}s "
             f"after launch, even after Fleet pressed Enter: its launch line never ran; {way_out}")
 
@@ -6014,9 +6071,10 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
         elif flagged == "0" and now - since >= limit:
             marker.write_text(f"{token}:{h}|{since}|1")
             if told < since and unrun:  # its launch line never ran: no CLI, so no prompt to answer
+                flag_unstarted(w)
                 events.append(f"STALLED {i} never started: no start record after {int(now - since)}s, so its launch "
-                              f"line is sitting unrun at the shell prompt in its pane; fleet peek {state['run']} {i}, "
-                              f"then fleet stop and fleet recover before launching it again")
+                              f"line is sitting unrun at the shell prompt in its pane; fleet stop {state['run']} {i} "
+                              "cancels the launch and records its exit (no recover needed), then launch it again")
             elif told < since:  # a PERMISSION or IDLE line already told the lead about this screen
                 events.append(f"STALLED {i} screen unchanged for {int(now - since)}s, likely at an approval prompt "
                               f"the owner answers in its pane (or a login, trust or usage limit screen); "
@@ -6719,6 +6777,10 @@ def cmd_stop(a, cfg):
         w = worker(state, i)
         was_live = w["state"] in ACTIVE_STATES
         try:
+            if w["state"] in ACTIVE_STATES and stop_unstarted(w):  # its runner never ran: nothing to quit
+                reconcile(repo, state)
+                print(f"{i}: its runner never ran, so Fleet cancelled the launch and recorded its exit; launch it "
+                      "again (no recover needed)", file=sys.stderr)
             if w["state"] in ACTIVE_STATES:
                 terminal(state).send(w, quit_keys(cfg, w))
                 deadline = time.monotonic() + a.timeout

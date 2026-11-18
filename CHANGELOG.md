@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+After `NOT STARTED`, the lead runs `fleet stop` and launches again. Nothing else.
+
+- **`stop` cancels a launch whose runner never ran.** Launch's `NOT STARTED` and wait's `STALLED <id> never started` now flag the launch. `stop` on a flagged worker types no quit keys into the pane's shell, cancels the launch, records its exit and exits 0, so the ticket launches again at once. Before, `stop` typed the quit keys into a shell, answered `stop-failed`, and the lead had to prove with `ps` that no runner carried the token (a check that matched its own command line) and then `recover` with an evidence file.
+- **A cancelled launch line starts nothing.** The runner announces itself before it looks for the cancel, and stop checks for that announce after writing the cancel. A launch line that someone runs later in that pane therefore refuses (exit 124, `refused` in its receipt). A runner that announced itself first may be running its worker, so `stop` quits that one as usual.
+- **The advice is shorter.** `NOT STARTED` and `STALLED … never started` name `fleet stop` and a relaunch; SKILL.md says "stop, then relaunch".
+
 ## 0.1.0-preview.39
 
 Codex workers start in cmux panes again. Their launch line had grown past what a terminal holds for a shell that is not ready yet, so it reached the shell cut.
