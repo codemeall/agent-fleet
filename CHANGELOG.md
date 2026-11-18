@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.40
 
 After `NOT STARTED`, the lead runs `fleet stop` and launches again. Nothing else.
 
