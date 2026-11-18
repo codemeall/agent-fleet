@@ -359,10 +359,13 @@ screen after 5s:
     1. Yes, proceed
 ```
 
-Under cmux it first checks that the worker started. cmux types the launch line into a new shell, and a line typed before that shell is ready can sit at its prompt without running. The runner writes a start record as soon as it runs, so when there is none 5 seconds in, launch presses Enter once in that pane and looks again 3 seconds later:
+cmux types the launch line into the new pane's shell at once. Until that shell is ready, the terminal drops what a typed line holds past 1024 bytes on macOS (4096 on Linux), its newline included. So the line never carries the worker's command: launch saves the runner's arguments as `exits/<id>.<token>.launch.json` and types only their SHA-256, so the line is a few hundred bytes whatever the command holds. The runner checks the saved arguments against that digest before it starts anything, because a worker can write the run's folder.
+
+Under cmux launch then checks that the worker started. The runner writes a start record as soon as it runs, so when there is none 5 seconds in, launch presses Enter once in that pane and looks again 3 seconds later:
 
 - It started: `<id>: its launch line sat unrun at the new shell's prompt; Fleet pressed Enter and it started`, then the screen.
 - Still nothing: `NOT STARTED <id>: …`, and launch exits 1. The pane holds a shell, not the worker. Don't wait for it: `peek` it, `stop` it, confirm with `ps` that no `fleet _run` carries its token, then `recover` it with that evidence and launch it again.
+- Its runner ran and refused: `NOT STARTED <id>: its runner would not start the worker (<reason>)`, and launch exits 1. The saved arguments were missing or not the ones its line named (something wrote the run's folder), or the line reached the shell cut, which very long paths can cause. Nothing started and its exit is on record: launch it again as you did, with no `stop` or `recover`. The refused launch still counts toward the run's caps and a reviewer's rounds.
 
 The Enter never reaches the worker's CLI. Launch claims a nudge file before checking, and the runner announces itself before it starts the CLI. A runner that starts meanwhile waits for the nudge to end, then discards every queued keystroke, as it always does before starting the CLI. A nudge still there after 45 seconds (a launcher that died, or an Enter that failed or timed out, which keeps its nudge) means the key could still arrive: an interactive runner then refuses to start the CLI and exits 125, which `wait` reports as `EXITED`. Relaunch it. A headless runner goes ahead, since its CLI reads no keys. All this assumes cmux has written a key once `send-key` returns. `--settle 0` skips the screen, not this check, and `--ready` (a fan-out too) runs it for every worker it launched. tmux runs the launch line as the window's own command, so it is never typed and never checked.
 
@@ -374,7 +377,7 @@ A [fan-out](#fan-out) ticket gets one investigator per entry, each on its own en
 - `--family` names the model family when an account-specific model isn't recognized. It never overrides a family the config knows (an exact entry, a tier, a prefix, or a single-family adapter's own `family`): one that contradicts it is refused, here and wherever a family is given (`review`, `judge`, `approve --review`, and a plan's or fan-out entry's `family`), so a model can never pass the cross-family rule as another family.
 - `--resume` continues the stopped worker's own session (same provider and account, adapters with `resume` such as Claude), for example after a usage limit resets.
 - `--after <verified-id>` hands this ticket to the session that did a verified ticket ([warm workers](#warm-workers)). It cannot be combined with `--resume`.
-- `--settle` sets the seconds before the screen is printed (default 5, at most 30; 0 skips the screen, not the start check).
+- `--settle` sets the seconds before the screen is printed (default 5, at most 30; 0 skips the screen, not the start check). It moves the start check later too, but cmux still types the line the moment the pane opens.
 - `--extra-round` allows one more round once the ticket's review rounds are used up, in the owner's words ([review rounds](#review-rounds)).
 
 **Use:** for each ready ticket, and with `--tier review` for a reviewer you launch yourself ([`review`](#review) launches one for you). Read the printed screen; `wait` covers a prompt that appears later.

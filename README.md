@@ -667,7 +667,7 @@ fleet launch / peek / send / wait / stop / agents / attach
 
 Every method that addresses a worker must raise rather than reach a terminal that might belong to someone else. `wait` turns a failed `read` into `UNREACHABLE`; `stop` turns a failed `send` into `stop-failed`, which keeps the worker's slot.
 
-**What the layer doesn't own.** Exit tracking doesn't depend on the backend: `wrapped` is `fleet _run <receipt> <token> <command>`, and that wrapper writes the started and exit receipts the lead trusts. A backend only has to run the command in `repo` and keep its screen readable. Folder trust, prompts, file ownership, capacity and verification never touch it.
+**What the layer doesn't own.** Exit tracking doesn't depend on the backend: `wrapped` is `fleet _run <receipt> <token> sha256:<digest>`, which names the worker's command saved beside the receipt (a backend that types the line needs it short), and that wrapper writes the started and exit receipts the lead trusts. A backend only has to run the command in `repo` and keep its screen readable. Folder trust, prompts, file ownership, capacity and verification never touch it.
 
 **Adding a backend** (for example zellij or WezTerm):
 

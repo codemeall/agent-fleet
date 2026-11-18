@@ -1105,6 +1105,168 @@ class Runtime(RuntimeCase):
             with patch.object(fleet, "runner_started", return_value=True):
                 self.assertNotIn("STARTED", self.call("launch", "demo", "--ready"))
 
+    def typed_line(self) -> str:
+        """What cmux was asked to type into the last new pane."""
+        call = [c for c in self.cmux_calls if c[0] in ("new-split", "new-surface")][-1]
+        return call[call.index("--command") + 1]
+
+    def type_into_a_new_shell(self, line: str, seconds: float = 20) -> bytes:
+        """Type `line` as cmux does: into a new terminal at once, before its shell reads anything. Returns what
+        the terminal showed until the shell (or what it became) exited, or `seconds` passed."""
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        # The shell starts 2 s in: the whole line is typed before it reads anything, however slow the machine.
+        shell = subprocess.Popen(["/bin/sh", "-c", "sleep 2; exec /bin/sh"], stdin=slave, stdout=slave, stderr=slave,
+                                 start_new_session=True)
+        os.close(slave)
+        self.addCleanup(shell.wait)
+        self.addCleanup(shell.kill)
+        os.set_blocking(master, False)
+        left, screen, deadline = line.encode() + b"\n", b"", time.monotonic() + seconds
+        while time.monotonic() < deadline and (left or shell.poll() is None):
+            if left:
+                try:
+                    left = left[os.write(master, left):]
+                except BlockingIOError:
+                    pass
+            try:
+                chunk = os.read(master, 65536)
+            except BlockingIOError:
+                chunk = b""
+            except OSError:  # Linux: the terminal's last process is gone
+                break
+            screen += chunk
+            if not chunk:
+                time.sleep(0.02)
+        return screen
+
+    def test_a_launch_line_typed_before_the_shell_is_ready_still_starts_the_worker(self):
+        """cmux types the launch line into the new pane at once. Until the shell's line editor is up, the terminal
+        holds typed input one line at a time and drops what a line holds past 1024 bytes on macOS (4096 on Linux),
+        its newline included. A Codex launch line was longer than that, so it reached the shell cut and unrun."""
+        agent = self.cache / "agent.sh"                     # outside the checkout: it is no part of the worker's diff
+        agent.write_text('#!/bin/sh\nprintf \'%s\\n\' "$@" > "$0.args"\n')
+        agent.chmod(0o755)
+        pad = "x" * 5000                                    # a command longer than either terminal's line
+        self.cfg["providers"]["writer"].update(bin=str(agent), launch="{bin} " + pad + " {model} {effort} {prompt}")
+        self.setup_run()
+        self.launch()
+        w = self.state()["workers"]["01"]
+        screen = self.type_into_a_new_shell(self.typed_line())
+        got = Path(str(agent) + ".args")
+        self.assertTrue(got.exists(), f"the worker's command never ran; the terminal showed {screen[-300:]!r}")
+        self.assertEqual(got.read_text().splitlines(), shlex.split(w["command"])[1:])   # every argument, whole
+        self.assertEqual(json.loads(Path(w["exit_file"]).read_text()), {"token": w["token"], "returncode": 0})
+
+    def test_the_launch_line_names_the_saved_command_by_its_digest(self):
+        self.cfg["providers"]["writer"]["launch"] = "{bin} --pad " + "x" * 3000 + " --model {model} {effort} {prompt}"
+        self.setup_run()
+        self.launch()
+        w = self.state()["workers"]["01"]
+        typed, receipt = self.typed_line(), Path(w["exit_file"])
+        self.assertLess(len(typed.encode()), 600)           # well under the 1024 bytes a new cmux pane's shell takes
+        self.assertNotIn("xxxx", typed)
+        saved = receipt.with_suffix(".launch.json").read_bytes()
+        self.assertEqual(json.loads(saved), [w["command"]])
+        self.assertEqual(shlex.split(typed)[-4:], ["_run", str(receipt), w["token"], "sha256:" + fleet.digest(saved)])
+        self.assertIn("x" * 3000, w["command"])             # the run still records the whole command
+
+    def test_the_runner_runs_only_what_launch_saved(self):
+        """The saved arguments live in the run's folder, which a worker can write: the launch line's digest is what
+        the runner trusts. A line that reached the shell cut carries a short digest and is refused the same way."""
+        receipt = self.repo / "exits" / "01.tok.json"
+        receipt.parent.mkdir()
+        ran, other = self.repo / "ran", self.repo / "other"
+        ref = fleet.save_runner_args(receipt, [f"touch {shlex.quote(str(ran))}"])
+        self.assertEqual(fleet.run_child([str(receipt), "tok", ref]), 0)
+        self.assertTrue(ran.exists())
+        self.assertEqual(json.loads(receipt.read_text()), {"token": "tok", "returncode": 0})
+
+        def refused(third: str) -> str:
+            for left in (ran, receipt, receipt.with_suffix(".started.json")):   # the run above
+                left.unlink(missing_ok=True)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(fleet.run_child([str(receipt), "tok", third]), fleet.LAUNCH_REFUSED)
+            self.assertFalse(ran.exists() or other.exists())                 # nothing ran
+            self.assertFalse(receipt.with_suffix(".started.json").exists())
+            data = json.loads(receipt.read_text())
+            self.assertEqual((data["token"], data["returncode"]), ("tok", fleet.LAUNCH_REFUSED))
+            self.assertTrue(data["refused"])                                # the reason, for launch to print
+            self.assertIn(data["refused"], err.getvalue())                  # as the pane showed it
+            return err.getvalue()
+
+        self.assertIn("the worker was not started", refused(ref[:-20]))      # the line was cut inside its digest
+        self.assertIn("reached the shell cut", refused("sha25"))             # or inside its prefix: never run as a command
+        receipt.with_suffix(".launch.json").write_text(json.dumps([f"touch {shlex.quote(str(other))}"]))
+        self.assertIn("does not match its launch line", refused(ref))        # the saved command was changed
+        receipt.with_suffix(".launch.json").unlink()
+        self.assertIn("the worker was not started", refused(ref))            # or is gone
+        # A headless runner's saved arguments are everything after the token, read the same way.
+        rest = [str(self.repo / "r.md"), str(self.repo / "u.json"), "true", "60"]
+        ref = fleet.save_runner_args(receipt, rest)
+        self.assertEqual(fleet.runner_args([str(receipt), "tok", ref]), [str(receipt), "tok", *rest])
+        self.assertEqual(fleet.runner_args([str(receipt), "tok", "true"]), [str(receipt), "tok", "true"])  # as before
+
+    def test_a_headless_runner_runs_only_what_launch_saved(self):
+        receipt = self.repo / "exits" / "rev.tok.json"
+        receipt.parent.mkdir()
+        report, usage, ran = self.repo / "rev.md", self.repo / "usage.json", self.repo / "ran"
+        ref = fleet.save_runner_args(receipt, [str(report), str(usage), f"touch {shlex.quote(str(ran))}", "60"])
+        receipt.with_suffix(".launch.json").write_text(json.dumps([str(report), str(usage), "true", "60"]))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(fleet.headless_child([str(receipt), "tok", ref]), fleet.LAUNCH_REFUSED)
+        self.assertIn("the worker was not started", err.getvalue())
+        self.assertFalse(ran.exists() or report.exists() or usage.exists())    # nothing ran, nothing reported
+        self.assertEqual(json.loads(receipt.read_text())["returncode"], fleet.LAUNCH_REFUSED)
+        receipt.unlink()
+        ref = fleet.save_runner_args(receipt, [str(report), str(usage), f"touch {shlex.quote(str(ran))}", "60"])
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(fleet.headless_child([str(receipt), "tok", ref]), 0)
+        self.assertTrue(ran.exists() and report.exists())                    # saved as launch saved it: it runs
+        self.assertEqual(json.loads(receipt.read_text()), {"token": "tok", "returncode": 0})
+
+    def test_launch_names_a_runner_that_refused_its_launch_line(self):
+        self.setup_run()
+        real = self.fake_cmux
+
+        def cmux(*args, **kwargs):
+            out = real(*args, **kwargs)
+            if "new-split" in args:                         # its runner ran, and would not start the worker
+                w = self.state()["workers"]["01"]
+                Path(w["exit_file"]).write_text(json.dumps({"token": w["token"], "returncode": fleet.LAUNCH_REFUSED,
+                                                            "refused": "01.tok.launch.json was changed"}))
+            return out
+        with patch.object(fleet, "cmux", side_effect=cmux), patch.object(fleet.time, "sleep"), \
+                patch.object(fleet, "start_line", REAL_START_LINE):
+            out = self.call("launch", "demo", "01", "writer", "--tier", "standard", "--settle", "0", expected=1)
+        self.assertIn("NOT STARTED 01: its runner would not start the worker (01.tok.launch.json was changed)", out)
+        self.assertIn("launch it again as you did", out)
+        self.assertFalse([c for c in self.cmux_calls if c[0] == "send-key"])     # no Enter: there is no shell to press it in
+        refused = self.state()["workers"]["01"]["token"]
+        self.launch()                                       # its exit is on record: no stop or recover first
+        w = self.state()["workers"]["01"]
+        self.assertEqual(w["state"], "running")
+        self.assertNotEqual(w["token"], refused)
+
+    def test_a_worker_that_exits_124_on_its_own_is_not_reported_as_refused(self):
+        """124 is LAUNCH_REFUSED's code, and timeout(1)'s too: only the receipt's `refused` field marks a refusal."""
+        self.setup_run()
+        real = self.fake_cmux
+
+        def cmux(*args, **kwargs):
+            out = real(*args, **kwargs)
+            if "new-split" in args:                         # it started, and its CLI exited 124 at once
+                self.started()
+                w = self.state()["workers"]["01"]
+                Path(w["exit_file"]).write_text(json.dumps({"token": w["token"], "returncode": 124}))
+            return out
+        with patch.object(fleet, "cmux", side_effect=cmux), patch.object(fleet.time, "sleep"), \
+                patch.object(fleet, "start_line", REAL_START_LINE):
+            out = self.call("launch", "demo", "01", "writer", "--tier", "standard", "--settle", "0")
+        self.assertNotIn("STARTED", out)
+
     def test_runner_started_reads_only_this_launchs_records(self):
         self.setup_run()
         self.launch()
