@@ -740,6 +740,39 @@ class Runtime(RuntimeCase):
         self.call("status", "demo")  # a exited; its diff awaits the lead's verification
         self.assertIn("SKIPPED b: files overlap a", self.call("launch", "demo", "--ready"))
 
+    def test_a_per_ticket_launch_defaults_to_the_saved_assignment(self):
+        # A light ticket with a pinned effort. Omitting the route must not fall back to tier standard.
+        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off", *self.off_reason("off"))
+        ticket = self.repo / "01.md"
+        ticket.write_text("# Ticket 01\nImplement owned change and verify its behavior.\n")
+        plan = self.repo / "plan.json"
+        plan.write_text(json.dumps({"tickets": [{
+            "id": "01", "ticket": str(ticket), "files": ["owned.txt"], "provider": "writer", "tier": "light",
+            "model": "writer-model", "effort": "low", "family": "openai",
+            "context": "Keep the edit local.", "checks": [{"manual": "Read the diff"}]}],
+            "decisions": ["Pinned light on purpose."]}))
+        self.call("plan", "demo", "--file", str(plan))
+        self.prompt("01")
+        mismatch = self.call("launch", "demo", "01", "writer", "--tier", "standard", expected=1)
+        for part in ("provider writer", "tier light", "model writer-model", "effort low", "family openai"):
+            self.assertIn(part, mismatch)
+        self.assertIn("fleet launch demo 01 writer --tier light --model writer-model --effort low --family openai",
+                      mismatch)
+        self.assertNotIn("01", self.state()["workers"])
+        provider_mismatch = self.call("launch", "demo", "01", "reviewer", expected=1)
+        self.assertIn("provider writer", provider_mismatch)
+        self.assertNotIn("01", self.state()["workers"])
+        launched = self.call("launch", "demo", "01")  # id only: the whole route comes from the plan
+        self.assertIn("@low", launched)
+        self.assertEqual(self.route_of("01"), ("writer", "light", "writer-model", "low", "openai"))
+        self.stop_with_receipt()
+        self.call("launch", "demo", "01", "writer")  # provider only, every other route flag omitted
+        self.assertEqual(self.route_of("01"), ("writer", "light", "writer-model", "low", "openai"))
+
+    def route_of(self, ticket="01"):
+        worker = self.state()["workers"][ticket]
+        return tuple(worker[key] for key in ("provider", "tier", "model", "effort", "family"))
+
     def test_launch_ready_is_refused_on_hold_and_alongside_a_ticket(self):
         self.setup_run()
         self.call("hold")

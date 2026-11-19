@@ -4630,7 +4630,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
             steered, family = False, r["family"]  # the steer landed on the plan's own route
         if steered:  # the plan's route no longer applies, so check what plan time would have
             if a.tier != t["tier"]:
-                raise FleetError("launch tier must match saved plan")
+                raise FleetError(route_mismatch_message(a.run, a.id, r))
             check_allowed(pcfg, a.provider, model)
             check_effort(pcfg, a.provider, effort)
             check_pool(routing_pool(state["options"]["routing"], cfg), a.provider, model, "steered launch")
@@ -4640,9 +4640,9 @@ def launch_one(a, cfg) -> tuple[str, dict]:
             print(f"steered ({t['tier']}): {t['provider']}:{t['model']} -> {a.provider}:{model} (fleet steer reset to undo)",
                   file=sys.stderr)
         elif (a.provider, a.tier, model, effort) != (r["provider"], r["tier"], r["model"], r["effort"]):
-            raise FleetError("launch provider/tier/model/effort must match saved plan")
+            raise FleetError(route_mismatch_message(a.run, a.id, r))
         elif family != r["family"]:
-            raise FleetError("launch family must match saved plan")
+            raise FleetError(route_mismatch_message(a.run, a.id, r))
         for other in running:
             owner = ticket_of(other)
             if separate_trees(state, a.id, owner):
@@ -4928,14 +4928,73 @@ def cmd_launch(a, cfg):
     return code
 
 
+LAUNCH_ROUTE_KEYS = ("provider", "tier", "model", "effort", "family")
+
+
+def route_field(route: dict, key: str) -> str:
+    value = route.get(key)
+    return "none" if not value else str(value)
+
+
+def saved_launch_command(run: str, wid: str, route: dict) -> str:
+    """A command that repeats the saved assignment, safe to copy."""
+    argv = ["fleet", "launch", run, wid, str(route["provider"]), "--tier", str(route["tier"])]
+    for flag, key in (("--model", "model"), ("--effort", "effort"), ("--family", "family")):
+        if route.get(key):
+            argv.extend([flag, str(route[key])])
+    return shlex.join(argv)
+
+
+def route_mismatch_message(run: str, wid: str, route: dict) -> str:
+    """Why a per-ticket launch refused: the saved provider, tier, model, effort and family, then a command."""
+    shown = ", ".join(f"{key} {route_field(route, key)}" for key in LAUNCH_ROUTE_KEYS)
+    return f"launch must match the saved plan: {shown}\n{saved_launch_command(run, wid, route)}"
+
+
+def saved_launch_route(state: dict, wid: str) -> dict | None:
+    """The assignment a per-ticket implementation launch defaults to, or None for a review, a plan
+    review, or an id that is neither a ticket nor an implementation prompt."""
+    meta = state["prompts"].get(wid) or {}
+    if meta.get("plan_of") or meta.get("role") not in (None, "implementation"):
+        return None
+    if meta.get("role") != "implementation" and wid not in state["tickets"]:
+        return None
+    if meta.get("role") != "implementation":
+        meta = {}  # a ticket with no prompt yet: the ticket itself is the saved assignment
+    try:
+        route = planned_route(state, meta, wid)
+    except (KeyError, FleetError):
+        return None
+    if not isinstance(route, dict) or not route.get("provider") or "tier" not in route:
+        return None
+    return route
+
+
+def apply_saved_launch_defaults(a, state: dict) -> None:
+    """Fill an omitted provider, tier, model, effort or family from the saved assignment.
+    An explicit value that differs is a mismatch. This does not change settle or wait."""
+    route = saved_launch_route(state, a.id)
+    if route is None:
+        return
+    for key in LAUNCH_ROUTE_KEYS:
+        given = getattr(a, key, None)
+        if given is not None and given != route.get(key):
+            raise FleetError(route_mismatch_message(a.run, a.id, route))
+    for key in LAUNCH_ROUTE_KEYS:
+        if getattr(a, key, None) is None:
+            setattr(a, key, route.get(key))
+
+
 def launch_command(a, cfg):
     if a.ready:
         return launch_ready(a, cfg)
     if a.id is not None and (load_run(repo_root(), a.run)["tickets"].get(a.id) or {}).get("fanout"):
         return launch_fanout(a, cfg)
-    if a.id is None or a.provider is None:
+    if a.id is None:
         raise FleetError("launch needs <id> <provider> [--tier …], or --ready to launch every ready ticket")
-    a.tier = a.tier or "standard"
+    apply_saved_launch_defaults(a, load_run(repo_root(), a.run))
+    if a.provider is None:
+        raise FleetError("launch needs <id> <provider> [--tier …], or --ready to launch every ready ticket")
     a.settle = LAUNCH_SETTLE_S if a.settle is None else a.settle
     label, w = launch_one(a, cfg)
     print(f"{a.id}: {label} on {w['surface']}")
@@ -14692,7 +14751,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("run")
     s.add_argument("id", nargs="?")
     s.add_argument("provider", nargs="?")
-    s.add_argument("--tier", choices=["heavy", "standard", "light", "review"], help="default standard")
+    s.add_argument("--tier", choices=["heavy", "standard", "light", "review"],
+                   help="default: the saved assignment (pass review for a reviewer)")
     s.add_argument("--model")
     s.add_argument("--effort")
     s.add_argument("--family", help="known family for an account-specific model override")

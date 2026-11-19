@@ -2,7 +2,7 @@
 
 For parameterized model IDs containing commas, select `single:<provider>` and set `model` in the JSON plan. The conversational `agents=` shorthand is comma-separated and cannot represent commas inside an ID. Quote the same full ID when passing `launch --model`.
 
-The lead chooses assignments; Fleet enforces the saved plan. Persist the routing mode with `init --routing` and every ticket assignment with `plan --file`. Use the same provider, tier and explicit overrides at launch.
+The lead chooses assignments; Fleet enforces the saved plan. Persist the routing mode with `init --routing` and every ticket assignment with `plan --file`. An omitted provider, tier, model, effort or family at launch takes the saved assignment. A value you pass must match it.
 
 | Mode | Pool |
 | --- | --- |
@@ -87,7 +87,7 @@ When a provider is failing, rate-limited or a poor fit mid-run, steer future imp
 - `fleet steer model <run> <name>` then picks that provider's model; it must pass `models_allow`. It replaces every tier's model, light tickets included, so prefer steering the provider alone.
 - `fleet steer reset <run>` returns to the plan's routing.
 
-Keep passing the plan's provider and tier to `fleet launch`; it prints `steered (<tier>): …` and records what the worker actually ran. Open panes and reviews are never steered, so cross-family review checks the writer's actual family. `fleet resume` shows an active steer.
+Omit the route, or pass the plan's provider and tier: `fleet launch` applies the steer, prints `steered (<tier>): …`, and records what the worker actually ran. Open panes and reviews are never steered, so cross-family review checks the writer's actual family. `fleet resume` shows an active steer.
 
 A worker on a usage limit usually shows as `STALLED`; `fleet peek` confirms it. Stop it, then either relaunch after the reset with `--resume`, which continues the worker's own session (same provider, adapters with `resume` such as Claude), or steer within the run's routing and relaunch fresh with a Repair note (examples 6). A usage limit is not a permission denial: steering inside the run's routing needs no further approval. When neither is possible, tell the owner.
 
