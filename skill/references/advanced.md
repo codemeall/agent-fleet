@@ -51,21 +51,10 @@ No ticket folder, or new work mid-run: [delegating mid-conversation](delegation.
 
 `fleet agents`, `fleet track`, `fleet attach`, the status line and the dashboard are the owner's. Do not take their focus, and do not answer a permission prompt from those views. The owner answers `PERMISSION` there. Detail: [owner views](commands.md#owner-views).
 
-## Other wake lines
-
-These show up once the matching feature is in use. They are not part of a plain wait.
+## Notes
 
 - `NOTE <id>`: a worker's `@lead` note. `fleet board <run>` shows the rest.
-- `SCOPE <path>`: a file outside every ticket changed. Find out who before acceptance.
-- `STALLED <id>`: the screen has not changed. `fleet peek` for a prompt, error, or usage limit. Peek only when a launch screen or a wake line calls for it.
-- `IDLE <id>`: the worker is idle without handing back. Peek, then `fleet send`.
-- `UNREACHABLE <id>`: its pane or window cannot be read. It may be closed.
-- `HOLD`: launches are on hold and no worker is running. Tell the owner and end the turn. Do not wait again until they release.
 
-`fleet hold` and `fleet release` are the owner's ask only.
-
-Before a combined-tree check batch (full suite, typecheck, build), run it once for tickets that are ready together, after `fleet merge` in a worktree run, unless the run's `accept_checks` do. Keep check output short and preserve exact failures in evidence.
+`fleet hold` and `fleet release` are the owner's ask only. `PLAN`, `FANOUT`, `VERDICT`, `READY`, `FINDINGS` and `GATE-FAILED` are in the sections above.
 
 On the owner's ask to hand off or compact, follow [lead context](lead-context.md). Include your `fleet context` reading and `fleet cost <run>` when you report a wave. A launch refused at a cap (`max_workers`, `max_wall_minutes`) goes to the owner. Never retry around it.
-
-Glossary and ADR paths come from project configuration (`GLOSSARY.md`, `GLOSSARY-MAP.md` or, in older repositories, `CONTEXT.md`). Fill any `<!-- LEAD: ... -->` comment a prompt still names. Launch refuses unfilled ones. `launch --ready` writes a missing prompt. It does not rewrite one you already wrote.
