@@ -12,7 +12,7 @@ When tickets have planned `{"run":...}` checks and the owner asked for the gate,
 
 ## Supervise
 
-When the owner's config or request names supervise steps, run `fleet supervise <run>` with the same long timeout as `wait`, instead of `wait`. It also starts required reviews and launches unblocked tickets. It returns as soon as something needs you. Flags: [supervise](commands.md#supervise).
+When the owner's config or request names supervise steps, run `fleet supervise <run>` with the same `--timeout` as `wait` (it also refuses a value above 600 s), instead of `wait`. It also starts required reviews and launches unblocked tickets. It returns as soon as something needs you. Flags: [supervise](commands.md#supervise).
 
 Extra wake lines you will see only on this path:
 
