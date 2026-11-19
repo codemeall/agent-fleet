@@ -6,6 +6,8 @@ import importlib.util
 import json
 import os
 import shlex
+import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -999,6 +1001,43 @@ class LeadContext(unittest.TestCase):
                 cfg.write_text(body)
                 with self.assertRaises(fleet.FleetError):
                     fleet.load_config(cfg)
+
+
+class PythonGuard(unittest.TestCase):
+    """The skill entrypoint refuses Python older than 3.11 before it imports tomllib."""
+
+    MESSAGE = "fleet: Python 3.11+ is required. Install it or set FLEET_PYTHON to its executable path."
+
+    def test_version_guard_matches_the_shim_and_runs_before_tomllib(self):
+        source = (ROOT / "skill/bin/fleet").read_text()
+        shim = (ROOT / "bin/fleet.js").read_text()
+        self.assertIn(self.MESSAGE, source)
+        self.assertIn(self.MESSAGE, shim)
+        self.assertLess(source.index("sys.version_info < (3, 11)"), source.index("import tomllib"))
+        probe = subprocess.run(
+            [sys.executable, "-c",
+             "import sys, runpy\n"
+             "sys.version_info = (3, 9, 0)\n"
+             f"runpy.run_path({str(ROOT / 'skill/bin/fleet')!r}, run_name='__main__')\n"],
+            text=True, capture_output=True)
+        self.assertNotEqual(probe.returncode, 0)
+        self.assertIn(self.MESSAGE, probe.stderr)
+        self.assertNotIn("Traceback", probe.stderr)
+        self.assertNotIn("tomllib", probe.stderr)
+        self.assertNotIn("tomllib", probe.stdout)
+
+    def test_doctor_prints_the_python_executable_and_version(self):
+        orig = fleet.cmux
+        fleet.cmux = lambda *a, **k: ""
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                fleet.cmd_doctor(type("A", (), {"providers": []})(), {"providers": {}})
+        finally:
+            fleet.cmux = orig
+        line = next(item for item in out.getvalue().splitlines() if item.startswith("python"))
+        self.assertIn(sys.executable, line)
+        self.assertIn(sys.version.split()[0], line)
 
 
 if __name__ == "__main__":

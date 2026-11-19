@@ -6,6 +6,15 @@ Standard library only (Python 3.11+), so any harness with a shell can drive it.
 """
 from __future__ import annotations
 
+import sys
+
+# tomllib is 3.11+. Check before importing it so an older python3 (macOS /usr/bin/python3
+# is often 3.9) prints the same message as bin/fleet.js instead of ModuleNotFoundError.
+if sys.version_info < (3, 11):
+    print("fleet: Python 3.11+ is required. Install it or set FLEET_PYTHON to its executable path.",
+          file=sys.stderr)
+    raise SystemExit(1)
+
 import argparse
 import atexit
 import base64
@@ -26,7 +35,6 @@ import shutil
 import signal
 import stat
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -11420,6 +11428,7 @@ def cmd_doctor(a, cfg):
     ok = True
     accounts: dict[tuple[str, str], list[str]] = {}
     print(f"fleet         {VERSION}  ({SKILL_DIR})")
+    print(f"python        {sys.executable}  ({sys.version.split()[0]})")
     chosen = cfg.get("defaults", DEFAULTS).get("backend", "auto")
     usable = []
     print(f"backend       {chosen}" + ("  (cmux inside cmux or with a workspace, else headless tmux)" if chosen == "auto" else ""))
