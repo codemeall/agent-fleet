@@ -172,10 +172,19 @@ fleet doctor
 
 `version` prints the runtime's version and the skill directory it runs from. With several installs, it tells you which copy your shell found.
 
-`doctor` checks the terminal backends (cmux connectivity, tmux availability; only your configured one has to pass), worker executables and login signals, and checks each tier model against the account's model list where the CLI offers one (Codex, Cursor, Antigravity, OpenCode). It cannot guarantee model access or a successful worker session. It also reports:
+`doctor` checks the terminal backends (cmux connectivity, tmux availability; only your configured one has to pass), worker executables and login signals, whether each enabled CLI already trusts this checkout and the worktree root, and checks each tier model against the account's model list where the CLI offers one (Codex, Cursor, Antigravity, OpenCode). A missing trust or a login check that does not report logged in fails doctor and names the fix. It cannot guarantee model access or a successful worker session. It also reports:
 
 - the runtime's version, and each host's installed `fleet` skill with its version, flagging copies that differ from the runtime you ran. Copies installed before `fleet version` existed show `version unknown`.
 - where each [companion skill](#companion-skills-optional) is installed: the user-level skill directories, plus `.claude/skills`, `.agents/skills` and `.cursor/skills` in the current directory. Missing companions get an install command and never make `doctor` fail. Skills installed through a plugin aren't detected.
+
+Recommended explicit owner opt-in, still off unless you set it. In `~/.config/agent-fleet/config.toml`:
+
+```toml
+[defaults]
+auto_trust = true
+```
+
+Launch then marks this checkout and the worktree root trusted for Claude, Codex and Antigravity before a worker starts. The default stays false. Fleet never turns this on for you. See `config.example.toml`.
 
 When a newer model ships, you don't need a Fleet update. List what your account offers and point a tier at it in your config:
 

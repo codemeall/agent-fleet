@@ -919,6 +919,111 @@ def prepare_trust(cfg: dict, name: str, pcfg: dict, repo: Path, also: tuple[Path
     return ""
 
 
+def claude_trust_file(pcfg: dict) -> Path:
+    """The account's .claude.json, the file trust_claude writes. Read-only callers use the same path."""
+    sets, _ = account_env(pcfg)
+    home = sets.get(pcfg.get("account_env") or "")
+    return (Path(home) if home else Path.home()) / ".claude.json"
+
+
+def codex_trust_file(pcfg: dict) -> Path:
+    """Codex's config.toml, where a saved project trust_level lives. The session -c override is separate."""
+    home = account_env(pcfg)[0].get("CODEX_HOME") or str(Path(pcfg.get("default_home") or "~/.codex").expanduser())
+    return Path(home) / "config.toml"
+
+
+def read_trust(pcfg: dict, path: str) -> tuple[bool, str | None]:
+    """Whether `path` is already trusted for this adapter, and a short reason when the trust file cannot be read.
+    Never writes. A missing file is simply not trusted."""
+    method = pcfg.get("trust")
+    try:
+        if method == "claude-config":
+            data = json.loads(claude_trust_file(pcfg).read_text())
+            projects = data.get("projects") if isinstance(data, dict) else None
+            entry = projects.get(path) if isinstance(projects, dict) else None
+            return isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True, None
+        if method == "agy-settings":
+            data = json.loads(Path(AGY_SETTINGS).expanduser().read_text())
+            trusted = data.get("trustedWorkspaces") if isinstance(data, dict) else None
+            return isinstance(trusted, list) and path in trusted, None
+        if method == "codex-flag":
+            with open(codex_trust_file(pcfg), "rb") as fh:
+                data = tomllib.load(fh)
+            projects = data.get("projects") if isinstance(data, dict) else None
+            entry = projects.get(path) if isinstance(projects, dict) else None
+            return isinstance(entry, dict) and entry.get("trust_level") == "trusted", None
+    except FileNotFoundError:
+        return False, None
+    except (OSError, ValueError, tomllib.TOMLDecodeError) as e:
+        return False, f"could not read trust data ({type(e).__name__})"
+    return False, None
+
+
+def trust_targets(cfg: dict, repo: Path | None) -> list[tuple[str, str | None]]:
+    """The checkout, when this command is inside one, and the worktree root workers would start under."""
+    defaults = cfg.get("defaults")
+    home_cfg = cfg if isinstance(defaults, dict) else {"defaults": DEFAULTS}
+    targets: list[tuple[str, str | None]] = [("checkout", str(repo.resolve()) if repo is not None else None)]
+    targets.append(("worktree root", str(worktree_home(home_cfg).resolve())))
+    return targets
+
+
+def untrusted_labels(cfg: dict, pcfg: dict, repo: Path | None) -> list[str]:
+    """Checkout and worktree-root paths this CLI would still ask to trust. Empty when auto_trust is on,
+    the CLI asks nothing, or each path is already trusted. Reads only."""
+    if cfg.get("defaults", DEFAULTS).get("auto_trust") or pcfg.get("trust") not in TRUST_METHODS:
+        return []
+    missing = []
+    for label, path in trust_targets(cfg, repo):
+        if path is None:
+            missing.append("checkout (not inside a git repository; run fleet doctor from the checkout)")
+            continue
+        trusted, why = read_trust(pcfg, path)
+        if not trusted:
+            missing.append(f"{label} {path}" + (f" ({why})" if why else ""))
+    return missing
+
+
+def trust_fix_line() -> str:
+    return (f"fix: set auto_trust = true under [defaults] in {USER_CONFIG} "
+            "(explicit owner opt-in; the default stays false)")
+
+
+def login_fix(name: str, pcfg: dict) -> str:
+    """The owner's sign-in command. Doctor and init print it; they never run it."""
+    login = pcfg.get("login") or ""
+    sets, _ = account_env(pcfg)
+    var = pcfg.get("account_env")
+    prefix = f"{var}={shlex.quote(sets[var])} " if var and var in sets else ""
+    if login.startswith("claude auth status"):
+        return f"fix: {prefix}claude auth login"
+    if login.startswith("codex login status"):
+        return f"fix: {prefix}codex login"
+    if login.startswith("cursor-agent status") or login.startswith("agent status"):
+        binary = first_binary(pcfg.get("bin") or name)
+        return f"fix: {binary} login"
+    if login.startswith("opencode "):
+        return "fix: opencode auth login"
+    return (f"fix: sign in to {name} in your own terminal (fleet ran `{login}` with stdin closed and it did not "
+            "report logged in; fleet does not start a sign-in)")
+
+
+def owner_action_block(cfg: dict, repo: Path | None) -> str:
+    """One block when an enabled CLI is missing folder trust or a detectable login. Empty when nothing is missing."""
+    lines = []
+    for name, pcfg in cfg.get("providers", {}).items():
+        if not pcfg.get("enabled", True) or pcfg.get("placeholder"):
+            continue
+        missing = untrusted_labels(cfg, pcfg, repo)
+        if missing:
+            lines.append(f"- {name}: not trusted: {'; '.join(missing)}. {trust_fix_line()}")
+        if "login" in pcfg and not login_check(pcfg)[0]:
+            lines.append(f"- {name}: not logged in. {login_fix(name, pcfg)}")
+    if not lines:
+        return ""
+    return "owner action needed:\n" + "\n".join(lines)
+
+
 def worker_prompt_line(prompt_path: Path, ticket_id: str) -> str:
     return (f"Read {prompt_path} and follow it exactly. You are fleet worker {ticket_id}. "
             f"Your report path and hard rules are in that file, and it is complete: do not load the fleet skill "
@@ -3453,6 +3558,9 @@ def cmd_init(a, cfg):
         print("note: .fleet/.gitignore keeps run state out of Git, and shows as untracked `.fleet/` until the owner "
               "decides once per project: commit it (every clone then ignores .fleet/runs/), or add `.fleet/` to "
               ".git/info/exclude to keep Fleet local. Ask them which.", file=sys.stderr)
+    block = owner_action_block(cfg, repo)
+    if block:
+        print(block)
     print(f"Next: fleet plan {a.run} --file <plan.json>")
 
 
@@ -11560,6 +11668,10 @@ def cmd_release(a, cfg):
 def cmd_doctor(a, cfg):
     ok = True
     accounts: dict[tuple[str, str], list[str]] = {}
+    try:
+        doctor_repo = repo_root()
+    except (FleetError, OSError, subprocess.TimeoutExpired):
+        doctor_repo = None
     print(f"fleet         {VERSION}  ({SKILL_DIR})")
     print(f"python        {sys.executable}  ({sys.version.split()[0]})")
     chosen = cfg.get("defaults", DEFAULTS).get("backend", "auto")
@@ -11593,6 +11705,11 @@ def cmd_doctor(a, cfg):
             ok = False
             print(f"{name:<13} PLACEHOLDER: not a supported adapter; see references/providers.md#placeholder-adapters")
             continue
+        gaps = untrusted_labels(cfg, p, doctor_repo)
+        if gaps:
+            ok = False
+            print(f"{name:<13} NOT TRUSTED: {'; '.join(gaps)}")
+            print(f"              {trust_fix_line()}")
         binary = first_binary(p["bin"])
         found = shutil.which(binary)
         if not found:
@@ -11616,6 +11733,7 @@ def cmd_doctor(a, cfg):
         tiers = ", ".join(f"{t}={v.get('model')}" for t, v in p.get("tiers", {}).items())
         if not ready:
             print(f"{name:<13} LOGIN CHECK FAILED  max={p.get('max', 2)}  {tiers}")
+            print(f"              {login_fix(name, p)}")
             print(*launch_lines, sep="\n")
             continue
         missing, note = model_problems(p)
@@ -12006,7 +12124,9 @@ def login_check(p: dict) -> tuple[bool, str]:
     if "login" not in p:
         return True, ""
     try:
-        res = subprocess.run(p["login"], shell=True, capture_output=True, text=True, timeout=60, env=child_env(p))
+        # stdin closed: a status command cannot sit on a prompt or start a sign-in. Doctor never runs the fix.
+        res = subprocess.run(p["login"], shell=True, capture_output=True, text=True, timeout=60, env=child_env(p),
+                             stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return False, ""
     output = res.stdout + res.stderr
