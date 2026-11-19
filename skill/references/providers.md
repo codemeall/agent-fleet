@@ -73,7 +73,7 @@ enabled = false
 ```
 
 - **Auto routing** uses enabled, authenticated providers in `defaults.prefer` order. Turning a provider on does not add it there; add its name to `prefer` under `[defaults]` yourself. `single:<name>` and `agents=` routing can name it without that; `fleet init` refuses such routing when a named provider is off or a placeholder.
-- **Turning one off** stops new plans, launches, steers and review launches that name it. Workers already running on it keep running until they finish or you stop them. To move a live run off a failing provider, steer it ([skill](../SKILL.md#steering-routing)) rather than turning the provider off mid-run. A run steered to a provider that is then turned off cannot launch until `fleet steer reset <run>` or a steer elsewhere.
+- **Turning one off** stops new plans, launches, steers and review launches that name it. Workers already running on it keep running until they finish or you stop them. To move a live run off a failing provider, steer it ([steering](advanced.md#steering)) rather than turning the provider off mid-run. A run steered to a provider that is then turned off cannot launch until `fleet steer reset <run>` or a steer elsewhere.
 - **Sign-in** is separate. Enabling a provider never signs it in: the owner signs the CLI in, then runs `fleet doctor <name>`.
 - **Placeholders** cannot be turned on until they are filled in ([below](#placeholder-adapters)).
 
@@ -383,7 +383,7 @@ To turn a placeholder into a working adapter, the owner fills it in under `[prov
 
 Then test it as below before routing real work to it.
 
-For every new adapter, test a harmless local ticket, multiple waves, a required review at capacity, process exit confirmation and recovery. Keep unavailable adapters out of auto routing. Login expiry needs the owner. On quota exhaustion the lead may resume after the reset or steer within the run's routing (skill step 1); otherwise it needs the owner. Neither is a reason to ignore the worker contract.
+For every new adapter, test a harmless local ticket, multiple waves, a required review at capacity, process exit confirmation and recovery. Keep unavailable adapters out of auto routing. Login expiry needs the owner. On quota exhaustion the lead may resume after the reset or steer within the run's routing ([steering](advanced.md#steering)); otherwise it needs the owner. Neither is a reason to ignore the worker contract.
 
 ## Config keys
 

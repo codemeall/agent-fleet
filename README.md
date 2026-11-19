@@ -690,7 +690,7 @@ Every method that addresses a worker must raise rather than reach a terminal tha
 
 Run only the backend tests with `python3 -m unittest tests.test_backends -v`, or the live smoke and end-to-end tests with `python3 -m unittest tests.test_adapters_smoke tests.test_teamwork_e2e -v`.
 
-**Trying it by hand.** The same stand-in agent works for manual runs. Save `FAKE_AGENT` from `tests/test_backends.py` as an executable script (with a `#!/usr/bin/env python3` line), point a scratch config at it, and drive a throwaway Git repository with a one-ticket `plan.json` in the [plan format](skill/SKILL.md#2-save-a-complete-plan) whose ticket uses `"provider": "fake"`:
+**Trying it by hand.** The same stand-in agent works for manual runs. Save `FAKE_AGENT` from `tests/test_backends.py` as an executable script (with a `#!/usr/bin/env python3` line), point a scratch config at it, and drive a throwaway Git repository with a one-ticket `plan.json` in the [plan format](skill/SKILL.md#plan) whose ticket uses `"provider": "fake"`:
 
 ```toml
 # /tmp/fleet-dev.toml

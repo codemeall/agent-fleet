@@ -1,6 +1,6 @@
 # Delegating mid-conversation
 
-Use this when the owner hands you work in conversation rather than a ticket folder, or adds work while a run is live. Workers, gates and evidence are the same as for planned tickets (skill steps 3–5); only how the work enters the run differs.
+Use this when the owner hands you work in conversation rather than a ticket folder, or adds work while a run is live. Workers, gates and evidence are the same as for planned tickets (the happy path: plan, launch, wait, review, accept); only how the work enters the run differs.
 
 ## 0. Fleet or your own subagent
 
@@ -27,7 +27,7 @@ Find open runs without resuming each one: `grep -l '"status": "pending"' .fleet/
 
 ## 2. Propose one line per task
 
-Find the exact files, then choose kind, tier and provider as in skill step 2. Show one line per task and launch only after the owner confirms:
+Find the exact files, then choose kind, tier and provider as in the plan step of the skill. Show one line per task and launch only after the owner confirms:
 
 ```text
 fix-flaky → implement · codex · light · tests/test_x.py · checks: pytest -q tests/test_x.py
@@ -63,7 +63,7 @@ Then run `fleet wait <run> --timeout 540` in the background and return to the ow
 
 ## 4. When a worker wakes you
 
-Handle the line as in skill steps 4–5, then tell the owner the outcome in one or two lines. Two differences keep small delegations cheap:
+Handle the line as in the skill's wait, review and accept steps, then tell the owner the outcome in one or two lines. Two differences keep small delegations cheap:
 
 - Verifying an `investigate` ticket runs no combined-tree checks (suite, typecheck, build); run its listed `checks` only to confirm a finding you doubt.
 - An inline task has no source ticket, so there are no acceptance boxes to update.
@@ -77,7 +77,7 @@ Close it when the owner asks, or before they commit (a commit moves HEAD, so `fl
 1. `fleet stop <run> --all` and confirm the exits.
 2. If an `implement` ticket was verified since the last close, run the combined-tree checks once.
 3. `fleet check <run>`.
-4. Report in a few lines: tickets and outcomes, uncommitted files to review, the owner's commit step. No Next-step start prompt; that block is for ticketed runs (skill step 6).
+4. Report in a few lines: tickets and outcomes, uncommitted files to review, the owner's commit step. No Next-step start prompt; that block is for ticketed runs (the finish note on the skill page).
 
 ## 6. Abandoned work
 

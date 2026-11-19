@@ -28,7 +28,7 @@ You cannot compact yourself. Only the owner can, or the host when it auto-compac
 
 ## When a run closes
 
-No handoff is needed: nothing is running and the run is on disk. Their decisions travel in the start prompt, so nothing goes to `notes.md`. Your closing report (skill step 6) ends with a **Next step** block the owner can paste, built from what you already know (no extra checks):
+No handoff is needed: nothing is running and the run is on disk. Their decisions travel in the start prompt, so nothing goes to `notes.md`. Your closing report (the finish note on the skill page) ends with a **Next step** block the owner can paste, built from what you already know (no extra checks):
 
 1. Your reset suggestion, in one line next to your `fleet context` reading. Default to a fresh lead: nothing is running and the run is on disk, so `/clear` (Codex: `/new`; other hosts: a new session) loses nothing. Suggest compaction only when the next run depends on discussion that is not on disk and does not fit in the start prompt. When your reading is small, say continuing in this session is also fine. The owner decides.
 2. A start prompt for the next run: `/fleet` (Codex: `$fleet`; plugin install: `/agent-fleet:fleet`), the next run's name, routing, the tickets with their path, your proposed order, a `<placeholder>` for each decision the owner still owes, and one line of context pointing at the files this run left (run directory, decision records, uncommitted changes) plus any constraint the next run must respect.
@@ -41,7 +41,7 @@ Run commands print `LEAD compacted 230K -> 35K: run fleet resume <run> …` afte
 
 1. `fleet resume <run>` and read `notes.md`; the latest `## Handoff` entry is where the previous lead stopped.
 2. Trust the files over your summary when they disagree.
-3. Handle everything in that entry's "Awaiting the next lead" list first: verify a report, answer a blocked worker with `fleet send`, or deal with a worker listed as exited (skill step 4, `EXITED`): `fleet wait` already woke the previous lead for those, so it lists them only as `PENDING` when it times out, which can be minutes later.
+3. Handle everything in that entry's "Awaiting the next lead" list first: verify a report, answer a blocked worker with `fleet send`, or deal with a worker listed as exited (the skill's wait step, `EXITED`): `fleet wait` already woke the previous lead for those, so it lists them only as `PENDING` when it times out, which can be minutes later.
 4. Then continue with `fleet wait` or the next launch.
 
 A fresh lead starts at its host's baseline (system prompt, tools and skills; often 40–60K in Claude Code). If `fleet context` still shows the previous session's size right after `/clear` or `/new`, the reading is stale: tell the owner instead of reporting it as yours.
