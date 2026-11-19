@@ -959,18 +959,15 @@ def read_trust(pcfg: dict, path: str) -> tuple[bool, str | None]:
     return False, None
 
 
-def trust_targets(cfg: dict, repo: Path | None) -> list[tuple[str, str | None]]:
-    """The checkout, when this command is inside one, and the worktree root workers would start under."""
-    defaults = cfg.get("defaults")
-    home_cfg = cfg if isinstance(defaults, dict) else {"defaults": DEFAULTS}
-    targets: list[tuple[str, str | None]] = [("checkout", str(repo.resolve()) if repo is not None else None)]
-    targets.append(("worktree root", str(worktree_home(home_cfg).resolve())))
-    return targets
+def trust_targets(_cfg: dict, repo: Path | None) -> list[tuple[str, str | None]]:
+    """The checkout, when this command is inside one. A worker tree is not a doctor failure: with auto_trust
+    off, a worktree run prints a note instead."""
+    return [("checkout", str(repo.resolve()) if repo is not None else None)]
 
 
 def untrusted_labels(cfg: dict, pcfg: dict, repo: Path | None) -> list[str]:
-    """Checkout and worktree-root paths this CLI would still ask to trust. Empty when auto_trust is on,
-    the CLI asks nothing, or each path is already trusted. Reads only."""
+    """Checkout paths this CLI would still ask to trust. Empty when auto_trust is on, the CLI asks nothing,
+    or the checkout is already trusted. Reads only."""
     if cfg.get("defaults", DEFAULTS).get("auto_trust") or pcfg.get("trust") not in TRUST_METHODS:
         return []
     missing = []
@@ -985,8 +982,33 @@ def untrusted_labels(cfg: dict, pcfg: dict, repo: Path | None) -> list[str]:
 
 
 def trust_fix_line() -> str:
-    return (f"fix: set auto_trust = true under [defaults] in {USER_CONFIG} "
-            "(explicit owner opt-in; the default stays false)")
+    return ("fix: open the CLI once in the checkout and accept, or set auto_trust = true under "
+            f"[defaults] in {USER_CONFIG} (explicit owner opt-in; it writes ~/.claude.json and the "
+            f"Antigravity settings at {AGY_SETTINGS}; the default stays false)")
+
+
+def worktree_trust_note() -> str:
+    """A note, not a failure: each worker tree still needs trust when auto_trust is off."""
+    return ("note: auto_trust is off, so each worker tree needs trust. Open the CLI once in that tree and "
+            "accept, or set auto_trust = true (explicit opt-in; it writes ~/.claude.json and the Antigravity "
+            f"settings at {AGY_SETTINGS}).")
+
+
+def worktree_run_open(repo: Path | None) -> bool:
+    """True when this checkout has a run started with --isolation worktree."""
+    if repo is None:
+        return False
+    root = repo / ".fleet" / "runs"
+    if not root.is_dir():
+        return False
+    for path in root.glob("*/run.json"):
+        try:
+            state = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(state, dict) and (state.get("options") or {}).get("isolation") == "worktree":
+            return True
+    return False
 
 
 def login_fix(name: str, pcfg: dict) -> str:
@@ -1008,16 +1030,44 @@ def login_fix(name: str, pcfg: dict) -> str:
             "report logged in; fleet does not start a sign-in)")
 
 
-def owner_action_block(cfg: dict, repo: Path | None) -> str:
-    """One block when an enabled CLI is missing folder trust or a detectable login. Empty when nothing is missing."""
-    lines = []
+def _probe_logins(items: list[tuple[str, dict]], timeout: float) -> dict[str, bool]:
+    """Login probes for init, in parallel. Each one keeps its own timeout. The caller keeps provider order."""
+    ready: dict[str, bool] = {}
+
+    def run(name: str, pcfg: dict) -> None:
+        ready[name] = login_check(pcfg, timeout)[0]
+
+    threads = [threading.Thread(target=run, args=(name, pcfg)) for name, pcfg in items]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    return ready
+
+
+def owner_action_block(cfg: dict, repo: Path | None, *, login_timeout: float | None = None,
+                       skip_login: bool = False) -> str:
+    """One block when an enabled CLI is missing folder trust, its binary, or a detectable login.
+    Empty when nothing is missing. `login_timeout` None keeps login_check's own 60s; init passes a shorter one.
+    Doctor does not use this function."""
+    entries = []
     for name, pcfg in cfg.get("providers", {}).items():
         if not pcfg.get("enabled", True) or pcfg.get("placeholder"):
             continue
-        missing = untrusted_labels(cfg, pcfg, repo)
+        kind = "skip"
+        if not skip_login and "login" in pcfg:
+            binary = first_binary(pcfg.get("bin") or name)
+            kind = "missing" if not shutil.which(binary) else "probe"
+        entries.append((name, pcfg, untrusted_labels(cfg, pcfg, repo), kind))
+    timeout = 60 if login_timeout is None else login_timeout
+    probed = _probe_logins([(name, pcfg) for name, pcfg, _, kind in entries if kind == "probe"], timeout)
+    lines = []
+    for name, pcfg, missing, kind in entries:
         if missing:
             lines.append(f"- {name}: not trusted: {'; '.join(missing)}. {trust_fix_line()}")
-        if "login" in pcfg and not login_check(pcfg)[0]:
+        if kind == "missing":
+            lines.append(f"- {name}: missing binary '{first_binary(pcfg.get('bin') or name)}'")
+        elif kind == "probe" and not probed[name]:
             lines.append(f"- {name}: not logged in. {login_fix(name, pcfg)}")
     if not lines:
         return ""
@@ -3554,11 +3604,13 @@ def cmd_init(a, cfg):
     if isolated(state):
         print(f"isolation: worktree; each implement ticket's worker runs in its own tree under {options['worktree_dir']}, "
               f"and fleet accept applies its diff to this checkout's working tree (fleet merge)")
+        if not cfg["defaults"].get("auto_trust"):
+            print(worktree_trust_note())
     if untracked_fleet_ignore(repo):
         print("note: .fleet/.gitignore keeps run state out of Git, and shows as untracked `.fleet/` until the owner "
               "decides once per project: commit it (every clone then ignores .fleet/runs/), or add `.fleet/` to "
               ".git/info/exclude to keep Fleet local. Ask them which.", file=sys.stderr)
-    block = owner_action_block(cfg, repo)
+    block = owner_action_block(cfg, repo, login_timeout=8, skip_login=bool(getattr(a, "no_login_check", False)))
     if block:
         print(block)
     print(f"Next: fleet plan {a.run} --file <plan.json>")
@@ -11695,6 +11747,10 @@ def cmd_doctor(a, cfg):
         print(f"workspace     WARNING: defaults.workspace = {pinned!r} is a cmux ref. {STALE_PIN_FIX} After a "
               "restart the ref can vanish or name another project's workspace.")
     print(f"config        {USER_CONFIG if USER_CONFIG.exists() else 'none (built-in defaults)'}")
+    if (not cfg.get("defaults", DEFAULTS).get("auto_trust") and worktree_run_open(doctor_repo)
+            and any(p.get("trust") and p.get("enabled", True) and not p.get("placeholder")
+                    for p in cfg["providers"].values())):
+        print(worktree_trust_note())  # a note, not a failure, and not part of the checkout trust check
     names = a.providers or list(cfg["providers"])
     for name in names:
         p = provider(cfg, name)
@@ -12118,14 +12174,15 @@ def smoke_line(name: str) -> str:
     return f"fleet smoke {name} ok"
 
 
-def login_check(p: dict) -> tuple[bool, str]:
+def login_check(p: dict, timeout: float = 60) -> tuple[bool, str]:
     """doctor's login test for one provider: whether its login command's output holds login_ok, and that output
-    (Codex prints its status to stderr). A provider with no login command counts as ready."""
+    (Codex prints its status to stderr). A provider with no login command counts as ready. The default timeout
+    is doctor's; init passes a shorter one and does not change this default."""
     if "login" not in p:
         return True, ""
     try:
         # stdin closed: a status command cannot sit on a prompt or start a sign-in. Doctor never runs the fix.
-        res = subprocess.run(p["login"], shell=True, capture_output=True, text=True, timeout=60, env=child_env(p),
+        res = subprocess.run(p["login"], shell=True, capture_output=True, text=True, timeout=timeout, env=child_env(p),
                              stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return False, ""
@@ -14803,6 +14860,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--isolation", choices=["shared", "worktree"], default="shared",
                    help="shared (default): every worker edits this checkout; worktree: each implement ticket's worker "
                         "runs in its own Git worktree outside it, and accept applies its diff here (fleet merge)")
+    s.add_argument("--no-login-check", action="store_true",
+                   help="skip init's login probes; doctor still runs them with its own timeout")
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("plan", help="persist a ticket graph and routing assignments")

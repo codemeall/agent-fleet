@@ -41,6 +41,13 @@ class TrustReads(unittest.TestCase):
         return provider("claude", trust="claude-config", login="claude auth status",
                         login_ok='"loggedIn": true', **extra)
 
+    def test_a_missing_binary_is_missing_and_not_logged_out(self):
+        cfg = {"defaults": dict(fleet.DEFAULTS), "providers": {
+            "gone": provider("no-such-fleet-bin-xyz", login="echo nope", login_ok="Logged in")}}
+        text = fleet.owner_action_block(cfg, self.repo)
+        self.assertIn("- gone: missing binary 'no-such-fleet-bin-xyz'", text)
+        self.assertNotIn("not logged in", text)
+
     def test_login_fix_names_the_sign_in_and_is_not_a_command_doctor_runs(self):
         self.assertEqual(fleet.login_fix("claude", self.claude()), "fix: claude auth login")
         self.assertEqual(fleet.login_fix("codex", {"login": "codex login status", "bin": "codex"}), "fix: codex login")
@@ -50,9 +57,10 @@ class TrustReads(unittest.TestCase):
                          "fix: CLAUDE_CONFIG_DIR=" + __import__("shlex").quote(str(Path("~/claude-co").expanduser()))
                          + " claude auth login")
 
-    def test_missing_claude_trust_names_both_paths_and_writes_nothing(self):
+    def test_missing_claude_trust_names_the_checkout_and_writes_nothing(self):
         gaps = fleet.untrusted_labels(self.cfg, self.claude(), self.repo)
-        self.assertEqual(gaps, [f"checkout {self.repo}", f"worktree root {self.cache / 'agent-fleet' / 'worktrees'}"])
+        self.assertEqual(gaps, [f"checkout {self.repo}"])
+        self.assertFalse(any("worktree" in gap for gap in gaps))
         self.assertFalse((self.home / ".claude.json").exists())
 
     def test_a_broken_trust_file_is_named_and_left_alone(self):
@@ -84,7 +92,7 @@ class TrustReads(unittest.TestCase):
         agy_file = Path(fleet.AGY_SETTINGS).expanduser()
         agy_file.parent.mkdir(parents=True)
         agy_file.write_text(json.dumps({"trustedWorkspaces": [checkout, tree]}))
-        self.assertEqual(fleet.untrusted_labels(self.cfg, codex, self.repo), [f"worktree root {tree}"])
+        self.assertEqual(fleet.untrusted_labels(self.cfg, codex, self.repo), [])
         self.assertEqual(fleet.untrusted_labels(self.cfg, agy, self.repo), [])
         self.assertEqual((codex_home / "config.toml").read_text().count("trust_level"), 1)
 
@@ -133,10 +141,13 @@ class DoctorTrust(unittest.TestCase):
                                                      login_ok='"loggedIn": true')})
         self.assertEqual(code, 1, text)
         self.assertEqual(text.count("owner action needed"), 0)
-        self.assertIn(f"NOT TRUSTED: checkout {self.repo.resolve()}; worktree root ", text)
-        self.assertIn("agent-fleet/worktrees", text)
-        self.assertIn("fix: set auto_trust = true under [defaults]", text)
-        self.assertIn("explicit owner opt-in; the default stays false", text)
+        self.assertIn(f"NOT TRUSTED: checkout {self.repo.resolve()}", text)
+        self.assertNotIn("worktree root", text)
+        self.assertIn("open the CLI once in the checkout and accept", text)
+        self.assertIn("set auto_trust = true under [defaults]", text)
+        self.assertIn("~/.claude.json", text)
+        self.assertIn("explicit owner opt-in", text)
+        self.assertIn("the default stays false", text)
         self.assertIn("LOGIN CHECK FAILED", text)
         self.assertIn("fix: claude auth login", text)
         log = self.log.read_text()
@@ -167,6 +178,37 @@ class DoctorTrust(unittest.TestCase):
         self.assertNotIn("NOT TRUSTED", text)
         self.assertFalse(self.log.exists())
 
+    def test_a_trusted_checkout_with_no_worktrees_exits_0(self):
+        (self.home / ".claude.json").write_text(json.dumps({"projects": {
+            str(self.repo.resolve()): {"hasTrustDialogAccepted": True}}}))
+        code, text = self.doctor({"claude": provider("claude", trust="claude-config", login="echo ok", login_ok="ok")})
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("NOT TRUSTED", text)
+        self.assertNotIn("worktree root", text)
+        self.assertNotIn("note:", text)
+        self.assertFalse(any("worktrees" in line for line in text.splitlines()))
+
+    def test_a_worktree_run_with_auto_trust_off_is_a_note(self):
+        (self.home / ".claude.json").write_text(json.dumps({"projects": {
+            str(self.repo.resolve()): {"hasTrustDialogAccepted": True}}}))
+        run = self.repo / ".fleet" / "runs" / "demo"
+        run.mkdir(parents=True)
+        (run / "run.json").write_text(json.dumps({"schema": 2, "run": "demo", "options": {"isolation": "worktree"}}))
+        code, text = self.doctor({"claude": provider("claude", trust="claude-config", login="echo ok", login_ok="ok")})
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("NOT TRUSTED", text)
+        self.assertIn("each worker tree needs trust", text)
+        self.assertIn("auto_trust = true", text)
+        self.assertIn("~/.claude.json", text)
+
+    def test_a_missing_binary_says_missing(self):
+        code, text = self.doctor({"claude": provider("no-such-fleet-bin-xyz", trust="claude-config",
+                                                     login="no-such-fleet-bin-xyz auth status", login_ok="x")})
+        self.assertEqual(code, 1, text)
+        self.assertIn("MISSING binary 'no-such-fleet-bin-xyz'", text)
+        self.assertNotIn("not logged in", text)
+        self.assertNotIn("LOGIN CHECK FAILED", text)
+
 
 class InitOwnerAction(RuntimeCase):
     def setUp(self):
@@ -178,6 +220,9 @@ class InitOwnerAction(RuntimeCase):
         codex = bindir / "codex"
         codex.write_text("#!/bin/sh\nexit 1\n")
         codex.chmod(0o755)
+        stub = bindir / "unused-test-agent"
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
         env = patch.dict(os.environ, {"HOME": str(self.home), "PATH": f"{bindir}:/usr/bin:/bin"})
         env.start()
         self.addCleanup(env.stop)
@@ -190,10 +235,13 @@ class InitOwnerAction(RuntimeCase):
             out = self.call("init", "demo", "--workspace", "workspace:1", "--review", "off", *self.off_reason("off"))
         self.assertEqual(out.count("owner action needed"), 1)
         self.assertIn("- writer: not trusted: checkout ", out)
-        self.assertIn("worktree root ", out)
+        self.assertNotIn("worktree root", out)
         self.assertIn(str(self.repo.resolve()), out)
-        self.assertIn("fix: set auto_trust = true under [defaults]", out)
-        self.assertIn("explicit owner opt-in; the default stays false", out)
+        self.assertIn("open the CLI once in the checkout and accept", out)
+        self.assertIn("set auto_trust = true under [defaults]", out)
+        self.assertIn("~/.claude.json", out)
+        self.assertIn("explicit owner opt-in", out)
+        self.assertIn("the default stays false", out)
         self.assertIn("- writer: not logged in.", out)
         self.assertIn("- reviewer: not logged in. fix: codex login", out)
         self.assertIn("Next: fleet plan demo", out)
@@ -212,3 +260,17 @@ class InitOwnerAction(RuntimeCase):
         self.cfg["providers"]["reviewer"]["login"] = "echo Logged in"
         again = self.call("init", "other", "--workspace", "workspace:1", "--review", "off", *self.off_reason("off"))
         self.assertNotIn("owner action needed", again)
+
+    def test_init_can_skip_login_probes(self):
+        self.assertEqual(fleet.login_check.__defaults__, (60,))
+        log = self.home / "ran"
+        codex = self.home / "bin" / "codex"
+        codex.write_text(f"#!/bin/sh\necho ran >> {log}\nexit 1\n")
+        codex.chmod(0o755)
+        out = self.call("init", "demo", "--no-login-check", "--workspace", "workspace:1", "--review", "off",
+                        *self.off_reason("off"))
+        self.assertIn("not trusted", out)
+        self.assertNotIn("not logged in", out)
+        self.assertNotIn("missing binary", out)
+        self.assertFalse(log.exists())
+        self.assertTrue((self.repo / ".fleet/runs/demo/run.json").exists())

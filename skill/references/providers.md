@@ -89,7 +89,7 @@ A Fleet lead, or any other agent working in the session, follows these rules:
 
 ## Folder trust
 
-Claude Code, Codex and Antigravity ask once per folder whether to trust it. Setup recommends `auto_trust = true` under `[defaults]` in the owner's `~/.config/agent-fleet/config.toml` as an explicit owner opt-in (off by default; Fleet never turns it on). With it on, launch marks the repo trusted first, the way each adapter's `trust` field says:
+Claude Code, Codex and Antigravity ask once per folder whether to trust it. `auto_trust = true` under `[defaults]` in the owner's `~/.config/agent-fleet/config.toml` is an explicit owner opt-in (off by default; Fleet never turns it on). It writes `~/.claude.json` and the Antigravity settings; Codex gets a session flag, not a saved file. With it on, launch marks the repo trusted first, the way each adapter's `trust` field says:
 
 | `trust` | CLI | What launch does |
 |---|---|---|

@@ -19,9 +19,11 @@ review = "cross-heavy"
 # findings back to the writer (`fleet send --findings`) and reviews again, waking the lead only for a rebuttal, a
 # disputed fix or an escalation. --auto overrides it for one supervise.
 # supervise = ["gate", "review"]
-# Recommended explicit owner opt-in. Marks this checkout and the worktree root trusted in Claude,
-# Codex and Antigravity before each launch, so a first-run "trust this folder?" screen does not
-# stall a worker. Off unless you uncomment the next line. Fleet never turns this on for you.
+# Explicit owner opt-in. Off unless you uncomment the next line. Fleet never turns this on for you.
+# It writes the global Claude config ~/.claude.json and the Antigravity settings
+# (~/.gemini/antigravity-cli/settings.json). Codex gets a session trust flag, not a saved file.
+# Launch marks this checkout, and in a worktree run each worker tree, so a first-run
+# "trust this folder?" screen does not stall a worker.
 # auto_trust = true
 # The widest launch profile Fleet will start: "read-only", "workspace-write" (the default) or "full-access".
 # Launch refuses, and doctor fails, a provider profile above it; OpenCode's build agent is full-access.
