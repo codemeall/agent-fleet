@@ -2170,6 +2170,18 @@ def guard_unowned(repo: Path, state: dict, worker_id: str, accept: str | None) -
     print(f"{worker_id}: accepted {len(changes)} change(s) outside every ticket; recorded in decisions", file=sys.stderr)
 
 
+def active_run_refusal(run: str, workers: list[dict]) -> str:
+    """Why this checkout cannot start another run: the blocking run, each worker whose exit is still unconfirmed,
+    and the two commands that clear that worker. Printed only. Nothing here stops, recovers, or rewrites the run."""
+    lines = [f"run {run} has workers with unconfirmed exits; use one active run per checkout"]
+    for w in workers:
+        wid = str(w.get("id") or "?")
+        lines.append(f"{wid} {w.get('state') or '?'}")
+        lines.append(f"fleet stop {run} {wid}")
+        lines.append(f"fleet recover {run} {wid} --evidence <file>")
+    return "\n".join(lines)
+
+
 def ensure_other_runs_idle(repo: Path, current: str) -> None:
     root = contained(repo.resolve(), repo.resolve() / ".fleet" / "runs")
     for file in root.glob("*/run.json"):
@@ -2178,9 +2190,10 @@ def ensure_other_runs_idle(repo: Path, current: str) -> None:
             continue
         state = json.loads(file.read_text())
         if state.get("schema") == 2:
-            reconcile(repo, state)
-        if active(state):
-            raise FleetError(f"run {file.parent.name} has workers with unconfirmed exits; use one active run per checkout")
+            reconcile(repo, state)  # in memory only: a receipt can clear a worker for this check, and is not saved
+        live = active(state)
+        if live:
+            raise FleetError(active_run_refusal(file.parent.name, live))
 
 
 def read_evidence(filename: str) -> str:
