@@ -985,10 +985,12 @@ class Runtime(RuntimeCase):
         self.assertEqual(len(enters), 1)           # one Enter only, never a second keystroke
         token = self.state()["workers"]["01"]["token"]
         self.assertIn("NOT STARTED 01: no start record 8s after launch, even after Fleet pressed Enter", out)
-        self.assertIn(f"fleet peek demo 01, then fleet stop demo 01 and, once ps shows no `fleet _run` with token "
-                      f"{token}, fleet recover demo 01 --evidence <file>", out)
-        self.assertEqual(self.state()["workers"]["01"]["state"], "running")   # the launch stands for stop and recover
-        relaunch()
+        self.assertIn("fleet stop demo 01 cancels the launch and records its exit (no ps check or recover needed); "
+                      "then launch it again", out)
+        self.assertNotIn(token, out)                       # no token for the lead to grep for
+        self.assertEqual(self.state()["workers"]["01"]["state"], "running")   # the launch stands until stop
+        self.call("stop", "demo", "01", "--timeout", "0")  # cancels it: exit 0, no quit keys, no recover
+        self.call("status", "demo")
 
         real_started = fleet.runner_started        # started on its own: no keystroke reaches the worker's CLI
         with patch.object(fleet, "runner_started", side_effect=lambda w: True):
@@ -1003,7 +1005,8 @@ class Runtime(RuntimeCase):
         self.assertIn("NOT STARTED 01: no start record and Enter could not be sent (surface not found)", out)
         w = self.state()["workers"]["01"]                  # an uncertain send keeps its nudge: a late runner refuses
         self.assertTrue(Path(w["exit_file"]).with_suffix(".nudge.json").exists())
-        relaunch()
+        self.call("stop", "demo", "01", "--timeout", "0")  # flagged too: stop cancels it
+        self.call("status", "demo")
 
         def refused(*args, **kwargs):                      # the runner gave up on Enter and would not start its CLI
             if args[:1] == ("send-key",):
@@ -1088,10 +1091,11 @@ class Runtime(RuntimeCase):
     def test_settle_zero_and_ready_launches_still_confirm_the_start(self):
         self.setup_run()
 
-        def stop():
-            self.call("stop", "demo", "01", "--timeout", "0", expected=1)
-            self.receipt()
-            self.call("status", "demo")
+        def stop():                                        # flagged by launch: stop cancels it, no keys, no recover
+            sent = len([c for c in self.cmux_calls if c[0] in ("send", "send-key")])
+            self.call("stop", "demo", "01", "--timeout", "0")
+            self.assertEqual(len([c for c in self.cmux_calls if c[0] in ("send", "send-key")]), sent)
+            self.assertEqual(self.state()["workers"]["01"]["state"], "exited")
         with patch.object(fleet, "start_line", REAL_START_LINE), patch.object(fleet.time, "sleep"):
             out = self.call("launch", "demo", "--ready", expected=1)
             self.assertIn("LAUNCHED 01", out)
@@ -1267,6 +1271,70 @@ class Runtime(RuntimeCase):
             out = self.call("launch", "demo", "01", "writer", "--tier", "standard", "--settle", "0")
         self.assertNotIn("STARTED", out)
 
+    def test_stop_cancels_a_launch_whose_runner_never_ran(self):
+        """After NOT STARTED, stop needs no quit keys, ps check or recover: it cancels the launch and records its
+        exit. Its line, run later in that pane, then starts nothing."""
+        self.setup_run()
+        with patch.object(fleet, "start_line", REAL_START_LINE), patch.object(fleet.time, "sleep"):
+            self.call("launch", "demo", "01", "writer", "--tier", "standard", "--settle", "0", expected=1)
+        w = self.state()["workers"]["01"]
+        receipt = Path(w["exit_file"])
+        out = self.call("stop", "demo", "01", "--timeout", "0")
+        self.assertIn("its runner never ran, so Fleet cancelled the launch and recorded its exit", out)
+        self.assertFalse([c for c in self.cmux_calls if c[0] in ("send", "send-key") and "enter" not in c])
+        self.assertEqual(self.state()["workers"]["01"]["state"], "exited")
+        entry = next(e for e in self.state()["ledger"] if e["token"] == w["token"])
+        self.assertIsNotNone(entry["end"])                 # the launch's wall time ends here
+        ran = self.repo / "ran"                            # someone presses Enter in that pane later:
+        line = shlex.split(self.typed_line())
+        rest = line[line.index("_run") + 1:]
+        receipt.unlink()                                   # (whatever stop wrote, the runner must refuse by itself)
+        err = io.StringIO()
+        with patch.object(fleet, "runner_args", return_value=[*rest[:2], f"touch {shlex.quote(str(ran))}"]), \
+                contextlib.redirect_stderr(err):
+            self.assertEqual(fleet.run_child(rest), fleet.LAUNCH_REFUSED)
+        self.assertFalse(ran.exists())                     # it started nothing
+        self.assertIn("cancelled this launch before its runner ran", err.getvalue())
+        self.assertEqual(json.loads(receipt.read_text())["refused"], fleet.CANCELLED)
+        self.launch()                                      # and the ticket launches again at once
+        self.assertEqual(self.state()["workers"]["01"]["state"], "running")
+
+    def test_stop_quits_a_flagged_launch_whose_runner_announced_itself_first(self):
+        """A runner that announced itself before stop's cancel may be running its worker: stop quits it as usual."""
+        self.setup_run()
+        with patch.object(fleet, "start_line", REAL_START_LINE), patch.object(fleet.time, "sleep"):
+            self.call("launch", "demo", "01", "writer", "--tier", "standard", "--settle", "0", expected=1)
+        self.started()                                     # Enter pressed in the pane after launch gave up
+        self.stop_with_receipt()                           # quit keys, then its own receipt
+        self.assertEqual(self.state()["workers"]["01"]["state"], "exited")
+        self.assertTrue([c for c in self.cmux_calls if c[0] in ("send", "send-key")])
+
+    def test_a_cancelled_headless_runner_starts_nothing(self):
+        receipt = self.repo / "exits" / "rev.tok.json"
+        receipt.parent.mkdir()
+        report, usage, ran = self.repo / "rev.md", self.repo / "usage.json", self.repo / "ran"
+        ref = fleet.save_runner_args(receipt, [str(report), str(usage), f"touch {shlex.quote(str(ran))}", "60"])
+        receipt.with_suffix(fleet.CANCEL).write_text(json.dumps({"token": "tok"}))
+        before = {s: fleet.signal.getsignal(s) for s in (fleet.signal.SIGTERM, fleet.signal.SIGHUP)}
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(fleet.headless_child([str(receipt), "tok", ref]), fleet.LAUNCH_REFUSED)
+        self.assertEqual({s: fleet.signal.getsignal(s) for s in before}, before)   # its handlers put back
+        self.assertFalse(ran.exists() or report.exists() or usage.exists())
+        self.assertEqual(json.loads(receipt.read_text())["refused"], fleet.CANCELLED)
+        receipt.unlink()                                   # another launch's cancel is not this one's
+        receipt.with_suffix(fleet.CANCEL).write_text(json.dumps({"token": "other"}))
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(fleet.headless_child([str(receipt), "tok", ref]), 0)
+        self.assertTrue(ran.exists())
+
+    def test_stop_never_cancels_an_unflagged_worker(self):
+        """Without launch's or wait's flag, stop quits as it always did, even before a start record."""
+        self.setup_run()
+        self.launch()
+        self.call("stop", "demo", "01", "--timeout", "0", expected=1)
+        self.assertEqual(self.state()["workers"]["01"]["state"], "stop-failed")
+        self.assertFalse(Path(self.state()["workers"]["01"]["exit_file"]).with_suffix(fleet.CANCEL).exists())
+
     def test_runner_started_reads_only_this_launchs_records(self):
         self.setup_run()
         self.launch()
@@ -1294,7 +1362,10 @@ class Runtime(RuntimeCase):
         events = self.scan()
         self.assertEqual(len(events), 1)
         self.assertIn("STALLED 01 never started: no start record after 6", events[0])
-        self.assertIn("fleet peek demo 01, then fleet stop and fleet recover", events[0])
+        self.assertIn("fleet stop demo 01 cancels the launch and records its exit (no recover needed)", events[0])
+        w = self.state()["workers"]["01"]                          # flagged, so that stop can cancel it
+        self.assertEqual(json.loads(Path(w["exit_file"]).with_suffix(fleet.UNSTARTED).read_text()),
+                         {"token": w["token"]})
         self.assertNotIn("approval prompt", events[0])
 
     def test_wait_says_a_headless_worker_never_started_too(self):
