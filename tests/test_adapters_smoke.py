@@ -65,9 +65,12 @@ class ShippedAdapters(unittest.TestCase):
             for name in SMOKED:
                 p = SHIPPED[name]
                 model, effort = fleet.resolve_model(p, "standard", None, None)
-                (root / "expect.json").write_text(json.dumps({
-                    "model": model, "effort": effort, "session": "new" if fleet.resumable(p) else None,
-                    "account_dir": fleet.account_env(p)[0].get(p.get("account_env") or "")}))
+                expect = {"model": model, "effort": effort, "session": "new" if fleet.resumable(p) else None,
+                          "account_dir": fleet.account_env(p)[0].get(p.get("account_env") or "")}
+                mode_args = p.get("profiles", {}).get("worker", {}).get("args", "").split()
+                if "--permission-mode" in mode_args:
+                    expect["permission_mode"] = mode_args[mode_args.index("--permission-mode") + 1]
+                (root / "expect.json").write_text(json.dumps(expect))
                 good = fleet.build_launch(p, model, effort, line, "0" * 8 + "-0000-4000-8000-" + "0" * 12)
                 bad = {"an unknown flag": good.replace(f"{p['bin']} ", f"{p['bin']} --yolo ", 1),
                        "another model": fleet.build_launch(p, "not-" + model, effort, line,
@@ -108,6 +111,9 @@ class AdapterSmoke(FleetCase):
                 # An adapter's own account dir (expanded under this test's HOME), else nothing inherited.
                 "account_dir": (str(Path(p["env"][p["account_env"]].replace("~", str(self.home), 1)))
                                 if p.get("account_env") in p.get("env", {}) else None)}
+        args = p.get("profiles", {}).get("worker", {}).get("args", "").split()
+        if "--permission-mode" in args:  # the shipped Claude worker profile passes acceptEdits
+            want["permission_mode"] = args[args.index("--permission-mode") + 1]
         want.update(extra)
         self.expect.write_text(json.dumps(want))
         return want

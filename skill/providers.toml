@@ -69,13 +69,17 @@ enabled = true
 bin = "claude"
 launch = "{bin} {session} --model {model} --effort {effort} {profile} {settings} {prompt}"
 signals = "claude-settings"
-# Workers get no mode flag, so the account's permissions.defaultMode applies, as before profiles, unless the owner
-# sets [defaults] scope_permissions = true (then allow rules for their own files and planned checks, same mode).
+# Workers pass --permission-mode acceptEdits: the narrowest mode that still edits files in the working
+# directory without the owner at the pane. manual and default ask first, dontAsk and plan do not edit, and
+# auto and bypassPermissions are broader than this profile's workspace-write ceiling. acceptEdits also approves
+# mkdir, touch, rm, rmdir, mv, cp and sed in that directory, where the hook guard does not look; the scope check
+# still catches those writes. scope_permissions only adds allow rules; it does not change this mode.
+# Doctor does not read settings.json for permissions.defaultMode; that check is still open.
 # Reviewers pin manual mode (`claude --help` 2.1.318: Claude asks before each edit and command), so a looser
 # defaultMode never reaches them. With hooks on, the guard lets a reviewer write only its report and its settings
 # allow that one file, so the report write needs no answer. Hooks never change the mode, so a guard that cannot run
 # leaves every other edit asking: the level stays read-only either way.
-profiles.worker = { args = "", level = "workspace-write" }
+profiles.worker = { args = "--permission-mode acceptEdits", level = "workspace-write" }
 profiles.review = { args = "--permission-mode manual", level = "read-only" }
 # Headless (review_transport = "headless"): `-p` with nobody to answer (`--permission-prompts none`) in manual mode,
 # so every edit and every command that would ask is denied, not left waiting. JSON output carries the result and usage.

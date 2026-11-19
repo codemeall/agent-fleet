@@ -178,7 +178,8 @@ class Shipped(unittest.TestCase):
                        FAKE_CLI_EXPECT=str(root / "expect.json"))
             env.pop("CLAUDE_CONFIG_DIR", None)
             (root / "expect.json").write_text(json.dumps({"model": "opus", "effort": "high", "session": None,
-                                                          "account_dir": None, "settings": True}))
+                                                          "account_dir": None, "settings": True,
+                                                          "permission_mode": "acceptEdits"}))
             stops = root / "stops.log"
             good = root / "good.json"
             good.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [

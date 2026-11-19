@@ -44,16 +44,18 @@ class Profiles(unittest.TestCase):
                     self.assertIn(p["profiles"][role]["level"], fleet.PERMISSION_LEVELS)
         self.assertEqual(self.cfg["defaults"]["permission_ceiling"], "workspace-write")
 
-    def test_worker_launch_lines_are_unchanged(self):
-        """The worker profile reproduces the launch lines shipped before profiles, byte for byte."""
+    def test_worker_launch_lines_match_the_shipped_profiles(self):
+        """Each worker profile's launch line, including Claude's explicit permission mode."""
         home = str(Path("~/.claude-co").expanduser())
         expected = {
             "codex": ("gpt-6-sol", "high", "env -u CODEX_HOME codex -m gpt-6-sol -c model_reasoning_effort=high "
                                            "-c check_for_update_on_startup=false "
                                            "-c notice.hide_rate_limit_model_nudge=true -s workspace-write -a on-request go"),
             "cursor": ("grok-4.7-high", None, "cursor-agent --model grok-4.7-high --trust go"),
-            "claude": ("opus", "high", "env -u CLAUDE_CONFIG_DIR claude --session-id " + SID + " --model opus --effort high go"),
-            "claude-co": ("opus", "high", f"env CLAUDE_CONFIG_DIR={home} claude --model opus --effort high go"),
+            "claude": ("opus", "high", "env -u CLAUDE_CONFIG_DIR claude --session-id " + SID + " --model opus --effort high "
+                                       "--permission-mode acceptEdits go"),
+            "claude-co": ("opus", "high", f"env CLAUDE_CONFIG_DIR={home} claude --model opus --effort high "
+                                          f"--permission-mode acceptEdits go"),
             "agy": ("gemini-3.8-flash-high", "xhigh", "agy --model gemini-3.8-flash-high --effort xhigh --mode accept-edits -i go"),
             "opencode": ("openrouter/z-ai/glm-5.3", None, "opencode --model openrouter/z-ai/glm-5.3 --prompt go"),
         }
@@ -93,7 +95,7 @@ class Profiles(unittest.TestCase):
                        FAKE_CLI_EXPECT=str(root / "expect.json"))
             env.pop("CLAUDE_CONFIG_DIR", None)
             line = fleet.worker_prompt_line(prompt, "review-01")
-            for mode, profile, code in (("manual", "review", 0), (None, "worker", 0), (None, "review", 2)):
+            for mode, profile, code in (("manual", "review", 0), ("acceptEdits", "worker", 0), (None, "review", 2)):
                 with self.subTest(mode=mode, profile=profile):
                     (root / "expect.json").write_text(json.dumps({"model": "opus", "effort": "high", "session": None,
                                                                   "permission_mode": mode, "account_dir": None}))
@@ -182,6 +184,23 @@ class Profiles(unittest.TestCase):
         self.assertEqual(fleet.launch_flags(self.p["codex"]), ["-m", "-c", "-s", "-a"])
         self.assertEqual(fleet.launch_flags(self.p["cursor"]), ["--model", "--trust"])
         self.assertEqual(fleet.launch_flags({"launch": "{bin} --x=1 {prompt}", "session": "--s {id}"}), ["--x"])
+
+    def test_claude_worker_launch_passes_permission_mode_at_or_below_the_ceiling(self):
+        """workspace-write maps to acceptEdits: the narrowest mode that still edits in the working directory.
+        Review and headless keep manual. auto and bypassPermissions are broader than the ceiling."""
+        for name in ("claude", "claude-co"):
+            worker = fleet.build_launch(self.p[name], "opus", "high", "go", profile="worker")
+            review = fleet.build_launch(self.p[name], "opus", "high", "go", profile="review")
+            headless = fleet.build_launch(self.p[name], "opus", "high", "go", profile=fleet.HEADLESS)
+            with self.subTest(name):
+                self.assertIn("--permission-mode acceptEdits", worker)
+                self.assertNotIn("--permission-mode auto", worker)
+                self.assertNotIn("bypassPermissions", worker)
+                self.assertIn("--permission-mode manual", review)
+                self.assertNotIn("acceptEdits", review)
+                self.assertIn("--permission-mode manual", headless)
+                self.assertNotIn("acceptEdits", headless)
+        self.assertIsNone(fleet.ceiling_problem(self.cfg, "claude", self.p["claude"], "worker"))
 
 
 class Doctor(unittest.TestCase):

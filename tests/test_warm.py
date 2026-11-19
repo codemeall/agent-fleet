@@ -532,7 +532,11 @@ class WarmAdapterSmoke(FleetCase):
         model, effort = fleet.resolve_model(p, "standard", None, None)
         want = {"model": model, "effort": effort, "session": "new",
                 "account_dir": (str(Path(p["env"][p["account_env"]].replace("~", str(self.home), 1)))
-                                if p.get("account_env") in p.get("env", {}) else None), **extra}
+                                if p.get("account_env") in p.get("env", {}) else None)}
+        mode_args = p.get("profiles", {}).get("worker", {}).get("args", "").split()
+        if "--permission-mode" in mode_args:
+            want["permission_mode"] = mode_args[mode_args.index("--permission-mode") + 1]
+        want.update(extra)
         self.expect.write_text(json.dumps(want))
 
     def calls(self, name):

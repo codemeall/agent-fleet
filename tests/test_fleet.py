@@ -50,7 +50,7 @@ class ProviderConfig(unittest.TestCase):
             "cursor-agent --model grok-4.7-high --trust go")
         home = str(Path("~/.claude-co").expanduser())
         self.assertEqual(fleet.build_launch(p["claude-co"], "opus", "high", "go"),
-                         f"env CLAUDE_CONFIG_DIR={home} claude --model opus --effort high go")
+                         f"env CLAUDE_CONFIG_DIR={home} claude --model opus --effort high --permission-mode acceptEdits go")
         self.assertTrue(fleet.build_launch(p["claude"], "opus", "high", "go")
                         .startswith("env -u CLAUDE_CONFIG_DIR claude --model opus"))
         self.assertEqual(fleet.build_launch(p["agy"], "gemini-3.8-flash-high", "xhigh", "go"),
@@ -85,9 +85,9 @@ class ProviderConfig(unittest.TestCase):
     def test_claude_names_its_session_and_can_resume_it(self):
         p, sid = self.cfg["providers"], "0b6c4a52-7c1e-4f0e-9d2a-3f1e2d4c5b6a"
         self.assertTrue(fleet.build_launch(p["claude"], "opus", "high", "go", session=sid)
-                        .endswith(f"claude --session-id {sid} --model opus --effort high go"))
+                        .endswith(f"claude --session-id {sid} --model opus --effort high --permission-mode acceptEdits go"))
         self.assertTrue(fleet.build_launch(p["claude-co"], "opus", "high", "go", session=sid, resume=True)
-                        .endswith(f"claude --resume {sid} --model opus --effort high go"))
+                        .endswith(f"claude --resume {sid} --model opus --effort high --permission-mode acceptEdits go"))
         self.assertTrue(fleet.resumable(p["claude-co"]))
         self.assertFalse(fleet.resumable(p["codex"]))
         self.assertNotIn(sid, fleet.build_launch(p["codex"], "m", "high", "go", session=sid))
