@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Claude workers launch with acceptEdits.** Previously a worker used the account's own permission mode. The worker settings ask before `Bash(rm *)`, `Bash(rmdir *)`, `Bash(mv *)`, `Bash(cp *)` and `Bash(sed *)`, so those commands prompt while file edits still pass. Ask rules are checked before the mode.
+
 ## 0.1.0-preview.40
 
 After `NOT STARTED`, the lead runs `fleet stop` and launches again. Nothing else.

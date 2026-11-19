@@ -93,6 +93,16 @@ class ControlRecord(Boundary):
         diff.write_text(diff.read_text().replace("+changed", "+harmless"))  # what the reviewer will read
         self.assertIn(f"{RUN}/snapshots/review-01.diff (changed)", self.call("status", "demo", expected=1))
 
+    def test_a_forged_events_file_is_refused_and_a_report_is_not(self):
+        self.setup_run()
+        self.launch()
+        self.report()
+        self.run_path("events").mkdir(exist_ok=True)
+        self.run_path("events", "01.jsonl").write_text('{"event":"turn-ended"}\n')
+        out = self.call("status", "demo", expected=1)
+        self.assertIn(f"{RUN}/events/01.jsonl (not written by Fleet)", out)
+        self.assertNotIn("reports/01.md", out)
+
     def test_a_forged_gate_pass_is_refused(self):
         self.handed_back_with_stray()
         self.run_path("evidence", "01.gate.json").write_text(json.dumps({"passed": True}))

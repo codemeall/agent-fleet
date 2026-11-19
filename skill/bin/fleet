@@ -84,8 +84,8 @@ DEFAULTS = {
     "check_policy": "refuse",  # plan and add refuse a ticket without a runnable or manual check; "warn" saves it
     "review_transport": "tui",  # reviewers and investigators: TUI panes, or "headless" where an adapter has the line
     "headless_timeout_minutes": 30,  # a headless run that has not finished by then is stopped with a blocked report
-    # The owner's opt-in, for adapters with hooks: workers auto-accept edits (the guard keeps them in scope) and run
-    # their ticket's planned check commands without asking. Off: workers keep the account's own permission mode.
+    # The owner's opt-in, for adapters with hooks: allow rules so a Claude worker may edit its own files and run
+    # its ticket's planned checks without asking. Workers launch in acceptEdits either way. Off: no allow rules.
     "scope_permissions": False,
     # Worktree runs (fleet init --isolation worktree): where ticket trees go ("": $XDG_CACHE_HOME, else ~/.cache,
     # then agent-fleet/worktrees), and a shell command run in each new tree before its worker starts ("": none).
@@ -562,9 +562,14 @@ def hook_command(kind: str, scope: Path, events: Path, token: str) -> str:
     return shlex.join([sys.executable, str(Path(__file__).resolve()), "_hook", kind, str(scope), str(events), token])
 
 
-def hook_settings(scope: Path, events: Path, token: str, allow: list[str]) -> dict:
+# acceptEdits would run these in the working directory. Ask rules are checked before the mode, so they prompt.
+WORKER_ASK = ("Bash(rm *)", "Bash(rmdir *)", "Bash(mv *)", "Bash(cp *)", "Bash(sed *)")
+
+
+def hook_settings(scope: Path, events: Path, token: str, allow: list[str], ask: bool = False) -> dict:
     """The worker's Claude settings. --settings layers them above the account's and the project's own files, and
-    list keys merge (settings docs): these hooks and rules add to the owner's, never replace them."""
+    list keys merge (settings docs): these hooks and rules add to the owner's, never replace them. `ask` is for a
+    Claude worker: the Bash commands above prompt, and the hooks are the same either way."""
     def run(kind: str) -> list[dict]:
         return [{"type": "command", "command": hook_command(kind, scope, events, token), "timeout": HOOK_TIMEOUT_S}]
     settings = {
@@ -575,8 +580,13 @@ def hook_settings(scope: Path, events: Path, token: str, allow: list[str]) -> di
             "Stop": [{"hooks": run("stop")}],
         },
     }
+    permissions: dict = {}
     if allow:
-        settings["permissions"] = {"allow": allow}
+        permissions["allow"] = allow
+    if ask:
+        permissions["ask"] = list(WORKER_ASK)
+    if permissions:
+        settings["permissions"] = permissions
     return settings
 
 
@@ -599,11 +609,11 @@ def guard_scope(held: dict, files: list[str], owned: list[str] | None) -> dict:
 
 
 def write_hooks(repo: Path, d: Path, wid: str, files: list[str], token: str, scoped: bool,
-                commands: list[dict], owned: list[str] | None = None) -> dict:
+                commands: list[dict], owned: list[str] | None = None, ask: bool = False) -> dict:
     """Write a launch's settings and scope files; returns the paths the worker record keeps. A reviewer or
     investigator (no files) may write its report unasked. A worker gets allow rules for its files, report and
-    planned checks only when `scoped` (the owner's scope_permissions); otherwise every edit asks as the account's
-    mode says. `owned` is what its guard allows now (owned_files): a plan-first worker's rules cover its files from
+    planned checks only when `scoped` (the owner's scope_permissions). `ask` adds the worker's Bash ask rules.
+    `owned` is what its guard allows now (owned_files): a plan-first worker's rules cover its files from
     launch, since Claude may read its settings only at start, and its guard refuses them until approval."""
     settings, scope, events = hook_files(d, wid)
     held = guard_scope({"id": wid, "token": token, "repo": str(repo.resolve()),
@@ -613,7 +623,7 @@ def write_hooks(repo: Path, d: Path, wid: str, files: list[str], token: str, sco
         allow = edit_rules(held, files) + [note_rule(d.name, wid)] + allow_rules(commands)
     else:
         allow = [] if held["files"] else [edit_rule(held["report"])]
-    atomic_json(settings, hook_settings(scope, events, token, allow))
+    atomic_json(settings, hook_settings(scope, events, token, allow, ask))
     return {"settings": str(settings), "scope": str(scope), "events": str(events), **({"scoped": True} if scoped else {})}
 
 
@@ -635,11 +645,22 @@ def refresh_scope(w: dict, state: dict, i: str) -> None:
 
 def hook_log(events: str, token: str, event: str, **fields) -> None:
     """Append one event line (one write, so lines from parallel hooks never interleave); a hook that cannot write
-    it says so on stderr, which Claude keeps in its debug log, and goes on."""
+    it says so on stderr, which Claude keeps in its debug log, and goes on. The events file is one of Fleet's
+    control files, so the append and Fleet's copy share the record's lock."""
     line = json.dumps({"event": event, "token": token, "at": time.time(), **fields}) + "\n"
     try:
-        with open(events, "a") as fh:
-            fh.write(line)
+        path = Path(events)
+        found = control_rel(path)
+        where = control_dir(found[0], found[1]) if found else None
+        if where is None:
+            with open(events, "a") as fh:
+                fh.write(line)
+            return
+        with control_lock(where) as held:
+            with open(events, "a") as fh:
+                fh.write(line)
+            if held:
+                control_keep(where, found[2], path.read_bytes())
     except OSError as e:
         print(f"fleet _hook: could not log {event} to {events}: {e}", file=sys.stderr)
 
@@ -1273,8 +1294,10 @@ def save_live_state(repo: Path, run: str, state: dict) -> None:
 # and a check, each hold the record's own lock, so a lockless writer (gate) never races a check. A run from before
 # the record, or whose record was cleared with the cache, starts one from its files as they are, without refusing.
 
+# reports/ is the worker's hand-back, so it is not listed: the hook allows that one path under .fleet and
+# refuses every other edit. events/ is the hook log. A worker rewrite of it fails the control check.
 CONTROL_FILES = ("run.json", "live.json", "tree.json", "snapshots/*", "settings/*.json", "check-outputs/*.json",
-                 "tree-outputs/*.json", "evidence/*.gate.json", "evidence/accept-checks.json")
+                 "tree-outputs/*.json", "evidence/*.gate.json", "evidence/accept-checks.json", "events/*")
 CONTROL_PARTS = tuple(tuple(x.split("/")) for x in CONTROL_FILES)
 LOCK_HELD: set[str] = set()  # checkouts whose lock this process holds (try_lock): their commands check the record
 CONTROL_WARNED: set[str] = set()  # records this process could not keep, already said once
@@ -4745,7 +4768,8 @@ def launch_one(a, cfg) -> tuple[str, dict]:
             hooks = write_hooks(work, d, a.id, t["files"] if worker_role else [], token,
                                 worker_role and bool(cfg["defaults"].get("scope_permissions")),
                                 t.get("commands", []) if worker_role else [],
-                                owned_files(state, meta.get("fanout_of") or a.id) if worker_role else None)
+                                owned_files(state, meta.get("fanout_of") or a.id) if worker_role else None,
+                                ask=worker_role)
         signals, notify = (notify_launch(d, a.id, token, codex_home(pcfg)) if notify_on(pcfg, profile)
                            else (None, None))
         trust = prepare_trust(cfg, a.provider, pcfg, repo, () if work == repo else (work,))

@@ -104,10 +104,26 @@ class SettingsFile(HookCase):
                     self.assertEqual(handler["timeout"], fleet.HOOK_TIMEOUT_S)
                     self.assertNotIn("onFailure", handler)  # a failing hook lets the action go ahead
                     self.assertIn(" _hook ", handler["command"])
-        self.assertNotIn("permissions", settings)
+        self.assertEqual(settings["permissions"], {"ask": list(fleet.WORKER_ASK)})
         scope = json.loads((d / "settings/01.scope.json").read_text())
         self.assertEqual((scope["files"], scope["token"], scope["report"]),
                          (["owned.txt"], w["token"], str(d / "reports/01.md")))
+
+class AskRules(unittest.TestCase):
+    def test_worker_ask_rules_leave_the_hooks_unchanged(self):
+        scope, events = Path("/r/scope.json"), Path("/r/events.jsonl")
+        plain = fleet.hook_settings(scope, events, "tok", ["Edit(//r/a.py)"])
+        asked = fleet.hook_settings(scope, events, "tok", ["Edit(//r/a.py)"], ask=True)
+        self.assertEqual(asked["hooks"], plain["hooks"])
+        self.assertEqual(asked["disableAllHooks"], False)
+        self.assertNotIn("ask", plain["permissions"])
+        self.assertEqual(asked["permissions"]["allow"], ["Edit(//r/a.py)"])
+        self.assertEqual(asked["permissions"]["ask"], [
+            "Bash(rm *)", "Bash(rmdir *)", "Bash(mv *)", "Bash(cp *)", "Bash(sed *)"])
+        bare = fleet.hook_settings(scope, events, "tok", [], ask=True)
+        self.assertEqual(bare["hooks"], plain["hooks"])
+        self.assertEqual(bare["permissions"], {"ask": list(fleet.WORKER_ASK)})
+
 
 class Shipped(unittest.TestCase):
     """The shipped config, build_launch, doctor and the strict fake; no run."""
@@ -219,6 +235,8 @@ class Guard(HookCase):
                 ("Write", self.repo / "link/x.txt", 2),                    # a symlinked directory out of the repo
                 ("Write", self.repo / "next-link.txt", 2),                 # a symlink to another file
                 ("Write", self.repo / ".fleet/runs/demo/reports/02.md", 2),  # another worker's report
+                ("Write", self.repo / ".fleet/runs/demo/run.json", 2),     # Fleet's own record
+                ("Write", self.repo / ".fleet/runs/demo/events/01.jsonl", 2),  # the hook log
                 ("NotebookEdit", self.repo / "nb.ipynb", 2)):
             with self.subTest(tool=tool, path=str(path)):
                 res = self.guard(tool, path)
@@ -231,7 +249,7 @@ class Guard(HookCase):
         self.assertEqual(self.guard("NotebookEdit", "owned.txt").returncode, 0)
         self.assertEqual(self.guard("NotebookEdit", "owned.txt", cwd=self.repo / "sub").returncode, 2)
         denied = [e for e in self.events() if e["event"] == "denied"]
-        self.assertEqual(len(denied), 8)
+        self.assertEqual(len(denied), 10)
         self.assertEqual(denied[0]["path"], str(self.repo / "other.txt"))
         self.assertTrue(all(e["token"] == self.worker_rec()["token"] for e in denied))
         self.assertFalse((self.repo / "other.txt").exists())
@@ -438,11 +456,11 @@ class ScopePermissions(HookCase):
                 "checks": [{"run": "python3 -m unittest discover -s tests"}, {"run": "ls *.txt"},
                            "Manual review of the copy"]}]
 
-    def test_off_by_default_workers_keep_their_mode_and_get_no_rules(self):
+    def test_off_by_default_workers_ask_before_destructive_bash_and_get_no_allow_rules(self):
         self.setup_run(tickets=[dict(t) for t in self.TICKETS])
         self.launch()
         self.assertNotIn("--permission-mode", self.worker_rec()["command"])
-        self.assertNotIn("permissions", self.settings())
+        self.assertEqual(self.settings()["permissions"], {"ask": list(fleet.WORKER_ASK)})
 
     def test_on_a_worker_may_edit_its_own_files_and_run_only_its_planned_checks_unasked(self):
         self.cfg["defaults"]["scope_permissions"] = True
@@ -454,7 +472,8 @@ class ScopePermissions(HookCase):
         self.assertEqual(self.settings()["permissions"],
                          {"allow": [f"Edit(/{self.repo.resolve()}/owned.txt)", f"Edit(/{report})",
                                     fleet.note_rule("demo", "01"),  # its own fleet note (#45)
-                                    "Bash(python3 -m unittest discover -s tests)"]})  # `*` would be a wildcard
+                                    "Bash(python3 -m unittest discover -s tests)"],  # `*` would be a wildcard
+                          "ask": list(fleet.WORKER_ASK)})
         self.assertEqual(self.guard("Write", self.repo / "owned.txt").returncode, 0)
         self.assertEqual(self.guard("Write", self.repo / "other.txt").returncode, 2)
 
@@ -468,12 +487,13 @@ class ScopePermissions(HookCase):
         self.assertEqual(allow[:2], [f"Edit(/{root}/extra.txt)", f"Edit(/{root}/owned.txt)"])
         self.assertEqual(allow[-1], "Bash(python3 -m unittest discover -s tests)")
         self.assertEqual(self.guard("Write", self.repo / "extra.txt").returncode, 0)
+        self.assertEqual(self.settings()["permissions"]["ask"], list(fleet.WORKER_ASK))
 
-    def test_without_scope_permissions_a_grant_adds_no_rules(self):
+    def test_without_scope_permissions_a_grant_adds_no_allow_rules(self):
         self.setup_run()
         self.launch()
         self.call("grant", "demo", "01", "extra.txt", "--reason", "the helper lives there")
-        self.assertNotIn("permissions", self.settings())
+        self.assertEqual(self.settings()["permissions"], {"ask": list(fleet.WORKER_ASK)})
 
 
 if __name__ == "__main__":
