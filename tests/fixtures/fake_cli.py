@@ -333,8 +333,23 @@ def header(ticket: str, text: str, wrote: list[str]) -> str:
     return "```fleet\n" + json.dumps(data) + "\n```\n\n"
 
 
+# Login probes fleet doctor and fleet init run. They are not launch lines. Each reply contains that CLI's
+# login_ok so the probe reports logged in, and none of them is written to the launch log.
+STATUS_OK = {
+    ("claude", ("auth", "status")): '{"loggedIn": true}',
+    ("codex", ("login", "status")): "Logged in",
+    ("cursor-agent", ("status",)): "Logged in",
+    ("agy", ("models",)): "gemini - Gemini",
+    ("opencode", ("models", "openrouter")): "openrouter/fake",
+}
+
+
 def main() -> int:
     cli, argv = sys.argv[1], sys.argv[2:]
+    reply = STATUS_OK.get((cli, tuple(argv)))
+    if reply is not None:
+        print(reply, flush=True)
+        return 0
     want = json.loads(Path(os.environ["FAKE_CLI_EXPECT"]).read_text())
     want = want.get("by_cli", {}).get(cli, want)
     log = Path(os.environ["FAKE_CLI_LOG"])
