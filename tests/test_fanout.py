@@ -199,6 +199,14 @@ class FanoutLaunch(FanoutCase):
         self.assertNotIn("q--writer", out)  # one that already ran is the lead's to relaunch
         self.assertIn("NONE ready", self.call("launch", "demo", "--ready"))
 
+    def test_an_id_only_launch_starts_every_investigator(self):
+        self.plan()
+        out = self.call("launch", "demo", "q")
+        self.assertEqual(out.count("LAUNCHED q--"), 3)
+        workers = self.state()["workers"]
+        self.assertEqual({wid: workers[wid]["provider"] for wid in ("q--writer", "q--reviewer", "q--third")},
+                         {"q--writer": "writer", "q--reviewer": "reviewer", "q--third": "third"})
+
     def test_launch_of_the_ticket_starts_every_investigator(self):
         self.plan()
         self.assertIn("fans out to q--writer, q--reviewer, q--third", self.call("launch", "demo", "q", "writer",

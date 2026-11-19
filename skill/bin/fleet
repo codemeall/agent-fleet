@@ -4970,7 +4970,31 @@ def saved_launch_route(state: dict, wid: str) -> dict | None:
     return route
 
 
-def apply_saved_launch_defaults(a, state: dict) -> None:
+def config_known_family(pcfg: dict, tier: str | None, model: str) -> str | None:
+    """The family model_family would take from config, before an explicit --family."""
+    known = known_family(pcfg, model, tier)
+    adapter = pcfg.get("family")
+    if not known and adapter and adapter not in ("mixed", "unknown"):
+        known = adapter
+    return known
+
+
+def family_contradicts_config(cfg: dict, a, route: dict) -> bool:
+    """True when --family names a family the config already assigns to the model that will launch.
+    model_family refuses that itself; the saved-route message must not replace it."""
+    provider = a.provider or route.get("provider")
+    model = a.model or route.get("model")
+    if not a.family or not provider or not model:
+        return False
+    try:
+        pcfg = usable_provider(cfg, provider)
+    except FleetError:
+        return False
+    known = config_known_family(pcfg, a.tier or route.get("tier"), model)
+    return bool(known and a.family != known)
+
+
+def apply_saved_launch_defaults(a, state: dict, cfg: dict) -> None:
     """Fill an omitted provider, tier, model, effort or family from the saved assignment.
     An explicit value that differs is a mismatch. This does not change settle or wait."""
     route = saved_launch_route(state, a.id)
@@ -4978,11 +5002,21 @@ def apply_saved_launch_defaults(a, state: dict) -> None:
         return
     for key in LAUNCH_ROUTE_KEYS:
         given = getattr(a, key, None)
-        if given is not None and given != route.get(key):
-            raise FleetError(route_mismatch_message(a.run, a.id, route))
+        if given is None or given == route.get(key):
+            continue
+        if key == "family" and family_contradicts_config(cfg, a, route):
+            continue
+        raise FleetError(route_mismatch_message(a.run, a.id, route))
     for key in LAUNCH_ROUTE_KEYS:
         if getattr(a, key, None) is None:
             setattr(a, key, route.get(key))
+
+
+def launch_forms(run: str) -> str:
+    """The per-ticket and ready forms, for an id that has no saved assignment."""
+    return (f"fleet launch {run} <id> uses the saved assignment, "
+            f"fleet launch {run} <id> <provider> names the provider, "
+            f"and fleet launch {run} --ready launches every ready ticket")
 
 
 def launch_command(a, cfg):
@@ -4992,9 +5026,13 @@ def launch_command(a, cfg):
         return launch_fanout(a, cfg)
     if a.id is None:
         raise FleetError("launch needs <id> <provider> [--tier …], or --ready to launch every ready ticket")
-    apply_saved_launch_defaults(a, load_run(repo_root(), a.run))
+    state = load_run(repo_root(), a.run)
+    apply_saved_launch_defaults(a, state, cfg)
     if a.provider is None:
-        raise FleetError("launch needs <id> <provider> [--tier …], or --ready to launch every ready ticket")
+        meta = state["prompts"].get(a.id) or {}
+        if meta.get("plan_of") or meta.get("role") == "review":
+            raise FleetError(f"{a.id} needs <provider> --tier review")
+        raise FleetError(f"no saved assignment for {a.id}; {launch_forms(a.run)}")
     a.settle = LAUNCH_SETTLE_S if a.settle is None else a.settle
     label, w = launch_one(a, cfg)
     print(f"{a.id}: {label} on {w['surface']}")

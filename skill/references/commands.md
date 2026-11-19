@@ -1165,7 +1165,7 @@ fleet steer reset <run>
 
 Changes the provider, then optionally the model, for future implementation launches without editing the frozen plan. `provider` must be inside the run's routing and keeps the tier models. `model` needs a steered provider and must pass `models_allow`; it replaces every tier's model, light tickets included. `reset` returns to the plan's routing. Open panes and review launches are never steered.
 
-**Use:** when a provider is failing, rate-limited or a poor fit. Prefer steering the provider alone. Keep passing the plan's provider and tier to `launch`.
+**Use:** when a provider is failing, rate-limited or a poor fit. Prefer steering the provider alone. Omit the route, or pass the plan's provider and tier.
 
 ### hold
 
