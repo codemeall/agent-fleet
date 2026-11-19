@@ -740,6 +740,127 @@ class Runtime(RuntimeCase):
         self.call("status", "demo")  # a exited; its diff awaits the lead's verification
         self.assertIn("SKIPPED b: files overlap a", self.call("launch", "demo", "--ready"))
 
+    def test_a_per_ticket_launch_defaults_to_the_saved_assignment(self):
+        # A light ticket with a pinned effort. Omitting the route must not fall back to tier standard.
+        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off", *self.off_reason("off"))
+        ticket = self.repo / "01.md"
+        ticket.write_text("# Ticket 01\nImplement owned change and verify its behavior.\n")
+        plan = self.repo / "plan.json"
+        plan.write_text(json.dumps({"tickets": [{
+            "id": "01", "ticket": str(ticket), "files": ["owned.txt"], "provider": "writer", "tier": "light",
+            "model": "writer-model", "effort": "low", "family": "openai",
+            "context": "Keep the edit local.", "checks": [{"manual": "Read the diff"}]}],
+            "decisions": ["Pinned light on purpose."]}))
+        self.call("plan", "demo", "--file", str(plan))
+        self.prompt("01")
+        mismatch = self.call("launch", "demo", "01", "writer", "--tier", "standard", expected=1)
+        for part in ("provider writer", "tier light", "model writer-model", "effort low", "family openai"):
+            self.assertIn(part, mismatch)
+        self.assertIn("fleet launch demo 01 writer --tier light --model writer-model --effort low --family openai",
+                      mismatch)
+        self.assertNotIn("01", self.state()["workers"])
+        provider_mismatch = self.call("launch", "demo", "01", "reviewer", expected=1)
+        self.assertIn("provider writer", provider_mismatch)
+        self.assertNotIn("01", self.state()["workers"])
+        launched = self.call("launch", "demo", "01")  # id only: the whole route comes from the plan
+        self.assertIn("@low", launched)
+        self.assertEqual(self.route_of("01"), ("writer", "light", "writer-model", "low", "openai"))
+        self.stop_with_receipt()
+        self.call("launch", "demo", "01", "writer")  # provider only, every other route flag omitted
+        self.assertEqual(self.route_of("01"), ("writer", "light", "writer-model", "low", "openai"))
+
+    def light_ticket(self, family="openai"):
+        """A light ticket with a pinned effort, so an omitted route cannot fall back to tier standard."""
+        self.call("init", "demo", "--workspace", "workspace:1", "--review", "off", *self.off_reason("off"))
+        ticket = self.repo / "01.md"
+        ticket.write_text("# Ticket 01\nImplement owned change and verify its behavior.\n")
+        plan = self.repo / "plan.json"
+        plan.write_text(json.dumps({"tickets": [{
+            "id": "01", "ticket": str(ticket), "files": ["owned.txt"], "provider": "writer", "tier": "light",
+            "model": "writer-model", "effort": "low", "family": family,
+            "context": "Keep the edit local.", "checks": [{"manual": "Read the diff"}]}],
+            "decisions": ["Pinned light on purpose."]}))
+        self.call("plan", "demo", "--file", str(plan))
+        self.prompt("01")
+
+    def test_an_explicit_model_effort_or_family_mismatch_names_the_saved_route(self):
+        self.light_ticket()
+        saved = "fleet launch demo 01 writer --tier light --model writer-model --effort low --family openai"
+        for args in (["--model", "other-model"], ["--effort", "high"]):
+            out = self.call("launch", "demo", "01", "writer", *args, expected=1)
+            self.assertIn("launch must match the saved plan", out)
+            self.assertIn(saved, out)
+            self.assertNotIn("01", self.state()["workers"])
+        # The config already places writer-model in openai, so this is the config's message, not the route's.
+        contradicted = self.call("launch", "demo", "01", "writer", "--family", "anthropic", expected=1)
+        self.assertIn("family anthropic contradicts the config, which puts writer-model in family openai", contradicted)
+        self.assertNotIn("launch must match the saved plan", contradicted)
+
+    def test_a_family_the_config_does_not_know_still_must_match_the_saved_route(self):
+        self.cfg["providers"]["writer"]["family"] = "mixed"
+        for tier in self.cfg["providers"]["writer"]["tiers"].values():
+            del tier["family"]
+        self.light_ticket(family="custom")
+        out = self.call("launch", "demo", "01", "writer", "--family", "other", expected=1)
+        self.assertIn("family custom", out)
+        self.assertIn("fleet launch demo 01 writer --tier light --model writer-model --effort low --family custom", out)
+        self.assertNotIn("01", self.state()["workers"])
+
+    def test_an_id_only_launch_follows_a_steer_and_keeps_a_pinned_effort(self):
+        self.light_ticket()
+        self.call("steer", "provider", "demo", "reviewer")
+        out = self.call("launch", "demo", "01")
+        self.assertIn("steered (", out)
+        self.assertEqual(self.route_of("01"), ("reviewer", "light", "reviewer-model", "high", "anthropic"))
+        self.stop_with_receipt()
+        self.call("steer", "reset", "demo")
+        self.call("steer", "provider", "demo", "writer")
+        self.call("steer", "model", "demo", "other-model")
+        out = self.call("launch", "demo", "01")
+        self.assertIn("steered (", out)
+        # A model steer clears the family, not the plan's effort pin.
+        self.assertEqual(self.route_of("01"), ("writer", "light", "other-model", "low", "openai"))
+
+    def test_a_review_id_still_needs_a_provider_and_tier_review(self):
+        self.setup_run(review="cross-all")
+        self.launch()
+        self.hand_back()
+        self.review_prompt()
+        refused = self.call("launch", "demo", "review-01", expected=1)
+        self.assertIn("review-01 needs <provider> --tier review", refused)
+        self.assertNotIn("review-01", self.state()["workers"])
+        self.assertIn("--tier review", self.call("launch", "demo", "review-01", "reviewer", expected=1))
+        self.call("launch", "demo", "review-01", "reviewer", "--tier", "review")
+        self.assertEqual(self.state()["workers"]["review-01"]["tier"], "review")
+
+    def test_an_unknown_id_names_the_current_launch_forms(self):
+        self.setup_run()
+        out = self.call("launch", "demo", "nope", expected=1)
+        self.assertIn("no saved assignment for nope", out)
+        self.assertIn("fleet launch demo <id> uses the saved assignment", out)
+        self.assertIn("fleet launch demo <id> <provider> names the provider", out)
+        self.assertIn("fleet launch demo --ready launches every ready ticket", out)
+        self.assertNotIn("[--tier", out)
+
+    def test_resume_with_only_the_id_continues_the_saved_session(self):
+        self.resumable_writer()
+        self.setup_run()
+        self.launch()
+        first = self.state()["workers"]["01"]
+        sid = str(uuid.UUID(first["session"]))
+        self.receipt(returncode=1)
+        self.call("status", "demo")
+        self.call("launch", "demo", "01", "--resume")
+        w = self.state()["workers"]["01"]
+        self.assertEqual(w["session"], first["session"])
+        self.assertEqual((w["provider"], w["tier"]), ("writer", "standard"))
+        argv = self.worker_argv()
+        self.assertEqual(argv[argv.index("--resume") + 1], sid)
+
+    def route_of(self, ticket="01"):
+        worker = self.state()["workers"][ticket]
+        return tuple(worker[key] for key in ("provider", "tier", "model", "effort", "family"))
+
     def test_launch_ready_is_refused_on_hold_and_alongside_a_ticket(self):
         self.setup_run()
         self.call("hold")

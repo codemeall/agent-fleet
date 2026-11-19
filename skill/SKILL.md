@@ -31,7 +31,7 @@ Companion skills are optional ([host setup](references/harnesses.md)): run `gril
 
 ### Steering routing
 
-When a provider is failing, rate-limited or a poor fit mid-run, `fleet steer provider|model|reset <run> …` moves future launches inside the run's routing; keep passing the plan's provider and tier to `fleet launch`. A worker on a usage limit: stop it, then relaunch after the reset with `--resume`, or steer and relaunch fresh; when neither is possible, tell the owner ([steering](references/routing.md#steering)).
+When a provider is failing, rate-limited or a poor fit mid-run, `fleet steer provider|model|reset <run> …` moves future launches inside the run's routing; omit the route, or pass the plan's provider and tier. A worker on a usage limit: stop it, then relaunch after the reset with `--resume`, or steer and relaunch fresh; when neither is possible, tell the owner ([steering](references/routing.md#steering)).
 
 ## 2. Save a complete plan
 
@@ -59,7 +59,7 @@ Give each ticket `context` (spec and testing decisions, glossary/ADR paths, owne
 
 - `fleet prompt <run> <id>` writes the prompt from the ticket, the fixed worker rules, `.fleet/rules.md` and its `context`/`checks`. With both planned it is complete; otherwise fill each `<!-- LEAD: … -->` comment it names (launch refuses unfilled ones), keeping the worker rules and file list.
 - Resolve glossary/ADR paths from project configuration (`GLOSSARY.md`, `GLOSSARY-MAP.md` or, in older repositories, `CONTEXT.md`). Never invoke upstream `/implement`: it commits.
-- `fleet launch <run> <id> <provider> --tier <tier> [--model <model>] [--effort <effort>] [--family <family>]` must match the saved assignment. The CLI enforces blockers, active file ownership and capacity, and gives each worker its own pane ([placement](references/commands.md#launch)), never yours. With no free pane, launch refuses: stop a worker first. `--pane <ref|uuid|index>` picks the pane. Each launch runs its adapter's `worker` or `review` profile, and launch refuses one above `permission_ceiling`: tell the owner, never route around it.
+- Default launch is `fleet launch <run> --ready` (every ready ticket, saved assignment). Per-ticket launch is the exception, for one relaunch or repair: `fleet launch <run> <id>` or `<id> <provider>` with no other flags uses the saved provider, tier, model, effort and family. A mismatch is refused; the message names that route and a command to copy. Own pane ([placement](references/commands.md#launch)), never yours. Above `permission_ceiling`: tell the owner, never route around it.
 - `fleet hold [--reason <text>]` blocks new launches in this checkout while running workers continue; `fleet release` lifts it. Use either only when the owner asks. When launch refuses because of a hold, do not retry or stop workers: verify running ones as usual, tell the owner, and end your turn.
 - Launch prints the worker's screen a few seconds in: read it for a login, trust, model or permission prompt; never answer one. `NOT STARTED` (exit 1) means it never ran: stop, then relaunch. Don't peek to confirm a start; peek only when the launch screen or a wake line calls for it.
 
