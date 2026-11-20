@@ -111,20 +111,39 @@ class SettingsFile(HookCase):
         self.assertEqual((scope["files"], scope["token"], scope["report"]),
                          (["owned.txt"], w["token"], str(d / "reports/01.md")))
 
+    def test_every_run_entry_except_reports_is_denied(self):
+        self.setup_run()
+        self.launch()
+        d = self.repo / ".fleet/runs/demo"
+        names = sorted(p.name for p in d.iterdir())
+        self.assertIn("reports", names)
+        deny = self.settings()["permissions"]["deny"]
+        root = d.resolve()
+        for name in names:
+            if name == "reports":
+                continue
+            path = root / name
+            rule = fleet.edit_tree_rule(str(path)) if path.is_dir() else fleet.edit_rule(str(path))
+            self.assertIn(rule, deny, name)
+        for name in ("tasks", "tickets", "plans", "evidence", "usage", "merge"):
+            self.assertIn(fleet.edit_tree_rule(str(root / name)), deny)
+        self.assertNotIn("reports", " ".join(deny))
+
+
 class AskRules(unittest.TestCase):
     def test_worker_ask_rules_leave_the_hooks_unchanged(self):
         scope, events = Path("/r/scope.json"), Path("/r/events.jsonl")
+        run = Path("/r")
         plain = fleet.hook_settings(scope, events, "tok", ["Edit(//r/a.py)"])
-        asked = fleet.hook_settings(scope, events, "tok", ["Edit(//r/a.py)"], ask=True)
+        asked = fleet.hook_settings(scope, events, "tok", ["Edit(//r/a.py)"], ask=True, run_dir=run)
         self.assertEqual(asked["hooks"], plain["hooks"])
         self.assertEqual(asked["disableAllHooks"], False)
         self.assertNotIn("ask", plain["permissions"])
         self.assertEqual(asked["permissions"]["allow"], ["Edit(//r/a.py)"])
         self.assertEqual(asked["permissions"]["ask"], [
             "Bash(rm *)", "Bash(rmdir *)", "Bash(mv *)", "Bash(cp *)", "Bash(sed *)"])
-        bare = fleet.hook_settings(scope, events, "tok", [], ask=True)
-        self.assertEqual(bare["hooks"], plain["hooks"])
-        self.assertEqual(bare["permissions"], {"ask": list(fleet.WORKER_ASK)})
+        with self.assertRaises(fleet.FleetError):
+            fleet.hook_settings(scope, events, "tok", [], ask=True)
 
     def test_workers_deny_edits_to_the_run_record_and_the_lead_does_not(self):
         events = Path("/not-events/01.jsonl")
@@ -133,17 +152,8 @@ class AskRules(unittest.TestCase):
         report = fleet.edit_rule("/repo/.fleet/runs/demo/reports/01.md")
         worker = fleet.hook_settings(scope, events, "tok", [report], ask=True, run_dir=run)
         lead = fleet.hook_settings(scope, events, "tok", [report], run_dir=run)
-        deny = [
-            "Edit(//repo/.fleet/runs/demo/events/**)",
-            "Edit(//repo/.fleet/runs/demo/exits/**)",
-            "Edit(//repo/.fleet/runs/demo/settings/**)",
-            "Edit(//repo/.fleet/runs/demo/prompts/**)",
-            "Edit(//repo/.fleet/runs/demo/inbox/**)",
-            "Edit(//repo/.fleet/runs/demo/run.json)",
-            "Edit(//repo/.fleet/runs/demo/live.json)",
-            "Edit(//repo/.fleet/runs/demo/notes.md)",
-            "Edit(//repo/.fleet/runs/demo/board.md)",
-        ]
+        deny = [fleet.edit_tree_rule(str(run / name)) for name in fleet.RUN_DENY_DIRS] + [
+            fleet.edit_rule(str(run / name)) for name in fleet.RUN_DENY_FILES]
         self.assertEqual(worker["permissions"]["deny"], deny)
         self.assertEqual(worker["permissions"]["allow"], [report])
         self.assertNotIn("reports", " ".join(deny))

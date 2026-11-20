@@ -551,15 +551,22 @@ def edit_tree_rule(path: str) -> str:
     return "Edit(/" + body + "/**)"
 
 
+# Every top-level name fleet creates in a run directory, except reports/ (the worker's own hand-back, written
+# with Claude's edit tools). The rest are written by fleet commands in their own processes. A deny of the run
+# directory itself cannot spare reports/: a ! rule is read relative to the current directory even when // follows
+# it, and a carve-out cannot reopen a path inside a directory the rule blocks as a whole (permissions docs).
+RUN_DENY_DIRS = ("events", "exits", "settings", "prompts", "inbox", "snapshots", ".seen", "tasks", "tickets",
+                 "plans", "evidence", "usage", "merge", "tree-outputs", "check-outputs", "worktrees")
+RUN_DENY_FILES = ("run.json", "live.json", "notes.md", "board.md", "tree.json")
+
+
 def worker_edit_deny(run: Path) -> list[str]:
-    """Edit deny rules for one run directory's control paths. Reports are not listed: a per-ticket pattern is
-    not a reliable way to keep the worker's own report writable. A worker reads prompts, the inbox, notes and
-    the board; fleet prompt, send, handoff and note write them in their own processes. Permissions docs: an
+    """Edit deny rules for every top-level entry of one run directory except its reports. Permissions docs: an
     Edit deny is checked before the permission mode and also covers redirect targets and the file commands
-    Claude recognizes, including sed and tee."""
+    Claude recognizes, including sed and tee. A script that opens files itself is not covered."""
     root = run.resolve()
-    return [edit_tree_rule(str(root / name)) for name in ("events", "exits", "settings", "prompts", "inbox")] + [
-        edit_rule(str(root / name)) for name in ("run.json", "live.json", "notes.md", "board.md")]
+    return [edit_tree_rule(str(root / name)) for name in RUN_DENY_DIRS] + [
+        edit_rule(str(root / name)) for name in RUN_DENY_FILES]
 
 
 def edit_rules(scope: dict, files: list[str]) -> list[str]:
@@ -604,9 +611,10 @@ def hook_settings(scope: Path, events: Path, token: str, allow: list[str], ask: 
     if allow:
         permissions["allow"] = allow
     if ask:
+        if run_dir is None:
+            raise FleetError("a Claude worker's settings need the run directory, or the deny rules would be dropped")
         permissions["ask"] = list(WORKER_ASK)
-        if run_dir is not None:  # the caller passes the run directory; the events path is not used to find it
-            permissions["deny"] = worker_edit_deny(run_dir)
+        permissions["deny"] = worker_edit_deny(run_dir)
     if permissions:
         settings["permissions"] = permissions
     return settings
