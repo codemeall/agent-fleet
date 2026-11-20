@@ -27,7 +27,7 @@ Command sequences for the cases the skill describes in prose. Each uses the run 
 | `/fleet workspace=workspace:3 -- …` | `fleet init settings --workspace workspace:3` |
 | "Resume the settings run" | `fleet resume settings` (init refuses an existing run) |
 
-In `agents=`, a listed model (`claude:sonnet`) replaces that provider's tier models in the plan; see [routing](routing.md). Then save the plan (skill step 2) and write prompts.
+In `agents=`, a listed model (`claude:sonnet`) replaces that provider's tier models in the plan; see [routing](routing.md). Then save the plan (the skill's plan step) and write prompts.
 
 ## 2. Answer a blocked worker
 
@@ -64,7 +64,7 @@ If it needs the owner (scope, a permission, a login), ask them first and send no
 
 ## 4. Cross-family review, with a fix round
 
-The writer `api-client` (codex, heavy) reported `needs-verification` and you checked it (skill step 5). One command stops it, saves its diff to the run's `evidence/` folder, writes the reviewer prompt and launches a reviewer from another family:
+The writer `api-client` (codex, heavy) reported `needs-verification` and you checked it (the skill's review and accept step). One command stops it, saves its diff to the run's `evidence/` folder, writes the reviewer prompt and launches a reviewer from another family:
 
 ```sh
 fleet review settings api-client
@@ -144,7 +144,7 @@ For a reviewer, record which diff it reviewed and how each finding was resolved.
 
 ## 6. Repair or relaunch a stopped worker
 
-Use this after `EXITED api-client`, or when a stopped worker needs fixes within its assignment. The provider, tier and model must match the plan.
+Use this after `EXITED api-client`, or when a stopped worker needs fixes within its assignment. Per-ticket launch is the exception, for a repair like this. With no other flags, omitted provider, tier, model, effort and family come from the saved assignment. A value you pass must match that assignment.
 
 1. `fleet status settings` confirms the exit, then read its report.
 2. Tell the new process what already exists: append a section to `.fleet/runs/settings/prompts/api-client.md`:
@@ -152,11 +152,11 @@ Use this after `EXITED api-client`, or when a stopped worker needs fixes within 
    ## Repair
    Your earlier edits to src/api.ts are in place; keep them. Remaining: the 404 case and its test (review finding 1).
    ```
-3. `fleet launch settings api-client codex --tier heavy`. The previous report is kept as `reports/api-client.<hex>.previous`, and the diff baseline stays at the first launch. Once the ticket's review rounds are used up, this launch is refused with the escalation for the owner (example 4, out of rounds).
+3. `fleet launch settings api-client`. The previous report is kept as `reports/api-client.<hex>.previous`, and the diff baseline stays at the first launch. Once the ticket's review rounds are used up, this launch is refused with the escalation for the owner (example 4, out of rounds). The usual launch of a wave is still `fleet launch <run> --ready`.
 
 If the worker stopped on a usage limit and its adapter can resume (Claude), relaunch after the limit resets and add `--resume`: the worker continues its own session, so step 2 is only needed for new instructions.
 
-A change of scope is not a repair; grant the file, or use a follow-up run when grant refuses (example 8). To move future launches to another provider or model, use `fleet steer` (skill step 1, Steering routing).
+A change of scope is not a repair; grant the file, or use a follow-up run when grant refuses (example 8). To move future launches to another provider or model, use `fleet steer` ([steering](routing.md#steering)).
 
 ## 7. Recover a worker whose exit cannot be confirmed
 
