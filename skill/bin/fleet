@@ -960,6 +960,202 @@ def prepare_trust(cfg: dict, name: str, pcfg: dict, repo: Path, also: tuple[Path
     return ""
 
 
+def claude_trust_file(pcfg: dict) -> Path:
+    """The account's .claude.json, the file trust_claude writes. Read-only callers use the same path."""
+    sets, _ = account_env(pcfg)
+    home = sets.get(pcfg.get("account_env") or "")
+    return (Path(home) if home else Path.home()) / ".claude.json"
+
+
+def codex_trust_file(pcfg: dict) -> Path:
+    """Codex's config.toml, where a saved project trust_level lives. The session -c override is separate."""
+    home = account_env(pcfg)[0].get("CODEX_HOME") or str(Path(pcfg.get("default_home") or "~/.codex").expanduser())
+    return Path(home) / "config.toml"
+
+
+def read_trust(pcfg: dict, path: str) -> tuple[bool, str | None]:
+    """Whether `path` is already trusted for this adapter, and a short reason when the trust file cannot be read.
+    Never writes. A missing file is simply not trusted."""
+    method = pcfg.get("trust")
+    try:
+        if method == "claude-config":
+            data = json.loads(claude_trust_file(pcfg).read_text())
+            projects = data.get("projects") if isinstance(data, dict) else None
+            entry = projects.get(path) if isinstance(projects, dict) else None
+            return isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True, None
+        if method == "agy-settings":
+            data = json.loads(Path(AGY_SETTINGS).expanduser().read_text())
+            trusted = data.get("trustedWorkspaces") if isinstance(data, dict) else None
+            return isinstance(trusted, list) and path in trusted, None
+        if method == "codex-flag":
+            with open(codex_trust_file(pcfg), "rb") as fh:
+                data = tomllib.load(fh)
+            projects = data.get("projects") if isinstance(data, dict) else None
+            entry = projects.get(path) if isinstance(projects, dict) else None
+            return isinstance(entry, dict) and entry.get("trust_level") == "trusted", None
+    except FileNotFoundError:
+        return False, None
+    except (OSError, ValueError, tomllib.TOMLDecodeError) as e:
+        return False, f"could not read trust data ({type(e).__name__})"
+    return False, None
+
+
+def trust_targets(_cfg: dict, repo: Path | None) -> list[tuple[str, str | None]]:
+    """The checkout, when this command is inside one. A worker tree is not a doctor failure: with auto_trust
+    off, a worktree run prints a note instead."""
+    return [("checkout", str(repo.resolve()) if repo is not None else None)]
+
+
+def untrusted_labels(cfg: dict, pcfg: dict, repo: Path | None) -> list[str]:
+    """Checkout paths this CLI would still ask to trust. Empty when auto_trust is on, the CLI asks nothing,
+    there is no checkout, or the checkout is already trusted. Reads only."""
+    if repo is None or cfg.get("defaults", DEFAULTS).get("auto_trust") or pcfg.get("trust") not in TRUST_METHODS:
+        return []
+    missing = []
+    for label, path in trust_targets(cfg, repo):
+        if path is None:
+            continue
+        trusted, why = read_trust(pcfg, path)
+        if not trusted:
+            missing.append(f"{label} {path}" + (f" ({why})" if why else ""))
+    return missing
+
+
+def claude_config_file(pcfg: dict) -> str:
+    """The Claude config file auto_trust writes, as a lead can type it. A second account keeps the directory it set."""
+    path = claude_trust_file(pcfg)
+    var = pcfg.get("account_env") or ""
+    raw = (pcfg.get("env") or {}).get(var)
+    if isinstance(raw, str) and raw:
+        return str(Path(raw) / path.name)
+    try:
+        return "~/" + path.relative_to(Path.home()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def trust_fix_line(pcfg: dict | None = None) -> str:
+    method = (pcfg or {}).get("trust")
+    if method == "claude-config":
+        writes = f"it writes {claude_config_file(pcfg)}"
+    elif method == "agy-settings":
+        writes = f"it writes the Antigravity settings at {AGY_SETTINGS}"
+    elif method == "codex-flag":
+        writes = "Codex gets a session flag and writes no trust file"
+    else:
+        writes = f"it writes ~/.claude.json and the Antigravity settings at {AGY_SETTINGS}"
+    return ("fix: open the CLI once in the checkout and accept, or set auto_trust = true under "
+            f"[defaults] in {USER_CONFIG} (explicit owner opt-in; {writes}; the default stays false)")
+
+
+# Claude keys workspace trust on the main checkout inside a git worktree
+# (https://code.claude.com/docs/en/permissions: "In a worktree, it uses the main checkout's root").
+# Codex's config reference marks a project or a worktree on its own and does not say a worktree uses the
+# main checkout (https://learn.chatgpt.com/docs/config-file/config-reference), so the note stays for it.
+MAIN_ROOT_TRUST = {"claude-config"}
+
+
+def trust_note_names(cfg: dict) -> list[str]:
+    """Enabled adapters whose folder trust does not follow the main checkout in a worktree."""
+    return [name for name, pcfg in cfg.get("providers", {}).items()
+            if pcfg.get("enabled", True) and not pcfg.get("placeholder")
+            and pcfg.get("trust") in TRUST_METHODS and pcfg.get("trust") not in MAIN_ROOT_TRUST]
+
+
+def worktree_trust_note(names: list[str]) -> str:
+    """A note, not a failure, for adapters that still ask in each worker tree."""
+    return (f"note: auto_trust is off, so each worker tree may need trust for {', '.join(names)}. "
+            "The owner answers the trust screen in fleet agents, or sets auto_trust.")
+
+
+def worktree_run_open(repo: Path | None) -> bool:
+    """True when this checkout has a run started with --isolation worktree."""
+    if repo is None:
+        return False
+    root = repo / ".fleet" / "runs"
+    if not root.is_dir():
+        return False
+    for path in root.glob("*/run.json"):
+        try:
+            state = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(state, dict) and (state.get("options") or {}).get("isolation") == "worktree":
+            return True
+    return False
+
+
+def login_fix(name: str, pcfg: dict) -> str:
+    """The owner's sign-in command. Doctor and init print it; they never run it."""
+    login = pcfg.get("login") or ""
+    sets, _ = account_env(pcfg)
+    var = pcfg.get("account_env")
+    prefix = f"{var}={shlex.quote(sets[var])} " if var and var in sets else ""
+    if login.startswith("claude auth status"):
+        return f"fix: {prefix}claude auth login"
+    if login.startswith("codex login status"):
+        return f"fix: {prefix}codex login"
+    if login.startswith("cursor-agent status") or login.startswith("agent status"):
+        binary = first_binary(pcfg.get("bin") or name)
+        return f"fix: {binary} login"
+    if login.startswith("opencode "):
+        return "fix: opencode auth login"
+    return (f"fix: sign in to {name} in your own terminal (fleet ran `{login}` with stdin closed and it did not "
+            "report logged in; fleet does not start a sign-in)")
+
+
+def _probe_logins(items: list[tuple[str, dict]], timeout: float) -> dict[str, str]:
+    """Login probes for init, in parallel. Each one keeps its own timeout. The caller keeps provider order."""
+    ready: dict[str, str] = {}
+
+    def run(name: str, pcfg: dict) -> None:
+        ready[name] = login_check(pcfg, timeout)[0]
+
+    threads = [threading.Thread(target=run, args=(name, pcfg)) for name, pcfg in items]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    return ready
+
+
+def owner_action_block(cfg: dict, repo: Path | None, *, login_timeout: float | None = None,
+                       skip_login: bool = False) -> str:
+    """One block when an enabled CLI is missing folder trust, its binary, or a logged-out login.
+    Empty when nothing is missing. A probe that does not finish is a separate line, not an owner action.
+    `login_timeout` None keeps login_check's own 60s; init passes a shorter one.
+    Doctor does not use this function."""
+    entries = []
+    for name, pcfg in cfg.get("providers", {}).items():
+        if not pcfg.get("enabled", True) or pcfg.get("placeholder"):
+            continue
+        kind = "skip"
+        if "login" in pcfg:
+            binary = first_binary(pcfg.get("bin") or name)
+            if not shutil.which(binary):
+                kind = "missing"  # --no-login-check skips the probe, not this
+            elif not skip_login:
+                kind = "probe"
+        entries.append((name, pcfg, untrusted_labels(cfg, pcfg, repo), kind))
+    timeout = 60 if login_timeout is None else login_timeout
+    probed = _probe_logins([(name, pcfg) for name, pcfg, _, kind in entries if kind == "probe"], timeout)
+    lines, notes = [], []
+    for name, pcfg, missing, kind in entries:
+        if missing:
+            lines.append(f"- {name}: not trusted: {'; '.join(missing)}. {trust_fix_line(pcfg)}")
+        if kind == "missing":
+            lines.append(f"- {name}: missing binary '{first_binary(pcfg.get('bin') or name)}'")
+        elif kind == "probe" and probed[name] == "logged-out":
+            lines.append(f"- {name}: not logged in. {login_fix(name, pcfg)}")
+        elif kind == "probe" and probed[name] == "unconfirmed":
+            notes.append(f"{name}: login not confirmed within {timeout:g} s; run fleet doctor {name}")
+    parts = []
+    if lines:
+        parts.append("owner action needed:\n" + "\n".join(lines))
+    parts.extend(notes)
+    return "\n".join(parts)
+
+
 def worker_prompt_line(prompt_path: Path, ticket_id: str) -> str:
     return (f"Read {prompt_path} and follow it exactly. You are fleet worker {ticket_id}. "
             f"Your report path and hard rules are in that file, and it is complete: do not load the fleet skill "
@@ -3494,10 +3690,15 @@ def cmd_init(a, cfg):
     if isolated(state):
         print(f"isolation: worktree; each implement ticket's worker runs in its own tree under {options['worktree_dir']}, "
               f"and fleet accept applies its diff to this checkout's working tree (fleet merge)")
+        if not cfg["defaults"].get("auto_trust") and (noted := trust_note_names(cfg)):
+            print(worktree_trust_note(noted))
     if untracked_fleet_ignore(repo):
         print("note: .fleet/.gitignore keeps run state out of Git, and shows as untracked `.fleet/` until the owner "
               "decides once per project: commit it (every clone then ignores .fleet/runs/), or add `.fleet/` to "
               ".git/info/exclude to keep Fleet local. Ask them which.", file=sys.stderr)
+    block = owner_action_block(cfg, repo, login_timeout=8, skip_login=bool(getattr(a, "no_login_check", False)))
+    if block:
+        print(block)
     print(f"Next: fleet plan {a.run} --file <plan.json>")
 
 
@@ -11606,6 +11807,10 @@ def cmd_release(a, cfg):
 def cmd_doctor(a, cfg):
     ok = True
     accounts: dict[tuple[str, str], list[str]] = {}
+    try:
+        doctor_repo = repo_root()
+    except (FleetError, OSError, subprocess.TimeoutExpired):
+        doctor_repo = None
     print(f"fleet         {VERSION}  ({SKILL_DIR})")
     print(f"python        {sys.executable}  ({sys.version.split()[0]})")
     chosen = cfg.get("defaults", DEFAULTS).get("backend", "auto")
@@ -11629,6 +11834,11 @@ def cmd_doctor(a, cfg):
         print(f"workspace     WARNING: defaults.workspace = {pinned!r} is a cmux ref. {STALE_PIN_FIX} After a "
               "restart the ref can vanish or name another project's workspace.")
     print(f"config        {USER_CONFIG if USER_CONFIG.exists() else 'none (built-in defaults)'}")
+    if doctor_repo is None:  # README's quick start runs doctor before any checkout
+        print("note: no git checkout here, so the folder trust check is skipped")
+    elif (not cfg.get("defaults", DEFAULTS).get("auto_trust") and worktree_run_open(doctor_repo)
+            and (noted := trust_note_names(cfg))):
+        print(worktree_trust_note(noted))  # a note, not a failure, and not part of the checkout trust check
     names = a.providers or list(cfg["providers"])
     for name in names:
         p = provider(cfg, name)
@@ -11647,21 +11857,32 @@ def cmd_doctor(a, cfg):
             print(f"{name:<13} MISSING binary '{binary}'" + (
                 f" (found '{alias}', a name this CLI also installs as; the owner can set {name}'s bin, login and "
                 f"models to use it)" if alias else ""))
-            continue
+            continue  # no trust verdict until the binary exists
+        gaps = untrusted_labels(cfg, p, doctor_repo)
+        if gaps:
+            ok = False
+            print(f"{name:<13} NOT TRUSTED: {'; '.join(gaps)}")
+            print(f"              {trust_fix_line(p)}")
         launch_lines, within = profile_report(cfg, name, p, found)
         ok &= within
         if "login" not in p:
             print(f"{name:<13} installed (no login check defined)")
             print(*launch_lines, sep="\n")
             continue
-        ready, output = login_check(p)
-        ok &= ready
+        state, output = login_check(p)
         m = ACCOUNT_RE.search(output)
-        if ready and m:
+        if state == "logged-in" and m:
             accounts.setdefault((binary, m.group(1)), []).append(name)
         tiers = ", ".join(f"{t}={v.get('model')}" for t, v in p.get("tiers", {}).items())
-        if not ready:
+        if state == "unconfirmed":
+            ok = False
+            print(f"{name}: login not confirmed within {login_check.__defaults__[0]:g} s; retry, or run {env_prefix(p)}{p.get('login')}")
+            print(*launch_lines, sep="\n")
+            continue
+        if state != "logged-in":
+            ok = False
             print(f"{name:<13} LOGIN CHECK FAILED  max={p.get('max', 2)}  {tiers}")
+            print(f"              {login_fix(name, p)}")
             print(*launch_lines, sep="\n")
             continue
         missing, note = model_problems(p)
@@ -12046,17 +12267,34 @@ def smoke_line(name: str) -> str:
     return f"fleet smoke {name} ok"
 
 
-def login_check(p: dict) -> tuple[bool, str]:
-    """doctor's login test for one provider: whether its login command's output holds login_ok, and that output
-    (Codex prints its status to stderr). A provider with no login command counts as ready."""
+def login_check(p: dict, timeout: float = 60) -> tuple[str, str]:
+    """One provider's login probe: "logged-in", "logged-out", or "unconfirmed", and the output.
+    Codex prints its status to stderr. A provider with no login command counts as logged in. The default
+    timeout is doctor's; init passes a shorter one and does not change this default. The command gets its
+    own process group, as a gate check does, so a timeout kills whatever it started."""
     if "login" not in p:
-        return True, ""
+        return "logged-in", ""
     try:
-        res = subprocess.run(p["login"], shell=True, capture_output=True, text=True, timeout=60, env=child_env(p))
+        # stdin closed: a status command cannot sit on a prompt or start a sign-in. Doctor never runs the fix.
+        proc = subprocess.Popen(p["login"], shell=True, env=child_env(p), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    except OSError as e:
+        return "logged-out", str(e)
+    try:
+        out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        return False, ""
-    output = res.stdout + res.stderr
-    return res.returncode == 0 and bool(p.get("login_ok")) and p["login_ok"] in output, output
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:  # something left the process group and still holds the pipe
+            proc.kill()
+        return "unconfirmed", ""
+    output = out.decode(errors="replace") + err.decode(errors="replace")
+    logged_in = proc.returncode == 0 and bool(p.get("login_ok")) and p["login_ok"] in output
+    return ("logged-in" if logged_in else "logged-out"), output
 
 
 def named_providers(cfg: dict, named: str) -> list[str]:
@@ -12085,7 +12323,7 @@ def smoke_providers(cfg: dict, named: str | None) -> list[str]:
         binary = first_binary(p.get("bin", ""))
         if not p.get("enabled", True) or p.get("placeholder") or binary in bins:
             continue
-        if shutil.which(binary) and login_check(p)[0]:
+        if shutil.which(binary) and login_check(p)[0] == "logged-in":
             names.append(name)
             bins.add(binary)
     if not names:
@@ -14729,6 +14967,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--isolation", choices=["shared", "worktree"], default="shared",
                    help="shared (default): every worker edits this checkout; worktree: each implement ticket's worker "
                         "runs in its own Git worktree outside it, and accept applies its diff here (fleet merge)")
+    s.add_argument("--no-login-check", action="store_true",
+                   help="skip init's login probes; doctor still runs them with its own timeout")
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("plan", help="persist a ticket graph and routing assignments")

@@ -172,10 +172,19 @@ fleet doctor
 
 `version` prints the runtime's version and the skill directory it runs from. With several installs, it tells you which copy your shell found.
 
-`doctor` checks the terminal backends (cmux connectivity, tmux availability; only your configured one has to pass), worker executables and login signals, and checks each tier model against the account's model list where the CLI offers one (Codex, Cursor, Antigravity, OpenCode). It cannot guarantee model access or a successful worker session. It also reports:
+`doctor` checks the terminal backends (cmux connectivity, tmux availability; only your configured one has to pass), worker executables and login signals, whether each enabled CLI already trusts this checkout, and checks each tier model against the account's model list where the CLI offers one (Codex, Cursor, Antigravity, OpenCode). A missing trust or a login check that does not report logged in fails doctor and names the fix: open the CLI once in the checkout and accept, or set `auto_trust = true`. Outside a git repository, as in the quick start above, doctor prints `no git checkout here`, skips the folder trust check, and that alone leaves exit 0. A worktree run with `auto_trust` off notes that some adapters may need trust in each worker tree (Claude resolves to the main checkout). The owner answers that screen in `fleet agents`, or sets `auto_trust`. It cannot guarantee model access or a successful worker session. It also reports:
 
 - the runtime's version, and each host's installed `fleet` skill with its version, flagging copies that differ from the runtime you ran. Copies installed before `fleet version` existed show `version unknown`.
 - where each [companion skill](#companion-skills-optional) is installed: the user-level skill directories, plus `.claude/skills`, `.agents/skills` and `.cursor/skills` in the current directory. Missing companions get an install command and never make `doctor` fail. Skills installed through a plugin aren't detected.
+
+Explicit owner opt-in, still off unless you set it. In `~/.config/agent-fleet/config.toml`:
+
+```toml
+[defaults]
+auto_trust = true
+```
+
+Launch then marks this checkout trusted before a worker starts. It writes the global Claude config `~/.claude.json` and the Antigravity settings (`~/.gemini/antigravity-cli/settings.json`). Codex gets a session trust flag, not a saved file. In a worktree run it also marks each worker tree. The default stays false. Fleet never turns this on for you. See `config.example.toml`.
 
 When a newer model ships, you don't need a Fleet update. List what your account offers and point a tier at it in your config:
 
