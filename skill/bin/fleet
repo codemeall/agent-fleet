@@ -11803,11 +11803,6 @@ def cmd_doctor(a, cfg):
             ok = False
             print(f"{name:<13} PLACEHOLDER: not a supported adapter; see references/providers.md#placeholder-adapters")
             continue
-        gaps = untrusted_labels(cfg, p, doctor_repo)
-        if gaps:
-            ok = False
-            print(f"{name:<13} NOT TRUSTED: {'; '.join(gaps)}")
-            print(f"              {trust_fix_line(p)}")
         binary = first_binary(p["bin"])
         found = shutil.which(binary)
         if not found:
@@ -11816,7 +11811,12 @@ def cmd_doctor(a, cfg):
             print(f"{name:<13} MISSING binary '{binary}'" + (
                 f" (found '{alias}', a name this CLI also installs as; the owner can set {name}'s bin, login and "
                 f"models to use it)" if alias else ""))
-            continue
+            continue  # no trust verdict until the binary exists
+        gaps = untrusted_labels(cfg, p, doctor_repo)
+        if gaps:
+            ok = False
+            print(f"{name:<13} NOT TRUSTED: {'; '.join(gaps)}")
+            print(f"              {trust_fix_line(p)}")
         launch_lines, within = profile_report(cfg, name, p, found)
         ok &= within
         if "login" not in p:
@@ -11830,7 +11830,7 @@ def cmd_doctor(a, cfg):
         tiers = ", ".join(f"{t}={v.get('model')}" for t, v in p.get("tiers", {}).items())
         if state == "unconfirmed":
             ok = False
-            print(f"{name}: login not confirmed within {login_check.__defaults__[0]:g} s; retry, or run {p.get('login')}")
+            print(f"{name}: login not confirmed within {login_check.__defaults__[0]:g} s; retry, or run {env_prefix(p)}{p.get('login')}")
             print(*launch_lines, sep="\n")
             continue
         if state != "logged-in":

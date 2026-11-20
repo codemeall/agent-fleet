@@ -19,7 +19,7 @@ These hold on every command:
 - Do not answer a permission, login, trust or model prompt. The owner answers it. A `PERMISSION` wake means the same.
 - Task clarification never authorizes accepting a permission request, a login, a sandbox change, or rerouting around a denial.
 - When the owner's action is required, ask and do not proceed until they act.
-- `login not confirmed within 8 s` is not an owner action.
+- `login not confirmed` (init 8 s, doctor 60 s) is not an owner action; do not route to that adapter until doctor confirms it.
 - Do not commit, stage, push, deploy, install packages, migrate data or read secrets. Workers do not either. Never invoke upstream `/implement`: it commits.
 - Network-dependent work needs explicit owner authorization. Changing providers does not remove these rules.
 - Do not exceed `permission_ceiling`. Launch refuses a profile above it. Tell the owner. Never route around it, and never disable a sandbox to get past a denial.

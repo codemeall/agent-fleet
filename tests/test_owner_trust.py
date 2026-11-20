@@ -238,6 +238,26 @@ class DoctorTrust(unittest.TestCase):
         self.assertNotIn("run fleet doctor", text)
         self.assertNotIn("LOGIN CHECK FAILED", text)
 
+    def test_an_unconfirmed_second_account_names_its_env_prefix(self):
+        (self.home / ".claude.json").write_text(json.dumps({"projects": {
+            str(self.repo.resolve()): {"hasTrustDialogAccepted": True}}}))
+        second = provider(
+            "claude", trust="claude-config", login="claude auth status", login_ok='"loggedIn": true',
+            account_env="CLAUDE_CONFIG_DIR", env={"CLAUDE_CONFIG_DIR": "~/claude-co"})
+        prefix = fleet.env_prefix(second)
+        self.assertTrue(prefix.startswith("env "))
+        self.assertIn("CLAUDE_CONFIG_DIR=", prefix)
+
+        def unconfirmed(p, timeout=60):
+            return ("unconfirmed", "")
+        unconfirmed.__defaults__ = fleet.login_check.__defaults__
+        with patch.object(fleet, "login_check", unconfirmed):
+            code, text = self.doctor({"claude-2": second})
+        self.assertEqual(code, 1, text)
+        seconds = f"{fleet.login_check.__defaults__[0]:g}"
+        self.assertIn(f"claude-2: login not confirmed within {seconds} s; retry, or run {prefix}claude auth status", text)
+        self.assertNotIn("retry, or run claude auth status", text)
+
     def test_doctor_outside_a_git_repo_skips_trust_and_exits_0(self):
         code, text = self.doctor({"claude": provider("claude", trust="claude-config", login="echo ok", login_ok="ok")},
                                  outside=True)
@@ -280,6 +300,7 @@ class DoctorTrust(unittest.TestCase):
                                                      login="no-such-fleet-bin-xyz auth status", login_ok="x")})
         self.assertEqual(code, 1, text)
         self.assertIn("MISSING binary 'no-such-fleet-bin-xyz'", text)
+        self.assertNotIn("NOT TRUSTED", text)
         self.assertNotIn("not logged in", text)
         self.assertNotIn("LOGIN CHECK FAILED", text)
 
