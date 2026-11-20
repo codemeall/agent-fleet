@@ -12,7 +12,7 @@ When tickets have planned `{"run":...}` checks and the owner asked for the gate,
 
 ## Supervise
 
-When the owner's config or request names supervise steps, run `fleet supervise <run>` with the same `--timeout` as `wait` (it also refuses a value above 600 s), instead of `wait`. `fleet accept` with accept_checks, and `fleet launch` or `fleet review` in a worktree run with worktree_setup, can outlast any host timeout. Run them in the background, and run `fleet status <run>` before retrying one that was cut off. Worktree setup is up to 1800 s for each new tree. It also starts required reviews and launches unblocked tickets. It returns as soon as something needs you. Flags: [supervise](commands.md#supervise).
+When the owner's config or request names supervise steps, run `fleet supervise <run>` with the same `--timeout` as `wait` (it also refuses a value above 600 s), instead of `wait`. It also starts required reviews and launches unblocked tickets. It returns as soon as something needs you. `fleet accept` with accept_checks, and `fleet launch` or `fleet review` in a worktree run with worktree_setup, can outlast any host timeout. In a worktree run `fleet supervise` launches tickets, so it can run past its own timeout too. Run them in the background, and run `fleet status <run>` before retrying one that was cut off. Worktree setup is up to 1800 s for each new tree. Flags: [supervise](commands.md#supervise).
 
 Extra wake lines you will see only on this path:
 
