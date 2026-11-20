@@ -645,22 +645,12 @@ def refresh_scope(w: dict, state: dict, i: str) -> None:
 
 def hook_log(events: str, token: str, event: str, **fields) -> None:
     """Append one event line (one write, so lines from parallel hooks never interleave); a hook that cannot write
-    it says so on stderr, which Claude keeps in its debug log, and goes on. The events file is one of Fleet's
-    control files, so the append and Fleet's copy share the record's lock."""
+    it says so on stderr, which Claude keeps in its debug log, and goes on. Codex runs this from `_notify` with a
+    rebuilt environment, so the line is not copied into the control record."""
     line = json.dumps({"event": event, "token": token, "at": time.time(), **fields}) + "\n"
     try:
-        path = Path(events)
-        found = control_rel(path)
-        where = control_dir(found[0], found[1]) if found else None
-        if where is None:
-            with open(events, "a") as fh:
-                fh.write(line)
-            return
-        with control_lock(where) as held:
-            with open(events, "a") as fh:
-                fh.write(line)
-            if held:
-                control_keep(where, found[2], path.read_bytes())
+        with open(events, "a") as fh:
+            fh.write(line)
     except OSError as e:
         print(f"fleet _hook: could not log {event} to {events}: {e}", file=sys.stderr)
 
@@ -1294,10 +1284,12 @@ def save_live_state(repo: Path, run: str, state: dict) -> None:
 # and a check, each hold the record's own lock, so a lockless writer (gate) never races a check. A run from before
 # the record, or whose record was cleared with the cache, starts one from its files as they are, without refusing.
 
-# reports/ is the worker's hand-back, so it is not listed: the hook allows that one path under .fleet and
-# refuses every other edit. events/ is the hook log. A worker rewrite of it fails the control check.
+# reports/ is the worker's hand-back. events/ is the hook and notify log: Codex runs `_notify` with a rebuilt
+# environment that does not include the cache home, so a copy written from there would not match this record and
+# the next command would refuse Fleet's own log. The edit guard allows only the worker's own report under .fleet
+# and refuses every other edit, including the hook log and run.json.
 CONTROL_FILES = ("run.json", "live.json", "tree.json", "snapshots/*", "settings/*.json", "check-outputs/*.json",
-                 "tree-outputs/*.json", "evidence/*.gate.json", "evidence/accept-checks.json", "events/*")
+                 "tree-outputs/*.json", "evidence/*.gate.json", "evidence/accept-checks.json")
 CONTROL_PARTS = tuple(tuple(x.split("/")) for x in CONTROL_FILES)
 LOCK_HELD: set[str] = set()  # checkouts whose lock this process holds (try_lock): their commands check the record
 CONTROL_WARNED: set[str] = set()  # records this process could not keep, already said once
