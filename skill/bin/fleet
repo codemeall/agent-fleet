@@ -2170,6 +2170,41 @@ def guard_unowned(repo: Path, state: dict, worker_id: str, accept: str | None) -
     print(f"{worker_id}: accepted {len(changes)} change(s) outside every ticket; recorded in decisions", file=sys.stderr)
 
 
+def worker_pid(w: dict) -> int | None:
+    """A pid recorded for this worker, when the run has one."""
+    proc = w.get("process")
+    if isinstance(proc, dict):
+        for key in ("child_pid", "wrapper_pid", "pid"):
+            if type(proc.get(key)) is int:
+                return proc[key]
+    return w["pid"] if type(w.get("pid")) is int else None
+
+
+def active_run_refusal(run: str, workers: list[dict]) -> str:
+    """Why this checkout cannot start another run. A running or launching worker gets `fleet stop` only.
+    A stop-failed or unknown worker gets `fleet recover` only, and only after the process is gone.
+    Printed only. Nothing here stops, recovers, or rewrites the run."""
+    lines = [f"run {run} has workers with unconfirmed exits; use one active run per checkout",
+             "ask the owner before stopping a worker in another run"]
+    run_q = shlex.quote(run)
+    for w in workers:
+        wid = str(w.get("id") or "?")
+        state = str(w.get("state") or "?")
+        lines.append(f"{wid} {state}")
+        quoted = shlex.quote(wid)
+        if state in ("launching", "running"):
+            lines.append(f"fleet stop {run_q} {quoted}")
+        elif state in ("stop-failed", "unknown"):
+            pid = worker_pid(w)
+            seen = f", pid {pid}" if pid is not None else ""
+            lines.append(f"fleet recover {run_q} {quoted} --evidence EVIDENCE_FILE"
+                         f"  # only after confirming the process is gone (peek or ps{seen}); "
+                         "say how in the evidence file")
+        else:
+            raise FleetError(f"active run refusal saw state {state}")
+    return "\n".join(lines)
+
+
 def ensure_other_runs_idle(repo: Path, current: str) -> None:
     root = contained(repo.resolve(), repo.resolve() / ".fleet" / "runs")
     for file in root.glob("*/run.json"):
@@ -2178,9 +2213,10 @@ def ensure_other_runs_idle(repo: Path, current: str) -> None:
             continue
         state = json.loads(file.read_text())
         if state.get("schema") == 2:
-            reconcile(repo, state)
-        if active(state):
-            raise FleetError(f"run {file.parent.name} has workers with unconfirmed exits; use one active run per checkout")
+            reconcile(repo, state)  # in memory only: a receipt can clear a worker for this check, and is not saved
+        live = active(state)
+        if live:
+            raise FleetError(active_run_refusal(file.parent.name, live))
 
 
 def read_evidence(filename: str) -> str:
