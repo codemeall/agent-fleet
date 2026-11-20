@@ -553,12 +553,13 @@ def edit_tree_rule(path: str) -> str:
 
 def worker_edit_deny(run: Path) -> list[str]:
     """Edit deny rules for one run directory's control paths. Reports are not listed: a per-ticket pattern is
-    not a reliable way to keep the worker's own report writable. Permissions docs: an Edit deny is checked
-    before the permission mode and also covers redirect targets and the file commands Claude recognizes,
-    including sed and tee."""
+    not a reliable way to keep the worker's own report writable. A worker reads prompts, the inbox, notes and
+    the board; fleet prompt, send, handoff and note write them in their own processes. Permissions docs: an
+    Edit deny is checked before the permission mode and also covers redirect targets and the file commands
+    Claude recognizes, including sed and tee."""
     root = run.resolve()
-    return [edit_tree_rule(str(root / name)) for name in ("events", "exits", "settings")] + [
-        edit_rule(str(root / "run.json")), edit_rule(str(root / "live.json"))]
+    return [edit_tree_rule(str(root / name)) for name in ("events", "exits", "settings", "prompts", "inbox")] + [
+        edit_rule(str(root / name)) for name in ("run.json", "live.json", "notes.md", "board.md")]
 
 
 def edit_rules(scope: dict, files: list[str]) -> list[str]:
@@ -583,11 +584,12 @@ def hook_command(kind: str, scope: Path, events: Path, token: str) -> str:
 WORKER_ASK = ("Bash(rm *)", "Bash(rmdir *)", "Bash(mv *)", "Bash(cp *)", "Bash(sed *)")
 
 
-def hook_settings(scope: Path, events: Path, token: str, allow: list[str], ask: bool = False) -> dict:
+def hook_settings(scope: Path, events: Path, token: str, allow: list[str], ask: bool = False,
+                  run_dir: Path | None = None) -> dict:
     """The worker's Claude settings. --settings layers them above the account's and the project's own files, and
     list keys merge (settings docs): these hooks and rules add to the owner's, never replace them. `ask` is for a
-    Claude worker: the Bash commands above prompt, the run's control paths are denied, and the hooks are the same
-    either way. A reviewer or the lead does not get those rules."""
+    Claude worker: the Bash commands above prompt, `run_dir` is that worker's run directory and its control paths
+    are denied, and the hooks are the same either way. A reviewer or the lead does not get those rules."""
     def run(kind: str) -> list[dict]:
         return [{"type": "command", "command": hook_command(kind, scope, events, token), "timeout": HOOK_TIMEOUT_S}]
     settings = {
@@ -603,9 +605,8 @@ def hook_settings(scope: Path, events: Path, token: str, allow: list[str], ask: 
         permissions["allow"] = allow
     if ask:
         permissions["ask"] = list(WORKER_ASK)
-        folder = Path(events).expanduser()
-        if folder.parent.name == "events":  # <run>/events/<id>.jsonl; the lead and a reviewer pass ask off
-            permissions["deny"] = worker_edit_deny(folder.parent.parent)
+        if run_dir is not None:  # the caller passes the run directory; the events path is not used to find it
+            permissions["deny"] = worker_edit_deny(run_dir)
     if permissions:
         settings["permissions"] = permissions
     return settings
@@ -644,7 +645,7 @@ def write_hooks(repo: Path, d: Path, wid: str, files: list[str], token: str, sco
         allow = edit_rules(held, files) + [note_rule(d.name, wid)] + allow_rules(commands)
     else:
         allow = [] if held["files"] else [edit_rule(held["report"])]
-    atomic_json(settings, hook_settings(scope, events, token, allow, ask))
+    atomic_json(settings, hook_settings(scope, events, token, allow, ask, run_dir=d))
     return {"settings": str(settings), "scope": str(scope), "events": str(events), **({"scoped": True} if scoped else {})}
 
 

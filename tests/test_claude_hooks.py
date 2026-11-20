@@ -127,17 +127,22 @@ class AskRules(unittest.TestCase):
         self.assertEqual(bare["permissions"], {"ask": list(fleet.WORKER_ASK)})
 
     def test_workers_deny_edits_to_the_run_record_and_the_lead_does_not(self):
-        events = Path("/repo/.fleet/runs/demo/events/01.jsonl")
+        events = Path("/not-events/01.jsonl")
         scope = Path("/repo/.fleet/runs/demo/settings/01.scope.json")
+        run = Path("/repo/.fleet/runs/demo")
         report = fleet.edit_rule("/repo/.fleet/runs/demo/reports/01.md")
-        worker = fleet.hook_settings(scope, events, "tok", [report], ask=True)
-        lead = fleet.hook_settings(scope, events, "tok", [report])
+        worker = fleet.hook_settings(scope, events, "tok", [report], ask=True, run_dir=run)
+        lead = fleet.hook_settings(scope, events, "tok", [report], run_dir=run)
         deny = [
             "Edit(//repo/.fleet/runs/demo/events/**)",
             "Edit(//repo/.fleet/runs/demo/exits/**)",
             "Edit(//repo/.fleet/runs/demo/settings/**)",
+            "Edit(//repo/.fleet/runs/demo/prompts/**)",
+            "Edit(//repo/.fleet/runs/demo/inbox/**)",
             "Edit(//repo/.fleet/runs/demo/run.json)",
             "Edit(//repo/.fleet/runs/demo/live.json)",
+            "Edit(//repo/.fleet/runs/demo/notes.md)",
+            "Edit(//repo/.fleet/runs/demo/board.md)",
         ]
         self.assertEqual(worker["permissions"]["deny"], deny)
         self.assertEqual(worker["permissions"]["allow"], [report])
