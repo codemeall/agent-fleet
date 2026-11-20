@@ -68,6 +68,8 @@ Show a short table (wave, ticket, tier, provider, model, effort, files), then sa
 
 Use exact files, not directories or globs. The plan is frozen once a worker launches.
 
+No ticket folder, or new work mid-run: follow [delegating mid-conversation](references/delegation.md) and add it with `fleet add`.
+
 ## Launch
 
 The default is `fleet launch <run> --ready`. It starts every ready ticket on its saved assignment and writes a missing prompt. Fill any `<!-- LEAD: ... -->` comment a prompt still names. Launch refuses unfilled ones. `launch --ready` does not rewrite a prompt you already wrote.
@@ -104,13 +106,13 @@ Read the report and the scoped diff against the ticket. A clean summary does not
 
 When the saved review mode requires it, `fleet review <run> <id>`. It stops the writer, saves the diff and launches a reviewer from another known family. If none fits, it says why: tell the owner. Resolve findings before acceptance. Any change after the reviewed diff needs another review. After the review-round cap, take the escalation to the owner.
 
-Write evidence to a local file, then `fleet accept <run> <id> --evidence <file>`. It refuses if the writer has not exited, the report does not need verification, required review is missing or stale, or a file outside the tickets changed. Do not mark a ticket verified by editing its report.
+Write evidence to a local file, then `fleet accept <run> <id> --evidence <file>`. It refuses if the writer has not exited, the report does not need verification, required review is missing or stale, a file outside the tickets changed, or, under the strict bar, an open high or medium finding or an unclean report. Do not mark a ticket verified by editing its report.
 
 - `--accept-finding` only for a rebuttal you weighed. `--accept-anyway` only with the owner's own words. `--unowned-ok` is for the owner's own edit, never a worker's stray edit.
 - Widening a ticket's files is `fleet grant`, and only when the owner agrees the file is that ticket's work.
-- Only after the writer is accepted. `accept --launch-ready` starts every ready ticket, and it runs before you update the source ticket. Reviewers never resolve tickets.
+- Only after the writer is accepted, update the source ticket, then launch the next wave with `fleet launch <run> --ready`. `accept --launch-ready` starts every ready ticket inside accept, before you update the source ticket; use it only when that order is fine. Reviewers never resolve tickets.
 
-Before you finish, run `fleet check <run>`, stop remaining workers, and tell the owner the outcomes and the commit steps. Use `--close` only after a confirmed exit. You do not commit.
+Before you finish, run `fleet check <run>`, stop remaining workers, and tell the owner the outcomes and the commit steps. `fleet stop <run> <id> --close` only after a confirmed exit. You do not commit.
 
 ## Recovery
 
