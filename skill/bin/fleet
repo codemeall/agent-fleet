@@ -981,12 +981,16 @@ def untrusted_labels(cfg: dict, pcfg: dict, repo: Path | None) -> list[str]:
 
 
 def claude_config_file(pcfg: dict) -> str:
-    """The Claude config file auto_trust writes. A second account names its own directory."""
+    """The Claude config file auto_trust writes, as a lead can type it. A second account keeps the directory it set."""
+    path = claude_trust_file(pcfg)
     var = pcfg.get("account_env") or ""
     raw = (pcfg.get("env") or {}).get(var)
     if isinstance(raw, str) and raw:
-        return str(Path(raw) / ".claude.json")
-    return "~/.claude.json"
+        return str(Path(raw) / path.name)
+    try:
+        return "~/" + path.relative_to(Path.home()).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def trust_fix_line(pcfg: dict | None = None) -> str:
@@ -1019,7 +1023,7 @@ def trust_note_names(cfg: dict) -> list[str]:
 
 def worktree_trust_note(names: list[str]) -> str:
     """A note, not a failure, for adapters that still ask in each worker tree."""
-    return (f"note: auto_trust is off, so each worker tree needs trust for {', '.join(names)}. "
+    return (f"note: auto_trust is off, so each worker tree may need trust for {', '.join(names)}. "
             "The owner answers the trust screen in fleet agents, or sets auto_trust.")
 
 
@@ -1085,9 +1089,12 @@ def owner_action_block(cfg: dict, repo: Path | None, *, login_timeout: float | N
         if not pcfg.get("enabled", True) or pcfg.get("placeholder"):
             continue
         kind = "skip"
-        if not skip_login and "login" in pcfg:
+        if "login" in pcfg:
             binary = first_binary(pcfg.get("bin") or name)
-            kind = "missing" if not shutil.which(binary) else "probe"
+            if not shutil.which(binary):
+                kind = "missing"  # --no-login-check skips the probe, not this
+            elif not skip_login:
+                kind = "probe"
         entries.append((name, pcfg, untrusted_labels(cfg, pcfg, repo), kind))
     timeout = 60 if login_timeout is None else login_timeout
     probed = _probe_logins([(name, pcfg) for name, pcfg, _, kind in entries if kind == "probe"], timeout)
@@ -11782,7 +11789,7 @@ def cmd_doctor(a, cfg):
               "restart the ref can vanish or name another project's workspace.")
     print(f"config        {USER_CONFIG if USER_CONFIG.exists() else 'none (built-in defaults)'}")
     if doctor_repo is None:  # README's quick start runs doctor before any checkout
-        print("note: not inside a git repository, so the folder trust check is skipped")
+        print("note: no git checkout here, so the folder trust check is skipped")
     elif (not cfg.get("defaults", DEFAULTS).get("auto_trust") and worktree_run_open(doctor_repo)
             and (noted := trust_note_names(cfg))):
         print(worktree_trust_note(noted))  # a note, not a failure, and not part of the checkout trust check
@@ -11823,7 +11830,7 @@ def cmd_doctor(a, cfg):
         tiers = ", ".join(f"{t}={v.get('model')}" for t, v in p.get("tiers", {}).items())
         if state == "unconfirmed":
             ok = False
-            print(f"{name}: login not confirmed within {login_check.__defaults__[0]:g} s; run fleet doctor {name}")
+            print(f"{name}: login not confirmed within {login_check.__defaults__[0]:g} s; retry, or run {p.get('login')}")
             print(*launch_lines, sep="\n")
             continue
         if state != "logged-in":

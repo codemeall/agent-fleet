@@ -200,7 +200,7 @@ class DoctorTrust(unittest.TestCase):
         code, text = self.doctor({"claude": provider("claude", trust="claude-config", login="echo ok", login_ok="ok")})
         self.assertEqual(code, 0, text)
         self.assertNotIn("NOT TRUSTED", text)
-        self.assertNotIn("each worker tree needs trust", text)
+        self.assertNotIn("each worker tree", text)
 
     def test_a_codex_worktree_run_names_the_trust_screen(self):
         checkout = str(self.repo.resolve())
@@ -216,17 +216,33 @@ class DoctorTrust(unittest.TestCase):
             "codex", trust="codex-flag", account_env="CODEX_HOME", default_home=str(codex_home),
             login="echo ok", login_ok="ok")})
         self.assertEqual(code, 0, text)
-        self.assertIn("each worker tree needs trust for codex", text)
+        self.assertIn("each worker tree may need trust for codex", text)
         self.assertIn("fleet agents", text)
         self.assertIn("sets auto_trust", text)
         self.assertNotIn("~/.claude.json", text)
         self.assertNotIn("Open the CLI once in that tree", text)
 
+    def test_doctor_names_an_unconfirmed_login_without_sending_the_lead_back_to_doctor(self):
+        (self.home / ".claude.json").write_text(json.dumps({"projects": {
+            str(self.repo.resolve()): {"hasTrustDialogAccepted": True}}}))
+
+        def unconfirmed(p, timeout=60):
+            return ("unconfirmed", "")
+        unconfirmed.__defaults__ = fleet.login_check.__defaults__
+        with patch.object(fleet, "login_check", unconfirmed):
+            code, text = self.doctor({"claude": provider(
+                "claude", trust="claude-config", login="claude auth status", login_ok='"loggedIn": true')})
+        self.assertEqual(code, 1, text)
+        seconds = f"{fleet.login_check.__defaults__[0]:g}"
+        self.assertIn(f"claude: login not confirmed within {seconds} s; retry, or run claude auth status", text)
+        self.assertNotIn("run fleet doctor", text)
+        self.assertNotIn("LOGIN CHECK FAILED", text)
+
     def test_doctor_outside_a_git_repo_skips_trust_and_exits_0(self):
         code, text = self.doctor({"claude": provider("claude", trust="claude-config", login="echo ok", login_ok="ok")},
                                  outside=True)
         self.assertEqual(code, 0, text)
-        self.assertIn("not inside a git repository, so the folder trust check is skipped", text)
+        self.assertIn("no git checkout here, so the folder trust check is skipped", text)
         self.assertNotIn("NOT TRUSTED", text)
 
     def test_a_second_claude_account_names_its_own_config_file(self):
@@ -331,4 +347,13 @@ class InitOwnerAction(RuntimeCase):
         self.assertNotIn("not logged in", out)
         self.assertNotIn("missing binary", out)
         self.assertFalse(log.exists())
+        self.assertTrue((self.repo / ".fleet/runs/demo/run.json").exists())
+
+    def test_no_login_check_still_names_a_missing_binary(self):
+        self.cfg["providers"]["writer"].update(bin="no-such-fleet-bin-xyz", login="no-such-fleet-bin-xyz auth status")
+        out = self.call("init", "demo", "--no-login-check", "--workspace", "workspace:1", "--review", "off",
+                        *self.off_reason("off"))
+        self.assertIn("- writer: missing binary 'no-such-fleet-bin-xyz'", out)
+        self.assertNotIn("not logged in", out)
+        self.assertNotIn("login not confirmed", out)
         self.assertTrue((self.repo / ".fleet/runs/demo/run.json").exists())
