@@ -104,7 +104,9 @@ class SettingsFile(HookCase):
                     self.assertEqual(handler["timeout"], fleet.HOOK_TIMEOUT_S)
                     self.assertNotIn("onFailure", handler)  # a failing hook lets the action go ahead
                     self.assertIn(" _hook ", handler["command"])
-        self.assertEqual(settings["permissions"], {"ask": list(fleet.WORKER_ASK)})
+        self.assertEqual(settings["permissions"],
+                         {"deny": fleet.worker_edit_deny(self.repo / ".fleet/runs/demo"),
+                          "ask": list(fleet.WORKER_ASK)})
         scope = json.loads((d / "settings/01.scope.json").read_text())
         self.assertEqual((scope["files"], scope["token"], scope["report"]),
                          (["owned.txt"], w["token"], str(d / "reports/01.md")))
@@ -123,6 +125,26 @@ class AskRules(unittest.TestCase):
         bare = fleet.hook_settings(scope, events, "tok", [], ask=True)
         self.assertEqual(bare["hooks"], plain["hooks"])
         self.assertEqual(bare["permissions"], {"ask": list(fleet.WORKER_ASK)})
+
+    def test_workers_deny_edits_to_the_run_record_and_the_lead_does_not(self):
+        events = Path("/repo/.fleet/runs/demo/events/01.jsonl")
+        scope = Path("/repo/.fleet/runs/demo/settings/01.scope.json")
+        report = fleet.edit_rule("/repo/.fleet/runs/demo/reports/01.md")
+        worker = fleet.hook_settings(scope, events, "tok", [report], ask=True)
+        lead = fleet.hook_settings(scope, events, "tok", [report])
+        deny = [
+            "Edit(//repo/.fleet/runs/demo/events/**)",
+            "Edit(//repo/.fleet/runs/demo/exits/**)",
+            "Edit(//repo/.fleet/runs/demo/settings/**)",
+            "Edit(//repo/.fleet/runs/demo/run.json)",
+            "Edit(//repo/.fleet/runs/demo/live.json)",
+        ]
+        self.assertEqual(worker["permissions"]["deny"], deny)
+        self.assertEqual(worker["permissions"]["allow"], [report])
+        self.assertNotIn("reports", " ".join(deny))
+        self.assertEqual(worker["hooks"], lead["hooks"])
+        self.assertNotIn("deny", lead["permissions"])
+        self.assertNotIn("ask", lead["permissions"])
 
 
 class Shipped(unittest.TestCase):
@@ -460,7 +482,9 @@ class ScopePermissions(HookCase):
         self.setup_run(tickets=[dict(t) for t in self.TICKETS])
         self.launch()
         self.assertNotIn("--permission-mode", self.worker_rec()["command"])
-        self.assertEqual(self.settings()["permissions"], {"ask": list(fleet.WORKER_ASK)})
+        self.assertEqual(self.settings()["permissions"],
+                         {"deny": fleet.worker_edit_deny(self.repo / ".fleet/runs/demo"),
+                          "ask": list(fleet.WORKER_ASK)})
 
     def test_on_a_worker_may_edit_its_own_files_and_run_only_its_planned_checks_unasked(self):
         self.cfg["defaults"]["scope_permissions"] = True
@@ -473,7 +497,9 @@ class ScopePermissions(HookCase):
                          {"allow": [f"Edit(/{self.repo.resolve()}/owned.txt)", f"Edit(/{report})",
                                     fleet.note_rule("demo", "01"),  # its own fleet note (#45)
                                     "Bash(python3 -m unittest discover -s tests)"],  # `*` would be a wildcard
+                          "deny": fleet.worker_edit_deny(self.repo / ".fleet/runs/demo"),
                           "ask": list(fleet.WORKER_ASK)})
+        self.assertNotIn("reports", " ".join(self.settings()["permissions"]["deny"]))
         self.assertEqual(self.guard("Write", self.repo / "owned.txt").returncode, 0)
         self.assertEqual(self.guard("Write", self.repo / "other.txt").returncode, 2)
 
@@ -488,12 +514,16 @@ class ScopePermissions(HookCase):
         self.assertEqual(allow[-1], "Bash(python3 -m unittest discover -s tests)")
         self.assertEqual(self.guard("Write", self.repo / "extra.txt").returncode, 0)
         self.assertEqual(self.settings()["permissions"]["ask"], list(fleet.WORKER_ASK))
+        self.assertEqual(self.settings()["permissions"]["deny"],
+                         fleet.worker_edit_deny(self.repo / ".fleet/runs/demo"))
 
     def test_without_scope_permissions_a_grant_adds_no_allow_rules(self):
         self.setup_run()
         self.launch()
         self.call("grant", "demo", "01", "extra.txt", "--reason", "the helper lives there")
-        self.assertEqual(self.settings()["permissions"], {"ask": list(fleet.WORKER_ASK)})
+        self.assertEqual(self.settings()["permissions"],
+                         {"deny": fleet.worker_edit_deny(self.repo / ".fleet/runs/demo"),
+                          "ask": list(fleet.WORKER_ASK)})
 
 
 if __name__ == "__main__":

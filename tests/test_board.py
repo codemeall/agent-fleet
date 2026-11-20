@@ -358,7 +358,9 @@ class AllowRule(HookCase):
     def test_the_note_rule_appears_only_under_scope_permissions(self):
         self.setup_run(tickets=[dict(t) for t in self.TICKETS])
         self.launch()
-        self.assertEqual(self.settings()["permissions"], {"ask": list(fleet.WORKER_ASK)})
+        self.assertEqual(self.settings()["permissions"],
+                         {"deny": fleet.worker_edit_deny(self.repo / ".fleet/runs/demo"),
+                          "ask": list(fleet.WORKER_ASK)})
         self.stop_with_receipt()
         self.cfg["defaults"]["scope_permissions"] = True
         self.launch()

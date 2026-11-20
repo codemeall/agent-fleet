@@ -3,6 +3,7 @@
 ## Unreleased
 
 - **Claude workers launch with acceptEdits.** Previously a worker used the account's own permission mode. The worker settings ask before `Bash(rm *)`, `Bash(rmdir *)`, `Bash(mv *)`, `Bash(cp *)` and `Bash(sed *)`, so those commands prompt while file edits still pass. Ask rules are checked before the mode.
+- **Known limit.** Ask rules match by command name. Shell redirects, mkdir, touch and owner-allowed commands can still write under `.fleet/runs` (for example another ticket's report). Deny rules cover `events`, `exits`, `settings`, `run.json` and `live.json`. `events/` is not in the control record. Codex workers have the same exposure.
 
 ## 0.1.0-preview.40
 

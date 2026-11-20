@@ -73,8 +73,12 @@ signals = "claude-settings"
 # directory without the owner at the pane. manual and default ask first, dontAsk and plan do not edit, and
 # auto and bypassPermissions are broader than this profile's workspace-write ceiling. acceptEdits also approves
 # mkdir, touch, rm, rmdir, mv, cp and sed in that directory, where the hook guard does not look. Ask rules make
-# rm, rmdir, mv, cp and sed prompt (ask is checked before the mode). The scope check misses gitignored files,
-# scope_ignore paths, and .fleet/runs/. scope_permissions only adds allow rules; it does not change this mode.
+# rm, rmdir, mv, cp and sed prompt (ask is checked before the mode). Under acceptEdits, shell redirects and tee
+# (': > file', '>>', 'tee'), absolute paths such as /bin/rm, and bash -c pass without those ask rules. In shared
+# isolation they can overwrite uncommitted owner edits, including gitignored files. The edit hook does not see
+# them, and the Edit deny rules cover only events, exits, settings, run.json and live.json. The scope check
+# misses gitignored files, scope_ignore paths, and .fleet/runs/. scope_permissions only adds allow rules; it
+# does not change this mode.
 # Doctor does not read settings.json for permissions.defaultMode; that check is still open.
 # Reviewers pin manual mode (`claude --help` 2.1.318: Claude asks before each edit and command), so a looser
 # defaultMode never reaches them. With hooks on, the guard lets a reviewer write only its report and its settings

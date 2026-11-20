@@ -544,6 +544,23 @@ def edit_rule(path: str) -> str:
     return "Edit(/" + stripped + "\\ " * (len(body) - len(stripped)) + ")"
 
 
+def edit_tree_rule(path: str) -> str:
+    """An absolute Edit rule for a directory: `Edit(//dir/**)`. The `/**` stays a pattern; only the directory
+    path is escaped. Permissions docs: `//` anchors at the filesystem root."""
+    body = GITIGNORE_SPECIAL_RE.sub(r"\\\1", path.rstrip("/"))
+    return "Edit(/" + body + "/**)"
+
+
+def worker_edit_deny(run: Path) -> list[str]:
+    """Edit deny rules for one run directory's control paths. Reports are not listed: a per-ticket pattern is
+    not a reliable way to keep the worker's own report writable. Permissions docs: an Edit deny is checked
+    before the permission mode and also covers redirect targets and the file commands Claude recognizes,
+    including sed and tee."""
+    root = run.resolve()
+    return [edit_tree_rule(str(root / name)) for name in ("events", "exits", "settings")] + [
+        edit_rule(str(root / "run.json")), edit_rule(str(root / "live.json"))]
+
+
 def edit_rules(scope: dict, files: list[str]) -> list[str]:
     """Allow rules for a ticket's `files` and the scope's report. Its guard decides what it may write now: a
     plan-first worker has rules for its files from launch, which its guard refuses until the plan is approved."""
@@ -569,7 +586,8 @@ WORKER_ASK = ("Bash(rm *)", "Bash(rmdir *)", "Bash(mv *)", "Bash(cp *)", "Bash(s
 def hook_settings(scope: Path, events: Path, token: str, allow: list[str], ask: bool = False) -> dict:
     """The worker's Claude settings. --settings layers them above the account's and the project's own files, and
     list keys merge (settings docs): these hooks and rules add to the owner's, never replace them. `ask` is for a
-    Claude worker: the Bash commands above prompt, and the hooks are the same either way."""
+    Claude worker: the Bash commands above prompt, the run's control paths are denied, and the hooks are the same
+    either way. A reviewer or the lead does not get those rules."""
     def run(kind: str) -> list[dict]:
         return [{"type": "command", "command": hook_command(kind, scope, events, token), "timeout": HOOK_TIMEOUT_S}]
     settings = {
@@ -585,6 +603,9 @@ def hook_settings(scope: Path, events: Path, token: str, allow: list[str], ask: 
         permissions["allow"] = allow
     if ask:
         permissions["ask"] = list(WORKER_ASK)
+        folder = Path(events).expanduser()
+        if folder.parent.name == "events":  # <run>/events/<id>.jsonl; the lead and a reviewer pass ask off
+            permissions["deny"] = worker_edit_deny(folder.parent.parent)
     if permissions:
         settings["permissions"] = permissions
     return settings
