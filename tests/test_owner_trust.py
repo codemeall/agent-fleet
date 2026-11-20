@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -124,10 +125,12 @@ class DoctorTrust(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
-    def doctor(self, providers: dict, **defaults) -> tuple[int, str]:
+    def doctor(self, providers: dict, outside: bool = False, **defaults) -> tuple[int, str]:
         cfg = {"defaults": dict(fleet.DEFAULTS, **defaults), "providers": providers}
         out = io.StringIO()
-        with patch.object(fleet, "repo_root", return_value=self.repo), \
+        root = (patch.object(fleet, "repo_root", side_effect=fleet.FleetError("not a git repository")) if outside
+                else patch.object(fleet, "repo_root", return_value=self.repo))
+        with root, \
                 patch.object(fleet, "cmux", return_value=""), patch.object(fleet.Tmux, "check", return_value="tmux"), \
                 patch.object(fleet, "skill_dirs", return_value={}), patch.object(fleet, "companion_skills", return_value={}), \
                 patch.object(fleet, "trust_claude", side_effect=AssertionError("doctor wrote claude trust")), \
@@ -188,7 +191,7 @@ class DoctorTrust(unittest.TestCase):
         self.assertNotIn("note:", text)
         self.assertFalse(any("worktrees" in line for line in text.splitlines()))
 
-    def test_a_worktree_run_with_auto_trust_off_is_a_note(self):
+    def test_a_claude_worktree_run_has_no_trust_note(self):
         (self.home / ".claude.json").write_text(json.dumps({"projects": {
             str(self.repo.resolve()): {"hasTrustDialogAccepted": True}}}))
         run = self.repo / ".fleet" / "runs" / "demo"
@@ -197,9 +200,64 @@ class DoctorTrust(unittest.TestCase):
         code, text = self.doctor({"claude": provider("claude", trust="claude-config", login="echo ok", login_ok="ok")})
         self.assertEqual(code, 0, text)
         self.assertNotIn("NOT TRUSTED", text)
-        self.assertIn("each worker tree needs trust", text)
-        self.assertIn("auto_trust = true", text)
-        self.assertIn("~/.claude.json", text)
+        self.assertNotIn("each worker tree needs trust", text)
+
+    def test_a_codex_worktree_run_names_the_trust_screen(self):
+        checkout = str(self.repo.resolve())
+        codex_home = self.home / "codex"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(f'[projects."{checkout}"]\ntrust_level = "trusted"\n')
+        (self.bin / "codex").write_text("#!/bin/sh\necho ok\n")
+        (self.bin / "codex").chmod(0o755)
+        run = self.repo / ".fleet" / "runs" / "demo"
+        run.mkdir(parents=True)
+        (run / "run.json").write_text(json.dumps({"schema": 2, "run": "demo", "options": {"isolation": "worktree"}}))
+        code, text = self.doctor({"codex": provider(
+            "codex", trust="codex-flag", account_env="CODEX_HOME", default_home=str(codex_home),
+            login="echo ok", login_ok="ok")})
+        self.assertEqual(code, 0, text)
+        self.assertIn("each worker tree needs trust for codex", text)
+        self.assertIn("fleet agents", text)
+        self.assertIn("sets auto_trust", text)
+        self.assertNotIn("~/.claude.json", text)
+        self.assertNotIn("Open the CLI once in that tree", text)
+
+    def test_doctor_outside_a_git_repo_skips_trust_and_exits_0(self):
+        code, text = self.doctor({"claude": provider("claude", trust="claude-config", login="echo ok", login_ok="ok")},
+                                 outside=True)
+        self.assertEqual(code, 0, text)
+        self.assertIn("not inside a git repository, so the folder trust check is skipped", text)
+        self.assertNotIn("NOT TRUSTED", text)
+
+    def test_a_second_claude_account_names_its_own_config_file(self):
+        named = fleet.trust_fix_line(provider(
+            "claude", trust="claude-config", account_env="CLAUDE_CONFIG_DIR",
+            env={"CLAUDE_CONFIG_DIR": "~/claude-co"}))
+        self.assertIn("~/claude-co/.claude.json", named)
+        self.assertNotIn("~/.claude.json", named)
+        self.assertIn("~/.claude.json", fleet.trust_fix_line(provider("claude", trust="claude-config")))
+
+    def test_a_sleeping_login_is_not_an_owner_action_and_its_child_dies(self):
+        import time
+        pidfile = self.home / "child.pid"
+        script = self.bin / "sleeper"
+        script.write_text("#!/bin/sh\nsleep 45 &\necho $! > " + json.dumps(str(pidfile)) + "\nwait\n")
+        script.chmod(0o755)
+        cfg = {"defaults": dict(fleet.DEFAULTS), "providers": {
+            "claude": provider("sleeper", login="sleeper", login_ok="logged in")}}
+        started = time.monotonic()
+        text = fleet.owner_action_block(cfg, self.repo, login_timeout=8)
+        self.assertLess(time.monotonic() - started, 20, text)
+        self.assertIn("claude: login not confirmed within 8 s; run fleet doctor claude", text)
+        self.assertNotIn("owner action needed", text)
+        self.assertNotIn("not logged in", text)
+        pid = int(pidfile.read_text().strip())
+        stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+        self.assertTrue(stat.returncode != 0 or stat.stdout.strip().startswith("Z"), stat.stdout)
+
+    def test_a_login_probe_reports_logged_in_and_logged_out(self):
+        self.assertEqual(fleet.login_check({"login": "echo logged-in", "login_ok": "logged-in"}, 8)[0], "logged-in")
+        self.assertEqual(fleet.login_check({"login": "echo nope; exit 1", "login_ok": "logged-in"}, 8)[0], "logged-out")
 
     def test_a_missing_binary_says_missing(self):
         code, text = self.doctor({"claude": provider("no-such-fleet-bin-xyz", trust="claude-config",
