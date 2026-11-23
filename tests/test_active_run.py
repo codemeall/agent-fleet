@@ -1,5 +1,7 @@
 """The one-active-run refusal names the blocking run and the commands that clear it. It does not rewrite the run."""
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -107,3 +109,58 @@ class ActiveRunCli(RuntimeCase):
         self.assertNotIn("<file>", out)
         self.assertFalse((self.repo / ".fleet" / "runs" / "other").exists())
         self.assertEqual(path.read_bytes(), before)
+
+
+class ProcessGone(unittest.TestCase):
+    """reap_gone's process test: every recorded pid dead (or reused), in this pid namespace, and at least one."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.repo = Path(temp.name).resolve()
+        self.exits = self.repo / ".fleet" / "runs" / "r" / "exits"
+        self.exits.mkdir(parents=True)
+        self.state = {"run": "r", "workers": {}}
+        self.w = {"id": "01", "token": "tok", "exit_file": str(self.exits / "01.tok.json")}
+
+    def record(self, suffix=".started.json", **fields):
+        data = {"token": "tok", "pidns": fleet.pid_namespace(), **fields}
+        (self.exits / f"01.tok{suffix}").write_text(json.dumps(data))
+
+    def dead_pid(self) -> int:
+        proc = subprocess.Popen(["true"])
+        proc.wait()
+        return proc.pid
+
+    def gone(self) -> bool:
+        return fleet.process_gone(self.repo, self.state, self.w)
+
+    def test_no_recorded_process_is_never_gone(self):
+        self.assertFalse(self.gone())
+        self.record(wrapper_pid=None)
+        self.assertFalse(self.gone())
+
+    def test_a_live_pid_is_not_gone(self):
+        self.record(wrapper_pid=os.getpid(), wrapper_start=fleet.process_start(os.getpid()), child_pid=self.dead_pid())
+        self.assertFalse(self.gone())
+
+    def test_dead_pids_are_gone(self):
+        self.record(wrapper_pid=self.dead_pid(), child_pid=self.dead_pid())
+        self.assertTrue(self.gone())
+
+    def test_a_runner_still_at_its_gate_counts(self):
+        self.record(".runner.json", wrapper_pid=os.getpid(), wrapper_start=fleet.process_start(os.getpid()))
+        self.record(wrapper_pid=self.dead_pid(), child_pid=self.dead_pid())
+        self.assertFalse(self.gone())
+
+    def test_a_reused_pid_is_gone(self):
+        if fleet.process_start(os.getpid()) is None:
+            self.skipTest("no process start times here")
+        self.record(wrapper_pid=os.getpid(), wrapper_start="not-when-it-started")
+        self.assertTrue(self.gone())
+
+    def test_another_launch_or_pid_namespace_says_nothing(self):
+        self.record(wrapper_pid=self.dead_pid(), token="other")
+        self.assertFalse(self.gone())
+        self.record(wrapper_pid=self.dead_pid(), pidns="pid:[1]" if fleet.pid_namespace() != "pid:[1]" else "x")
+        self.assertFalse(self.gone())

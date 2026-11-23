@@ -1338,6 +1338,12 @@ class Cmux:
             if not surface_gone(self.ws, surface_target(w)):
                 raise
 
+    def gone(self, w: dict) -> bool:
+        """True only when cmux answers and no longer lists the worker's surface; an unreachable cmux is not proof."""
+        if w.get("surface", "unknown") == "unknown":
+            return False
+        return surface_gone(self.ws, surface_target(w))
+
     def attach_argv(self, w: dict, read_only: bool = False) -> list[str] | None:
         return None  # cmux already shows every worker as a tab beside the lead
 
@@ -1412,6 +1418,18 @@ class Tmux:
         if f"{pid} {window}" not in listing.splitlines():
             raise FleetError(f"tmux window {window} is gone (closed, or its tmux server restarted)")
         return window
+
+    def gone(self, w: dict) -> bool:
+        """True only on positive evidence that the worker's window no longer exists: its server answers without
+        listing it, or no server runs on the socket at all. A timeout or any other error is not proof."""
+        pid, _, window = (w.get("surface_id") or "").partition("/")
+        if not window:
+            return False
+        res = subprocess.run([*self.base(self.socket), "list-windows", "-a", "-F", "#{pid} #{window_id}"],
+                             capture_output=True, text=True, timeout=30)
+        if res.returncode == 0:
+            return f"{pid} {window}" not in res.stdout.splitlines()
+        return bool(re.search(r"no server running|error connecting to .*\(No such file or directory\)", res.stderr))
 
     def read(self, w: dict, lines: int) -> str:
         return self.tmux("capture-pane", "-p", "-J", "-t", self.target(w), "-S", f"-{lines}")
@@ -2428,6 +2446,69 @@ def worker_pid(w: dict) -> int | None:
     return w["pid"] if type(w.get("pid")) is int else None
 
 
+def pid_dead(pid: int, start: str | None) -> bool:
+    """True only when the pid is gone, or now names a process that started at another time (reused). A pid of
+    another user's process (PermissionError), or one whose start time cannot be read, counts as alive."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    now = process_start(pid) if start else None
+    return bool(start and now and now != start)
+
+
+def process_gone(repo: Path, state: dict, w: dict) -> bool:
+    """Whether every process this launch recorded (its runner, and its CLI once started) is gone. False when it
+    recorded none, or recorded them in another pid namespace (a sandboxed lead sees no pid of the host's)."""
+    recs = []
+    for suffix in (".runner.json", ".started.json"):
+        try:
+            data = json.loads(read_bounded(contained(run_dir(repo, state["run"]),
+                                                     Path(w["exit_file"]).with_suffix(suffix)), RECEIPT_MAX)[0])
+        except (OSError, ValueError, KeyError, TypeError, FleetError, RecursionError):
+            continue
+        if isinstance(data, dict) and data.get("token") == w.get("token"):
+            recs.append(data)
+    pids = {(r.get(k), r.get(k.replace("_pid", "_start"))) for r in recs for k in ("wrapper_pid", "child_pid")}
+    pids = {(pid, start) for pid, start in pids if type(pid) is int and pid > 1}
+    here = pid_namespace()
+    if not pids or any(r.get("pidns") != here for r in recs):
+        return False
+    return all(pid_dead(pid, start) for pid, start in pids)
+
+
+GONE = "its terminal and every process it recorded are gone, and it left no exit receipt"
+
+
+def reap_gone(repo: Path, state: dict, ids=None) -> list[str]:
+    """Record the exit of each active worker (of `ids`, else all) whose terminal is positively gone and whose
+    recorded processes are all dead, as its runner would have: an exit receipt with no return code, then
+    reconcile. Kills nothing. A runner writes its receipt even when its window closes (SIGHUP), so this is for a
+    reboot or a killed runner. A launch that recorded no process goes through stop's cancel instead."""
+    reaped = []
+    term = terminal(state)
+    for w in active(state):
+        if ids is not None and w["id"] not in ids or not w.get("exit_file") or not w.get("token"):
+            continue
+        try:
+            if not (process_gone(repo, state, w) and term.gone(w)):
+                continue
+            receipt = contained(run_dir(repo, state["run"]), Path(w["exit_file"]))
+            if receipt.exists():
+                continue  # reconcile records it
+            atomic_json(receipt, {"token": w["token"], "returncode": None, "gone": GONE})
+        except (FleetError, OSError, ValueError, subprocess.TimeoutExpired):
+            continue
+        reaped.append(w["id"])
+    if reaped:
+        reconcile(repo, state)
+        for i in reaped:
+            print(f"{state['run']}/{i}: exit recorded: {GONE}", file=sys.stderr)
+    return reaped
+
+
 def active_run_refusal(run: str, workers: list[dict]) -> str:
     """Why this checkout cannot start another run. A running or launching worker gets `fleet stop` only.
     A stop-failed or unknown worker gets `fleet recover` only, and only after the process is gone.
@@ -2462,6 +2543,8 @@ def ensure_other_runs_idle(repo: Path, current: str) -> None:
         state = json.loads(file.read_text())
         if state.get("schema") == 2:
             reconcile(repo, state)  # in memory only: a receipt can clear a worker for this check, and is not saved
+            if active(state) and reap_gone(repo, state):  # under the checkout lock, like every caller's command
+                save_run(repo, file.parent.name, state)
         live = active(state)
         if live:
             raise FleetError(active_run_refusal(file.parent.name, live))
@@ -2496,6 +2579,22 @@ def worker_env(receipt: Path) -> dict[str, str]:
     return dict(env, **{FLEET_WORKER_ENV: f"{receipt.parent.parent.name}/{receipt.name.split('.')[0]}"})
 
 
+def pid_namespace() -> str | None:
+    """This process's pid namespace on Linux (None elsewhere): pids recorded in another one say nothing here."""
+    try:
+        return os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return None
+
+
+def start_record(token: str, child_pid: int) -> dict:
+    """A runner's start record: its pid and its CLI's, with their start times, so a reused pid never passes for
+    them, and the pid namespace they belong to."""
+    return {"token": token, "wrapper_pid": os.getpid(), "child_pid": child_pid,
+            "wrapper_start": process_start(os.getpid()), "child_start": process_start(child_pid),
+            "pidns": pid_namespace()}
+
+
 # How long a runner waits for launch to finish pressing Enter in its pane: past cmux's own 30-second call limit, so a
 # nudge still there by then is a launcher that died mid-send, and the runner refuses to start rather than guess.
 NUDGE_WAIT_S = 45
@@ -2510,7 +2609,9 @@ def runner_gate(receipt: Path, token: str) -> bool:
     runs: fleet send and the owner type into the CLI. False, without the discard, when the nudge outlasts
     NUDGE_WAIT_S: its Enter could still arrive after any discard, so the caller must not start the CLI."""
     try:
-        atomic_json(receipt.with_suffix(".runner.json"), {"token": token, "wrapper_pid": os.getpid()})
+        atomic_json(receipt.with_suffix(".runner.json"), {"token": token, "wrapper_pid": os.getpid(),
+                                                          "wrapper_start": process_start(os.getpid()),
+                                                          "pidns": pid_namespace()})
     except OSError:
         pass  # the start record after the spawn still reports it
     nudge, deadline = receipt.with_suffix(".nudge.json"), time.time() + NUDGE_WAIT_S
@@ -2619,10 +2720,14 @@ def stop_unstarted(w: dict) -> bool:
     if not w.get("exit_file") or not w.get("token"):
         return False
     receipt = Path(w["exit_file"])
+    # A launch killed before its terminal opened (a host timeout, say) never recorded a surface. stop holds the
+    # checkout lock, as launch did until it saved the surface, so no launch of it is still running.
+    flagged = w.get("state") == "launching" and w.get("surface", "unknown") == "unknown"
     try:
-        flagged = json.loads(read_bounded(receipt.with_suffix(UNSTARTED), RECEIPT_MAX)[0]).get("token") == w["token"]
+        flagged = flagged or json.loads(read_bounded(receipt.with_suffix(UNSTARTED),
+                                                     RECEIPT_MAX)[0]).get("token") == w["token"]
     except (OSError, ValueError, AttributeError, RecursionError):
-        return False
+        pass
     if not flagged:
         return False
     atomic_json(receipt.with_suffix(CANCEL), {"token": w["token"]})
@@ -2648,8 +2753,14 @@ def run_child(args: list[str]) -> int:
     if runner_cancelled(Path(path), token):
         return LAUNCH_REFUSED
     child = subprocess.Popen(command, shell=True, executable="/bin/sh", env=worker_env(Path(path)))
-    atomic_json(Path(path).with_suffix(".started.json"),
-                {"token": token, "wrapper_pid": os.getpid(), "child_pid": child.pid})
+    atomic_json(Path(path).with_suffix(".started.json"), start_record(token, child.pid))
+
+    def hangup(signum, frame):  # its terminal is gone (window closed, tmux server killed): end the CLI, which can
+        try:                     # no longer be used, and stay to write the receipt, so the exit is on record
+            child.send_signal(signal.SIGHUP)
+        except OSError:
+            pass
+    signal.signal(signal.SIGHUP, hangup)
     while True:
         try:
             code = child.wait()
@@ -2832,8 +2943,7 @@ def headless_child(args: list[str]) -> int:
             os.killpg(child.pid, sig)
         except OSError:
             pass  # already gone
-    atomic_json(receipt.with_suffix(".started.json"),
-                {"token": token, "wrapper_pid": os.getpid(), "child_pid": child.pid})
+    atomic_json(receipt.with_suffix(".started.json"), start_record(token, child.pid))
     tail: list[str] = []
 
     def drain() -> None:  # stderr shows in the pane as it comes; a blocked report quotes its end
@@ -2868,7 +2978,10 @@ def headless_child(args: list[str]) -> int:
         except KeyboardInterrupt:
             if not interrupted:
                 interrupted = True
-                print(f"fleet: {wid} interrupted; stopping the CLI", flush=True)
+                try:  # a closed window leaves no terminal to print to; the receipt must still follow
+                    print(f"fleet: {wid} interrupted; stopping the CLI", flush=True)
+                except OSError:
+                    pass
                 end(signal.SIGTERM)
                 kill = threading.Timer(HEADLESS_KILL_S, end, (signal.SIGKILL,))
                 kill.daemon = True
@@ -4845,6 +4958,7 @@ def launch_one(a, cfg) -> tuple[str, dict]:
     state = load_run(repo, a.run)
     valid_id(a.id)
     reconcile(repo, state)
+    reap_gone(repo, state)
     save_run(repo, a.run, state)
     check_caps(state)
     planned = (a.provider, a.model)
@@ -5176,6 +5290,7 @@ def launch_ready(a, cfg):
     ensure_other_runs_idle(repo, a.run)
     state = load_run(repo, a.run)
     reconcile(repo, state)
+    reap_gone(repo, state)
     save_run(repo, a.run, state)
     check_caps(state)
     picked, why = ready_tickets(state, load_live_state(repo, a.run), cfg, run_dir(repo, a.run) / "prompts",
@@ -6230,6 +6345,7 @@ def cmd_status(a, cfg):
     repo = repo_root()
     state = load_run(repo, a.run)
     reconcile(repo, state)
+    reap_gone(repo, state)
     save_run(repo, a.run, state)
     rows = report_rows(repo, state)
     if a.json:
@@ -6473,7 +6589,8 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
             # After a handed-back report, exit is the lead's own stop racing this lockless read.
             if (data.get("token") == token and status not in EXIT_HANDLED
                     and mark_once(seen, f"{i}.exit", token)):
-                events.append(f"EXITED {i} returncode={data.get('returncode')}; inspect its report, then fleet status {state['run']}")
+                how = f": {GONE}" if data.get("gone") else f" returncode={data.get('returncode')}"
+                events.append(f"EXITED {i}{how}; inspect its report, then fleet status {state['run']}")
             continue
         if w["state"] == "exited":
             continue
@@ -7226,6 +7343,7 @@ def cmd_stop(a, cfg):
     ids = list(state["workers"]) if a.all else [x for i in a.ids for x in fanout_members(state, i) or [i]]
     if not ids and not a.all:
         raise FleetError("name workers to stop, or pass --all")
+    reap_gone(repo, state, set(ids))  # a dead worker needs no quit keys, and would only become stop-failed
     failed, now = False, None
     for i in ids:
         w = worker(state, i)

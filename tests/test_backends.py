@@ -7,6 +7,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -373,9 +374,41 @@ class TmuxLive(unittest.TestCase):
              "context": "none", "checks": {"manual": "manual prose review is sufficient"}}]}))
         self.call("plan", "demo", "--file", "plan.json")
         self.call("launch", "demo", "--ready")
+        self.until(lambda: (self.repo / ".fleet/runs/demo/exits").glob("01.*.started.json"))
         subprocess.run(["tmux", "-L", self.socket, "kill-server"], capture_output=True)
-        self.assertIn("UNREACHABLE 01", self.call("wait", "demo", "--timeout", "5", "--settle", "0", "--stall", "1"))
-        self.assertIn("01: stop-failed", self.call("stop", "demo", "01", "--timeout", "1", expected=1))
+        # The runner outlives its terminal's hangup long enough to write the receipt, so the exit is on record.
+        self.assertIn("EXITED 01", self.call("wait", "demo", "--timeout", "10", "--settle", "0", "--stall", "1"))
+        self.assertIn("01: exited", self.call("stop", "demo", "01", "--timeout", "1"))
+
+    def test_a_dead_worker_with_no_receipt_no_longer_blocks_a_new_run(self):
+        """A reboot or a killed runner leaves no receipt: once tmux shows no window and every recorded pid is dead,
+        the next init records the exit itself (no recover), saves the old run, and starts."""
+        self.plan_tickets(("01", "fake", "a.txt"))
+        self.call("launch", "demo", "--ready")
+        started = self.until(lambda: next((self.repo / ".fleet/runs/demo/exits").glob("01.*.started.json"), None))
+        rec = json.loads(started.read_text())
+        for pid in (rec["wrapper_pid"], rec["child_pid"]):
+            os.kill(pid, signal.SIGKILL)
+        subprocess.run(["tmux", "-L", self.socket, "kill-server"], capture_output=True)
+
+        def dead(pid):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            return False
+        self.until(lambda: dead(rec["wrapper_pid"]) and dead(rec["child_pid"]))
+        out = self.call("init", "next")
+        self.assertIn("demo/01: exit recorded: its terminal and every process it recorded are gone", out)
+        old = json.loads((self.repo / ".fleet/runs/demo/run.json").read_text())
+        self.assertEqual(old["workers"]["01"]["state"], "exited")
+
+    def test_a_live_worker_is_never_reaped(self):
+        self.plan_tickets(("01", "fake", "a.txt"))
+        self.call("launch", "demo", "--ready")
+        self.until(lambda: next((self.repo / ".fleet/runs/demo/exits").glob("01.*.started.json"), None))
+        self.assertIn("run demo has workers with unconfirmed exits", self.call("init", "next", expected=1))
+        self.assertRegex(self.call("status", "demo"), r"01 .* running")
 
     def test_a_failed_stop_shows_the_screen_so_the_lead_needs_no_peek(self):
         self.call("init", "demo")
