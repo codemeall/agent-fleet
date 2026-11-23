@@ -509,11 +509,11 @@ class ProviderToggle(unittest.TestCase):
                 '[providers.cursor.tiers.heavy]\nmodel = "grok-4.7-high"\n'
                 '[providers."claude-co"]\nenabled = false  # signed in on Monday\n')
         self.path.write_text(text)
-        self.assertEqual(self.run_cmd("disable", "cursor")[0], 0)
+        self.assertEqual(self.run_cmd("enable", "cursor")[0], 0)  # shipped off (#83)
         self.assertEqual(self.run_cmd("enable", "claude-co")[0], 0)
-        self.assertEqual(self.path.read_text(), text.replace("max = 1  #", "enabled = false\nmax = 1  #")
+        self.assertEqual(self.path.read_text(), text.replace("max = 1  #", "enabled = true\nmax = 1  #")
                          .replace("enabled = false  # signed", "enabled = true  # signed"))
-        self.assertFalse(self.enabled("cursor"))
+        self.assertTrue(self.enabled("cursor"))
         self.assertTrue(self.enabled("claude-co"))
         cfg = fleet.load_config(self.path)
         self.assertEqual(cfg["providers"]["cursor"]["max"], 1)
@@ -541,10 +541,10 @@ class ProviderToggle(unittest.TestCase):
     def test_keeps_crlf_line_endings(self):
         self.path.write_bytes(b"[defaults]\r\nmax_parallel = 2\r\n[providers.agy]\r\nenabled = false # later\r\n")
         self.assertEqual(self.run_cmd("enable", "agy")[0], 0)
-        self.assertEqual(self.run_cmd("disable", "cursor")[0], 0)
+        self.assertEqual(self.run_cmd("enable", "cursor")[0], 0)
         self.assertEqual(self.path.read_bytes(),
                          b"[defaults]\r\nmax_parallel = 2\r\n[providers.agy]\r\nenabled = true # later\r\n"
-                         b"\r\n[providers.cursor]\r\nenabled = false\r\n")
+                         b"\r\n[providers.cursor]\r\nenabled = true\r\n")
 
     def test_writes_through_a_symlink_and_keeps_permissions(self):
         real = Path(self.tmp.name) / "dotfiles" / "fleet.toml"

@@ -172,7 +172,8 @@ tiers.light = { model = "gpt-6-luna", effort = "medium" }
 tiers.review = { model = "gpt-6.1-sol", effort = "high" }
 
 [providers.cursor]
-enabled = true
+# Parked until launch is reliable on Claude and Codex (#83): `fleet provider enable cursor`, then `fleet doctor cursor`.
+enabled = false
 bin = "cursor-agent"
 bin_aliases = ["agent"]   # Cursor's newer name for the same CLI, per its docs; not checked here
 # Cursor has no effort flag: effort is part of the model id.

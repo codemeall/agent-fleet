@@ -1111,7 +1111,8 @@ class Runtime(RuntimeCase):
         self.assertEqual(len(enters), 1)           # one Enter only, never a second keystroke
         token = self.state()["workers"]["01"]["token"]
         self.assertIn("NOT STARTED 01: no start record 8s after launch, even after Fleet pressed Enter", out)
-        self.assertIn("fleet stop demo 01 cancels the launch and records its exit (no ps check or recover needed); "
+        self.assertIn("fleet stop demo 01 --close cancels the launch, records its exit and closes the pane (no ps check "
+                      "or recover needed); "
                       "then launch it again", out)
         self.assertNotIn(token, out)                       # no token for the lead to grep for
         self.assertEqual(self.state()["workers"]["01"]["state"], "running")   # the launch stands until stop
@@ -1509,7 +1510,8 @@ class Runtime(RuntimeCase):
         events = self.scan()
         self.assertEqual(len(events), 1)
         self.assertIn("STALLED 01 never started: no start record after 6", events[0])
-        self.assertIn("fleet stop demo 01 cancels the launch and records its exit (no recover needed)", events[0])
+        self.assertIn("fleet stop demo 01 --close cancels the launch, records its exit and closes the pane (no recover "
+                      "needed)", events[0])
         w = self.state()["workers"]["01"]                          # flagged, so that stop can cancel it
         self.assertEqual(json.loads(Path(w["exit_file"]).with_suffix(fleet.UNSTARTED).read_text()),
                          {"token": w["token"]})

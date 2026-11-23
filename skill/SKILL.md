@@ -41,7 +41,7 @@ In the repo, run `fleet doctor <providers you will route to>`. Route only to ada
 
 If the named run exists, `fleet resume <run>` and read its reports and decisions. Do not init a replacement, and do not relaunch a worker whose exit is unconfirmed.
 
-Otherwise `fleet init <run> [--backend cmux|tmux] [--workspace <ref>] [--routing <mode>] [--review <mode>]`. Init defaults to cmux inside cmux, else headless tmux. Relay its `WATCH` line. One active run per checkout.
+Otherwise `fleet init <run> [--backend cmux|tmux] [--workspace <ref>] [--routing <mode>] [--review <mode>]`. Init defaults to headless tmux when it is installed, inside cmux too; cmux only with `backend=cmux` or a workspace. Route implementation work to Claude and Codex, the enabled adapters. Relay its `WATCH` line. One active run per checkout.
 
 ## Plan
 

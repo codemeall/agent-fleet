@@ -40,7 +40,8 @@ review = "cross-heavy"
 # A headless run not finished after this many minutes (1 to 240) is stopped with a blocked report.
 # headless_timeout_minutes = 30
 # Where workers run: "cmux" (visible panes beside the lead, macOS), "tmux" (headless windows in a detached
-# session; watch them with `fleet agents`) or "auto" (the default: cmux inside cmux, else tmux).
+# session; watch them with `fleet agents`) or "auto" (the default: tmux when installed, inside cmux too; cmux
+# when a workspace is named or tmux is missing).
 # backend = "tmux"
 # Headless workers use Fleet's own tmux server (tmux -L fleet). "" puts their sessions on your default server,
 # so `tmux ls` lists them and, inside tmux, `fleet attach` switches to a worker instead of nesting.

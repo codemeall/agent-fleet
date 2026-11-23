@@ -73,7 +73,7 @@ DEFAULTS = {
     "gate_rounds": 2,  # failing gates wait --gate sends back to a worker per ticket before it wakes the lead
     "supervise": ["gate"],  # steps fleet supervise takes itself (SUPERVISE_STEPS); ["gate"] is wait --gate
     "auto_trust": False,  # the owner's opt-in: mark the repo trusted in each worker CLI before launch
-    "backend": "auto",  # cmux (visible panes), tmux (headless) or auto: cmux inside cmux, else tmux
+    "backend": "auto",  # tmux (headless), cmux (visible panes) or auto: tmux when installed, else cmux
     "tmux_socket": "fleet",  # tmux -L name for headless workers; "" uses your default tmux server
     "max_workers": 0,  # worker launches per run (writers, reviewers, investigators, relaunches); 0 is no cap
     "max_wall_minutes": 0,  # summed worker wall time per run, running workers included; 0 is no cap
@@ -1252,18 +1252,21 @@ def lead_marker(name: str) -> bool:
 
 
 def pick_backend(requested: str | None, cfg: dict, workspace: str | None) -> str:
-    """The backend for a new run. `auto` keeps every setup that worked before on cmux (inside cmux, or with a
-    workspace named) and otherwise runs workers headless in tmux."""
+    """The backend for a new run. `auto` runs workers headless in tmux wherever tmux is installed, inside cmux too:
+    tmux runs the launch line as the window's own command, while cmux types it into a new shell. cmux launches
+    only when the owner chose it (--backend cmux, backend = "cmux", or a workspace named on the command line or in
+    the config), or when tmux is missing."""
     choice = requested or cfg["defaults"]["backend"]
     if choice != "auto":
         return choice
-    if workspace or os.environ.get("CMUX_WORKSPACE_ID"):
+    if workspace:
         return "cmux"
     if shutil.which("tmux"):
         return "tmux"
-    if shutil.which("cmux"):
+    if os.environ.get("CMUX_WORKSPACE_ID") or shutil.which("cmux"):
         return "cmux"
-    raise FleetError("no terminal backend: run inside cmux (or pass --workspace), or install tmux to run workers headless")
+    raise FleetError("no terminal backend: install tmux to run workers headless, or run inside cmux (or pass "
+                     "--workspace)")
 
 
 def tmux_session_name(repo: Path, run: str) -> str:
@@ -3845,6 +3848,9 @@ def cmd_init(a, cfg):
     else:
         print(f"run dir: {d}\nbackend: tmux (headless): workers start in session {workspace}; the owner watches them "
               f"with `fleet agents {a.run}`")
+        if os.environ.get("CMUX_WORKSPACE_ID") and not a.backend and cfg["defaults"]["backend"] == "auto":
+            print(f"note: inside cmux, workers still run in tmux by default; `fleet attach {a.run} <id>` opens one "
+                  "here. For worker panes beside you, init with --backend cmux")
     if isolated(state):
         print(f"isolation: worktree; each implement ticket's worker runs in its own tree under {options['worktree_dir']}, "
               f"and fleet accept applies its diff to this checkout's working tree (fleet merge)")
@@ -5603,8 +5609,8 @@ def typed_start_line(term, run: str, w: dict, waited: float) -> str | None:
         time.sleep(1)
     if runner_started(w):
         return args_refused_line(w)
-    way_out = (f"its pane holds a shell, not the worker. fleet stop {run} {w['id']} cancels the launch and records "
-               "its exit (no ps check or recover needed); then launch it again")
+    way_out = (f"its pane holds a shell, not the worker. fleet stop {run} {w['id']} --close cancels the launch, "
+               "records its exit and closes the pane (no ps check or recover needed); then launch it again")
     try:
         if not press_enter_unstarted(term, w):
             return args_refused_line(w)
@@ -6666,7 +6672,8 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
                 flag_unstarted(w)
                 events.append(f"STALLED {i} never started: no start record after {int(now - since)}s, so its launch "
                               f"line is sitting unrun at the shell prompt in its pane; fleet stop {state['run']} {i} "
-                              "cancels the launch and records its exit (no recover needed), then launch it again")
+                              "--close cancels the launch, records its exit and closes the pane (no recover needed), "
+                              "then launch it again")
             elif told < since:  # a PERMISSION or IDLE line already told the lead about this screen
                 events.append(f"STALLED {i} screen unchanged for {int(now - since)}s, likely at an approval prompt "
                               f"the owner answers in its pane (or a login, trust or usage limit screen); "

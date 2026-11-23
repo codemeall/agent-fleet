@@ -63,12 +63,16 @@ class PickBackend(unittest.TestCase):
     def cfg(self, backend="auto"):
         return {"defaults": dict(fleet.DEFAULTS, backend=backend)}
 
-    def test_auto_keeps_cmux_wherever_it_worked_before(self):
-        with patch.dict(os.environ, {"CMUX_WORKSPACE_ID": "ws"}):
-            self.assertEqual(fleet.pick_backend(None, self.cfg(), None), "cmux")
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("CMUX_WORKSPACE_ID", None)
-            self.assertEqual(fleet.pick_backend(None, self.cfg(), "workspace:2"), "cmux")
+    def test_auto_prefers_tmux_inside_cmux_and_keeps_cmux_for_a_named_workspace(self):
+        has = {"tmux": "/bin/tmux", "cmux": "/bin/cmux"}
+        with patch.dict(os.environ, {"CMUX_WORKSPACE_ID": "ws"}), \
+                patch.object(fleet.shutil, "which", side_effect=has.get):
+            self.assertEqual(fleet.pick_backend(None, self.cfg(), None), "tmux")
+            self.assertEqual(fleet.pick_backend(None, self.cfg(), "workspace:2"), "cmux")  # --workspace or config
+            self.assertEqual(fleet.pick_backend(None, self.cfg("cmux"), None), "cmux")
+        with patch.dict(os.environ, {"CMUX_WORKSPACE_ID": "ws"}), \
+                patch.object(fleet.shutil, "which", side_effect=lambda b: None if b == "tmux" else has.get(b)):
+            self.assertEqual(fleet.pick_backend(None, self.cfg(), None), "cmux")  # no tmux: cmux as before
 
     def test_auto_goes_headless_outside_cmux(self):
         env = {k: v for k, v in os.environ.items() if k != "CMUX_WORKSPACE_ID"}
