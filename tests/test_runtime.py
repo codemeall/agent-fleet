@@ -41,7 +41,12 @@ class RuntimeCase(unittest.TestCase):
         cache = tempfile.TemporaryDirectory()  # outside the checkout, as the control record must be
         self.addCleanup(cache.cleanup)
         self.cache = Path(cache.name).resolve()
-        env = patch.dict(os.environ, {"XDG_CACHE_HOME": str(self.cache)})
+        stubs = self.cache / "stub-bin"  # launch refuses a CLI missing from PATH; the fake cmux never runs it
+        stubs.mkdir()
+        (stubs / "unused-test-agent").write_text("#!/bin/sh\nexit 0\n")
+        (stubs / "unused-test-agent").chmod(0o755)
+        env = patch.dict(os.environ, {"XDG_CACHE_HOME": str(self.cache),
+                                      "PATH": f"{stubs}{os.pathsep}{os.environ.get('PATH', '')}"})
         env.start()
         self.addCleanup(env.stop)
         self.git("init", "-q")
@@ -1389,8 +1394,9 @@ class Runtime(RuntimeCase):
             return out
         with patch.object(fleet, "cmux", side_effect=cmux), patch.object(fleet.time, "sleep"), \
                 patch.object(fleet, "start_line", REAL_START_LINE):
-            out = self.call("launch", "demo", "01", "writer", "--tier", "standard", "--settle", "0")
-        self.assertNotIn("STARTED", out)
+            out = self.call("launch", "demo", "01", "writer", "--tier", "standard", "--settle", "0", expected=1)
+        self.assertIn("NOT STARTED 01: its CLI exited 124 at start", out)  # an early exit, not a refusal
+        self.assertNotIn("would not start", out)
 
     def test_stop_cancels_a_launch_whose_runner_never_ran(self):
         """After NOT STARTED, stop needs no quit keys, ps check or recover: it cancels the launch and records its

@@ -167,6 +167,10 @@ class PaneLimit(FleetError):
     """Every pane but the lead's holds a live worker, so a new one has nowhere to go."""
 
 
+class MissingBinary(FleetError):
+    """The adapter's CLI is not on PATH, so launch refused before it recorded or opened anything."""
+
+
 # ---------- config ----------
 
 REPLACE_KEYS = {"models_allow"}  # a user's list replaces the shipped one instead of merging into it
@@ -1762,6 +1766,9 @@ LAUNCH_SCREEN_LINES = 8
 # prompt unrun. The runner writes its start record within a second of running, so none this long after launch means
 # the line never ran: launch presses Enter once, then waits this long again before saying NOT STARTED.
 LAUNCH_START_GRACE_S = 3
+# A CLI that cannot start (missing binary, bad flag) exits within moments: launch looks for its exit receipt this
+# long after launch on every backend, --settle 0 and --ready included. A later exit is wait's EXITED.
+LAUNCH_EXIT_CHECK_S = 2
 # A prompt that stops a new worker shows in its first minutes, so its unchanged screen wakes the lead sooner.
 LAUNCH_STALL_S, LAUNCH_WATCH_S = 60, 240
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
@@ -4846,6 +4853,13 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         apply_steer(a, load_live_state(repo, a.run))
     steered = (a.provider, a.model) != planned
     pcfg = usable_provider(cfg, a.provider)
+    try:
+        binary = first_binary(pcfg["bin"])
+    except ValueError:  # an unbalanced quote: the shell would refuse it as well
+        binary = pcfg["bin"]
+    if not shutil.which(os.path.expanduser(binary)):  # /bin/sh expands a leading ~, which() does not
+        raise MissingBinary(f"NOT STARTED {a.id}: {a.provider}'s CLI {binary} is not on PATH, so nothing was launched; "
+                            f"install it or fix its bin, then fleet doctor {a.provider}")
     prompt_path = contained(run_dir(repo, a.run), run_dir(repo, a.run) / "prompts" / f"{a.id}.md")
     if not prompt_path.exists() or a.id not in state["prompts"]:
         raise FleetError("write the prompt first with fleet prompt")
@@ -5179,7 +5193,7 @@ def launch_ready(a, cfg):
                                               quiet=True), cfg)
             label, w = launch_one(one, cfg)
         except (FleetError, OSError, subprocess.TimeoutExpired) as e:
-            if i in load_run(repo, a.run)["workers"]:  # it reached cmux: the lead must inspect it first
+            if i in load_run(repo, a.run)["workers"] and not isinstance(e, MissingBinary):  # it reached cmux: inspect it
                 for j, reason in why.items():
                     print(f"SKIPPED {j}: {reason}")
                 for j in picked[picked.index(i) + 1:]:
@@ -5396,11 +5410,40 @@ def args_refused_line(w: dict) -> str | None:
 
 
 def start_line(term, run: str, w: dict, waited: float) -> str | None:
+    """None once the worker has started and is still running, else what launch says of it. On every backend, a
+    worker whose CLI already exited non-zero LAUNCH_EXIT_CHECK_S after launch (a missing binary, a bad flag) is NOT
+    STARTED. A terminal that types the launch line (cmux) can also leave it at the new shell's prompt unrun
+    (typed_start_line)."""
+    if not w.get("exit_file"):
+        return None
+    line = typed_start_line(term, run, w, waited) if getattr(term, "types_command", False) else None
+    if line and line.startswith("NOT STARTED"):
+        return line
+    if (rest := LAUNCH_EXIT_CHECK_S - waited) > 0:
+        time.sleep(rest)
+    return early_exit_line(term, w) or line
+
+
+def early_exit_line(term, w: dict) -> str | None:
+    """NOT STARTED for a worker whose CLI has already exited non-zero, with the end of its screen. A runner's own
+    refusals (`refused`, NUDGE_REFUSED) are reported by typed_start_line, and an exit 0 is left to wait's EXITED."""
+    data = this_receipt(w)
+    rc = data.get("returncode")
+    if data.get("refused") or type(rc) is not int or rc in (0, NUDGE_REFUSED):
+        return None
+    try:
+        tail = screen_tail(term.read(w, max(LAUNCH_SCREEN_LINES * 3, 60)), LAUNCH_SCREEN_LINES)
+    except (FleetError, OSError, subprocess.TimeoutExpired):
+        tail = ""  # its window may have closed with it
+    shown = (":\n" + "\n".join("  " + x if x else "" for x in tail.splitlines())) if tail else ""
+    return (f"NOT STARTED {w['id']}: its CLI exited {rc} at start. Its exit is on record, so no stop is needed: fix "
+            f"the cause, then launch it again{shown}")
+
+
+def typed_start_line(term, run: str, w: dict, waited: float) -> str | None:
     """None once the runner has started its worker. A terminal that types the launch line (cmux) can leave it at
     the new shell's prompt unrun: with no start record, press Enter once in that pane and look again. Enter only
     reaches a shell there: see press_enter_unstarted."""
-    if not getattr(term, "types_command", False) or not w.get("exit_file"):
-        return None
     for _ in range(max(0, round(LAUNCH_START_GRACE_S - waited))):  # a short --settle still gives it the grace
         if runner_started(w):
             return args_refused_line(w)
@@ -5436,6 +5479,8 @@ def print_start_screen(term, w: dict, settle: float, run: str | None = None) -> 
     if run and (line := start_line(term, run, w, settle)):
         print(line)
         code = 1 if line.startswith("NOT STARTED") else 0
+        if " at start." in line:  # early_exit_line already showed the screen's end
+            return code
     if not settle:  # --settle 0: the start is still confirmed, the screen is not printed
         return code
     try:
@@ -6416,7 +6461,9 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
     """
     events = []
     reports = run_dir(repo, state["run"]) / "reports"
-    for w in active(state):
+    # An exit already reconciled (by status, launch or stop) still wakes wait once: only wait and stop write the
+    # .seen marker, so another command can never swallow it.
+    for w in [w for w in state["workers"].values() if w.get("state") in ACTIVE_STATES or w.get("state") == "exited"]:
         i, token = w["id"], w.get("token", "")
         f = reports / f"{i}.md"
         status = (parse_status(read_text(f)) or "").lower() if f.exists() else ""
@@ -6424,9 +6471,11 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
         if receipt and receipt.exists():
             data = json.loads(receipt.read_text())
             # After a handed-back report, exit is the lead's own stop racing this lockless read.
-            if (data.get("token") == token and status not in ("needs-verification", "verified", FINDINGS_SENT)
+            if (data.get("token") == token and status not in EXIT_HANDLED
                     and mark_once(seen, f"{i}.exit", token)):
                 events.append(f"EXITED {i} returncode={data.get('returncode')}; inspect its report, then fleet status {state['run']}")
+            continue
+        if w["state"] == "exited":
             continue
         now = time.time()
         handed_back = status in WAKE_STATUSES + ("verified", PLAN_READY) and f.stat().st_mtime >= w.get("last_send", 0)
@@ -6640,13 +6689,13 @@ def wait_loop(a, repo: Path, d: Path, seen: Path, statuses, deadline: float, loo
             reconcile(repo, state)
         if hold and not active(state):  # a held, idle run has nothing to wait for; waiting would only burn turns
             print(f"HOLD {hold_text(hold)} and no worker is running; tell the owner and end your turn (do not run `fleet stop`); do not wait again")
-            for line in [*getattr(loop, "actions", ()), *pending_lines(d / "reports", state, loop)]:
+            for line in [*getattr(loop, "actions", ()), *pending_lines(d / "reports", state, loop, seen)]:
                 print(line)
             return 0
         if time.time() >= deadline:
             print(f"TIMEOUT nothing new in {a.timeout}s; wait again")
             # Another wait may have consumed a wake; never let a handed-back report sit unseen.
-            for line in [*getattr(loop, "actions", ()), *pending_lines(d / "reports", state, loop)]:
+            for line in [*getattr(loop, "actions", ()), *pending_lines(d / "reports", state, loop, seen)]:
                 print(line)
             for line in scope_lines(repo, state, seen):
                 print(line)
@@ -6654,12 +6703,29 @@ def wait_loop(a, repo: Path, d: Path, seen: Path, statuses, deadline: float, loo
         time.sleep(min(a.interval, max(0, deadline - time.time())))
 
 
-def pending_lines(reports: Path, state: dict, loop) -> list[str]:
+def exited_lines(reports: Path, state: dict, seen: Path, shown: set[str]) -> list[str]:
+    """PENDING lines for workers that exited without handing back and that the lead has not stopped, relaunched or
+    dropped since: a TIMEOUT never hides them, even after their EXITED wake was printed."""
+    out = []
+    for i, w in state["workers"].items():
+        f = reports / f"{i}.md"
+        status = (parse_status(read_text(f)) or "no status line").lower() if f.exists() else "no report"
+        if (i in shown or w.get("state") != "exited" or status in EXIT_HANDLED
+                or read_text(seen / f"{i}.stopped") == w.get("token")):
+            continue
+        out.append(f"PENDING {i} [exited, returncode={w.get('returncode')}, report: {one_line(status, 80)}]; "
+                   f"relaunch it, or fleet stop {state['run']} {i} once handled")
+    return out
+
+
+def pending_lines(reports: Path, state: dict, loop, seen: Path | None = None) -> list[str]:
     """PENDING lines for reports still waiting on the lead; supervise notes a writer its reviewer is reading."""
     note = getattr(loop, "pending_note", None)
-    return [f"PENDING {i} [{status}]{note(state, i) if note else ''}"
-            for i, status in pending_reports(reports, state)
-            if not fanout_held(state, reports, i, status)]  # an investigator whose fan-out is not all back yet
+    lines = [(i, f"PENDING {i} [{status}]{note(state, i) if note else ''}")
+             for i, status in pending_reports(reports, state)
+             if not fanout_held(state, reports, i, status)]  # an investigator whose fan-out is not all back yet
+    exited = exited_lines(reports, state, seen, {i for i, _ in lines}) if seen else []
+    return [line for _, line in lines] + exited
 
 
 # ---------- supervise ----------
@@ -7186,6 +7252,8 @@ def cmd_stop(a, cfg):
             if w["state"] in ACTIVE_STATES:
                 w["state"] = "stop-failed"
             print(f"{i}: {e}", file=sys.stderr)
+        if w["state"] not in ACTIVE_STATES and w.get("token"):  # before the save, so a lockless wait never sees
+            mark_stopped(run_dir(repo, a.run) / ".seen", i, w["token"])  # the exit without the marker
         ledger_usage(state, cfg)
         save_run(repo, a.run, state)
         print(f"{i}: {w['state']} ({w['surface']})")
@@ -7201,6 +7269,16 @@ def cmd_stop(a, cfg):
                 print(f"{i}: files outside every ticket's scope changed since it launched; diff and verify refuse "
                       f"until resolved:\n{unowned_text(changes)}", file=sys.stderr)
     return 1 if failed else 0
+
+
+def mark_stopped(seen: Path, i: str, token: str) -> None:
+    """The lead stopped this launch, so its exit is handled: wait neither wakes EXITED nor lists it PENDING."""
+    try:
+        seen.mkdir(exist_ok=True)
+        for name in (f"{i}.exit", f"{i}.stopped"):
+            (seen / name).write_text(token)
+    except OSError:
+        pass  # wait then reports the exit once, which costs a turn but loses nothing
 
 
 def cmd_resume(a, cfg):
@@ -7305,8 +7383,7 @@ def awaiting_lead(repo: Path, state: dict) -> list[str]:
     for i, w in state["workers"].items():
         f = reports / f"{i}.md"
         status = (parse_status(read_text(f)) or "no status line").lower() if f.exists() else "no report"
-        if i not in out and w["state"] == "exited" and status not in ("needs-verification", "verified", "dropped",
-                                                                      FINDINGS_SENT, PICK_STATUS, SUPERSEDED):
+        if i not in out and w["state"] == "exited" and status not in EXIT_HANDLED:
             out[i] = f"{i} [exited, returncode={w.get('returncode')}, report: {status}]"
     return list(out.values())
 
@@ -10559,6 +10636,8 @@ def fanout_cost_lines(state: dict, i: str) -> list[str]:
 JUDGE_DIFF_LINES = 400  # of each writer's frozen diff quoted in the judge's prompt; the rest stays in its file
 PICK_STATUS = "not-picked"  # the other writer's report once the lead keeps one, so it no longer waits on the lead
 SUPERSEDED = "superseded"  # an earlier judge's report once accept --pick verifies a later judge: it waits on no one
+# Report statuses after which a worker's exit needs nothing from the lead: wait's EXITED and its PENDING skip them.
+EXIT_HANDLED = ("needs-verification", "verified", "dropped", FINDINGS_SENT, PICK_STATUS, SUPERSEDED)
 PICK_SAME_FAMILY = ("it stands as the cross-family review only if you keep the other writer; weigh its verdict "
                     "with that in mind")
 

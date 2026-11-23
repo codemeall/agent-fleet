@@ -308,6 +308,62 @@ class TmuxLive(unittest.TestCase):
         self.assertRegex(self.call("stop", "demo", "01", "--close"), r"01: closed")
         self.assertEqual(self.windows(), [])
 
+    def plan_tickets(self, *tickets):
+        """Save a plan of (id, provider, file) tickets; each file is committed first."""
+        self.call("init", "demo")
+        entries = []
+        for i, provider, name in tickets:
+            if not (self.repo / name).exists():
+                (self.repo / name).write_text("base\n")
+                subprocess.run(["git", "add", name], cwd=self.repo, check=True)
+                subprocess.run(["git", "commit", "-qm", name], cwd=self.repo, check=True)
+            ticket = self.repo / f"{i}.md"
+            ticket.write_text(f"# Change {name}\n")
+            entries.append({"id": i, "ticket": str(ticket), "files": [name], "provider": provider, "tier": "standard",
+                            "context": "none", "checks": {"manual": "manual prose review is sufficient"}})
+        (self.repo / "plan.json").write_text(json.dumps({"tickets": entries}))
+        self.call("plan", "demo", "--file", "plan.json")
+
+    def add_provider(self, name, script):
+        """Another adapter like `fake` whose CLI is `script` (None: a binary that does not exist)."""
+        root = Path(self.temp.name).resolve()
+        path = root / name
+        if script is not None:
+            path.write_text(script)
+            path.chmod(0o755)
+        self.cfg["providers"][name] = dict(self.cfg["providers"]["fake"], bin=str(path))
+
+    def test_a_cli_that_dies_at_start_fails_launch_and_wait_reports_it_even_after_status(self):
+        self.add_provider("dying", "#!/bin/sh\necho 'dying: no such model' >&2\nexit 127\n")
+        self.plan_tickets(("01", "dying", "a.txt"), ("02", "fake", "b.txt"))
+        self.call("prompt", "demo", "01")
+        self.call("prompt", "demo", "02")
+        out = self.call("launch", "demo", "01", expected=1)
+        self.assertIn("NOT STARTED 01: its CLI exited 127 at start", out)
+        self.assertIn("no stop is needed", out)
+        self.call("launch", "demo", "02")
+        self.assertRegex(self.call("status", "demo"), r"01 .* exited")  # reconciled and saved before any wait
+        self.assertIn("EXITED 01 returncode=127", self.call("wait", "demo", "--timeout", "5", "--settle", "0"))
+        out = self.call("wait", "demo", "--timeout", "1", "--interval", "1", "--settle", "0", expected=2)
+        self.assertIn("TIMEOUT", out)
+        self.assertIn("PENDING 01 [exited, returncode=127, report: no report]; relaunch it, or fleet stop demo 01",
+                      out)  # never a bare TIMEOUT
+        self.call("stop", "demo", "01")  # the lead handled it
+        out = self.call("wait", "demo", "--timeout", "1", "--interval", "1", "--settle", "0", expected=2)
+        self.assertNotIn("01", out)
+
+    def test_launch_ready_skips_a_missing_cli_and_fails_on_one_that_dies(self):
+        self.add_provider("ghost", None)
+        self.add_provider("dying", "#!/bin/sh\nexit 3\n")
+        self.plan_tickets(("01", "ghost", "a.txt"), ("02", "fake", "b.txt"), ("03", "dying", "c.txt"))
+        out = self.call("launch", "demo", "--ready", expected=1)
+        self.assertRegex(out, r"SKIPPED 01: NOT STARTED 01: ghost's CLI \S+ghost is not on PATH")
+        self.assertRegex(out, r"LAUNCHED 02 fake:fake-1")
+        self.assertIn("NOT STARTED 03: its CLI exited 3 at start", out)
+        workers = json.loads((self.repo / ".fleet/runs/demo/run.json").read_text())["workers"]
+        self.assertNotIn("01", workers)  # refused before anything was recorded or opened
+        self.assertIn("not on PATH", self.call("launch", "demo", "01", expected=1))
+
     def test_a_lost_server_is_unreachable_and_keeps_the_slot(self):
         self.call("init", "demo")
         ticket = self.repo / "01.md"
