@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -21,6 +22,9 @@ import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "fixtures"))
+from fleet_harness import stop_tmux  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_claude_hooks import HookCase, notification, stop  # noqa: E402
@@ -1079,7 +1083,7 @@ class LiveTmux(unittest.TestCase):
                     "providers": {"fake": {"bin": str(agent), "launch": "{bin} --model {model} {prompt}",
                                            "enabled": True, "family": "test", "max": 1, "quit": ["/quit", "enter"],
                                            "tiers": {"standard": {"model": "fake-1", "family": "test"}}}}}
-        self.addCleanup(subprocess.run, ["tmux", "-L", self.socket, "kill-server"], capture_output=True)
+        self.addCleanup(stop_tmux, self.socket, root)
         cwd = os.getcwd()
         os.chdir(self.repo)
         self.addCleanup(os.chdir, cwd)
@@ -1115,7 +1119,15 @@ class LiveTmux(unittest.TestCase):
         self.call("plan", "demo", "--file", "plan.json")
 
     def kill_server(self):
-        """kill-server returns before the server is gone; wait until tmux no longer answers on the socket."""
+        """Lose the worker with no exit receipt, as a reboot does: kill its runner, then the server. kill-server
+        returns before the server is gone; wait until tmux no longer answers on the socket."""
+        exits = self.repo / ".fleet/runs/demo/exits"
+        deadline = time.time() + 10
+        while not list(exits.glob("*.started.json")):
+            self.assertLess(time.time(), deadline, "the runner never started")
+            time.sleep(0.1)
+        for started in exits.glob("*.started.json"):
+            os.kill(json.loads(started.read_text())["wrapper_pid"], signal.SIGKILL)
         subprocess.run(["tmux", "-L", self.socket, "kill-server"], capture_output=True)
         deadline = time.time() + 10
         while subprocess.run(["tmux", "-L", self.socket, "list-sessions"], capture_output=True).returncode == 0:

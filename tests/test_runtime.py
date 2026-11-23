@@ -1426,6 +1426,26 @@ class Runtime(RuntimeCase):
         self.launch()                                      # and the ticket launches again at once
         self.assertEqual(self.state()["workers"]["01"]["state"], "running")
 
+    def test_stop_cancels_a_launch_killed_before_its_terminal_opened(self):
+        """A host that kills launch mid-run leaves `launching` with no surface: stop records the exit, no recover."""
+        self.setup_run()
+        real = self.fake_cmux
+
+        def killed(*args, **kwargs):  # the host's timeout ends launch as it asks cmux for the pane
+            if "new-split" in args:
+                raise KeyboardInterrupt
+            return real(*args, **kwargs)
+        with patch.object(fleet, "cmux", side_effect=killed), self.assertRaises(KeyboardInterrupt), \
+                contextlib.redirect_stderr(io.StringIO()):
+            fleet.main(["launch", "demo", "01", "writer", "--tier", "standard"])
+        self.assertEqual((self.state()["workers"]["01"]["state"], self.state()["workers"]["01"]["surface"]),
+                         ("launching", "unknown"))
+        self.cmux_calls.clear()
+        out = self.call("stop", "demo", "01", "--timeout", "0")
+        self.assertIn("its runner never ran, so Fleet cancelled the launch and recorded its exit", out)
+        self.assertFalse([c for c in self.cmux_calls if c[0] in ("send", "send-key")])
+        self.assertEqual(self.state()["workers"]["01"]["state"], "exited")
+
     def test_stop_quits_a_flagged_launch_whose_runner_announced_itself_first(self):
         """A runner that announced itself before stop's cancel may be running its worker: stop quits it as usual."""
         self.setup_run()
