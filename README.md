@@ -27,11 +27,11 @@ The lead turns approved tickets into a saved execution plan, picks a worker mode
 # 1. Install the skill globally with the skills CLI
 npx skills add codemeall/agent-fleet -g -a claude-code -a codex -a cursor
 
-# 2. Check the terminal backend (cmux or tmux), Python and worker CLIs
+# 2. Check the terminal backend (tmux, or cmux), Python and worker CLIs
 ~/.claude/skills/fleet/bin/fleet doctor
 ```
 
-Restart your agent host, open it inside a cmux workspace (or any terminal with tmux installed, for headless workers), and ask:
+Restart your agent host in any terminal with tmux installed (workers run headless; `fleet agents` shows them), or inside a cmux workspace if you choose `backend=cmux`, and ask:
 
 > Use `/fleet` with auto routing for the approved tickets in `.scratch/my-feature/issues`.
 
@@ -40,8 +40,8 @@ Restart your agent host, open it inside a cmux workspace (or any terminal with t
 ### Requirements
 
 - **Python 3.11+** and **Git**, plus a terminal backend for the workers:
-  - **[cmux](https://github.com/manaflow-ai/cmux)** (macOS) running with a reachable socket, for workers in visible panes beside the lead, or
-  - **[tmux](https://github.com/tmux/tmux)** 3.0+ (macOS or Linux, including SSH sessions and containers), for headless workers you open with `fleet agents`
+  - **[tmux](https://github.com/tmux/tmux)** 3.0+ (macOS or Linux, including SSH sessions and containers), the default: headless workers you open with `fleet agents`, or
+  - **[cmux](https://github.com/manaflow-ai/cmux)** (macOS) running with a reachable socket, optional, for workers in visible panes beside the lead (`backend=cmux`)
 - At least one installed, authenticated worker CLI: `claude` or `codex` (`cursor-agent`, `agy` and `opencode` adapters ship disabled; `fleet provider enable <name>` turns one on)
 - **Node.js 18+** for the installer (not needed at runtime)
 

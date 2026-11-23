@@ -65,7 +65,7 @@ COMPANION_SKILLS = {  # optional skills the lead may use; doctor reports them bu
 DEFAULTS = {
     "workspace": None,
     "routing": "auto",
-    "prefer": ["claude", "codex", "cursor"],
+    "prefer": ["claude", "codex"],  # the enabled adapters; add one you turn on for auto routing
     "max_parallel": 6,
     "review": "cross-heavy",
     "review_rounds": 2,  # reviewer launches per ticket before a repair or review needs the owner (--extra-round)
@@ -3848,7 +3848,7 @@ def cmd_init(a, cfg):
     else:
         print(f"run dir: {d}\nbackend: tmux (headless): workers start in session {workspace}; the owner watches them "
               f"with `fleet agents {a.run}`")
-        if os.environ.get("CMUX_WORKSPACE_ID") and not a.backend and cfg["defaults"]["backend"] == "auto":
+        if os.environ.get("CMUX_WORKSPACE_ID") and (a.backend or cfg["defaults"]["backend"]) == "auto":
             print(f"note: inside cmux, workers still run in tmux by default; `fleet attach {a.run} <id>` opens one "
                   "here. For worker panes beside you, init with --backend cmux")
     if isolated(state):
@@ -12084,7 +12084,7 @@ def cmd_doctor(a, cfg):
     print(f"python        {sys.executable}  ({sys.version.split()[0]})")
     chosen = cfg.get("defaults", DEFAULTS).get("backend", "auto")
     usable = []
-    print(f"backend       {chosen}" + ("  (cmux inside cmux or with a workspace, else headless tmux)" if chosen == "auto" else ""))
+    print(f"backend       {chosen}" + ("  (headless tmux when installed; cmux with a workspace or without tmux)" if chosen == "auto" else ""))
     for name, term in (("cmux", Cmux), ("tmux", Tmux)):
         try:
             note = term.check(cfg)
@@ -12112,7 +12112,7 @@ def cmd_doctor(a, cfg):
     for name in names:
         p = provider(cfg, name)
         if not p.get("enabled", True):
-            print(f"{name:<13} off")
+            print(f"{name:<13} off  (fleet provider enable {name}, then fleet doctor {name})")
             continue
         if p.get("placeholder"):
             ok = False

@@ -1447,6 +1447,19 @@ class Runtime(RuntimeCase):
         self.assertFalse([c for c in self.cmux_calls if c[0] in ("send", "send-key")])
         self.assertEqual(self.state()["workers"]["01"]["state"], "exited")
 
+    def test_stop_close_retires_the_pane_of_a_launch_that_never_started(self):
+        """#77: the NOT STARTED way-out closes the unstarted pane, so retries do not fill the pane limit."""
+        self.setup_run()
+        with patch.object(fleet, "start_line", REAL_START_LINE), patch.object(fleet.time, "sleep"):
+            out = self.call("launch", "demo", "01", "writer", "--tier", "standard", "--settle", "0", expected=1)
+        self.assertIn("fleet stop demo 01 --close", out)
+        self.cmux_calls.clear()
+        out = self.call("stop", "demo", "01", "--close", "--timeout", "0")
+        self.assertIn("01: closed", out)
+        self.assertTrue([c for c in self.cmux_calls if c[0] == "close-surface"])
+        self.assertFalse([c for c in self.cmux_calls if c[0] in ("send", "send-key")])
+        self.assertEqual(self.state()["workers"]["01"]["state"], "closed")
+
     def test_stop_quits_a_flagged_launch_whose_runner_announced_itself_first(self):
         """A runner that announced itself before stop's cancel may be running its worker: stop quits it as usual."""
         self.setup_run()

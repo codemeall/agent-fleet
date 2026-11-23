@@ -52,14 +52,14 @@ Which providers are on is the owner's decision. `fleet doctor` shows each one as
 
 | Shipped | Providers |
 | --- | --- |
-| On | `claude`, `codex`, `cursor` |
-| Off, supported | `agy` (Antigravity), `opencode`, `claude-co` (a second Claude account) |
+| On | `claude`, `codex` |
+| Off, supported | `cursor` (until launch is proven on it), `agy` (Antigravity), `opencode`, `claude-co` (a second Claude account) |
 | Off, placeholder | `grok`, `muse` ([not supported](#placeholder-adapters)) |
 
 ```bash
 fleet provider enable agy       # turn a provider on
 fleet doctor agy                # then check its binary, sign-in and tier models
-fleet provider disable cursor   # turn one off, a shipped one included
+fleet provider disable codex    # turn one off, a shipped one included
 ```
 
 `fleet provider enable|disable <name>` sets `enabled` under `[providers.<name>]` in `~/.config/agent-fleet/config.toml` (or `$FLEET_CONFIG`), creating the file or the section if needed. Every other line stays as it was, including comments (a comment on the `enabled` line is kept as written) and line endings; a symlinked config is written through to its target with its permissions. It does nothing when the provider is already in that state. If it cannot make the edit safely, for example when the config sets the provider through a dotted key or an inline table, it changes nothing and says so; the owner then edits that line by hand. A non-boolean value such as `enabled = "yes"` makes every Fleet command fail until the owner fixes it by hand. Editing the file by hand does the same thing as the command:
@@ -368,7 +368,7 @@ Cursor has no [turn signals](#turn-signals): its hooks were not checked against 
 - `fleet doctor` reports an enabled placeholder as `PLACEHOLDER` and fails.
 - `fleet provider enable`, `fleet plan`, `fleet launch` and `fleet steer provider` refuse it.
 
-**Grok and Muse models work today through Cursor.** The `cursor` adapter, on by default, offers `grok-4.7-high`, `grok-4.7-high-fast` and `muse-spark-1.3-max`. Its heavy and light tiers use Grok, and its review tier uses Muse. `fleet models cursor grok` and `fleet models cursor muse` list what your account offers. Use `agents=cursor:muse-spark-1.3-max` to pin one.
+**Grok and Muse models work today through Cursor.** The `cursor` adapter (off by default: `fleet provider enable cursor`) offers `grok-4.7-high`, `grok-4.7-high-fast` and `muse-spark-1.3-max`. Its heavy and light tiers use Grok, and its review tier uses Muse. `fleet models cursor grok` and `fleet models cursor muse` list what your account offers. Use `agents=cursor:muse-spark-1.3-max` to pin one.
 
 To turn a placeholder into a working adapter, the owner fills it in under `[providers.grok]` (or `muse`) in the user config:
 
