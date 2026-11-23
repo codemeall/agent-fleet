@@ -346,7 +346,8 @@ class TmuxLive(unittest.TestCase):
         self.assertIn("EXITED 01 returncode=127", self.call("wait", "demo", "--timeout", "5", "--settle", "0"))
         out = self.call("wait", "demo", "--timeout", "1", "--interval", "1", "--settle", "0", expected=2)
         self.assertIn("TIMEOUT", out)
-        self.assertIn("PENDING 01 [exited, returncode=127, report: no report]", out)  # never a bare TIMEOUT
+        self.assertIn("PENDING 01 [exited, returncode=127, report: no report]; relaunch it, or fleet stop demo 01",
+                      out)  # never a bare TIMEOUT
         self.call("stop", "demo", "01")  # the lead handled it
         out = self.call("wait", "demo", "--timeout", "1", "--interval", "1", "--settle", "0", expected=2)
         self.assertNotIn("01", out)

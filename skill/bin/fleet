@@ -4853,7 +4853,10 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         apply_steer(a, load_live_state(repo, a.run))
     steered = (a.provider, a.model) != planned
     pcfg = usable_provider(cfg, a.provider)
-    binary = first_binary(pcfg["bin"])
+    try:
+        binary = first_binary(pcfg["bin"])
+    except ValueError:  # an unbalanced quote: the shell would refuse it as well
+        binary = pcfg["bin"]
     if not shutil.which(os.path.expanduser(binary)):  # /bin/sh expands a leading ~, which() does not
         raise MissingBinary(f"NOT STARTED {a.id}: {a.provider}'s CLI {binary} is not on PATH, so nothing was launched; "
                             f"install it or fix its bin, then fleet doctor {a.provider}")
@@ -6710,7 +6713,8 @@ def exited_lines(reports: Path, state: dict, seen: Path, shown: set[str]) -> lis
         if (i in shown or w.get("state") != "exited" or status in EXIT_HANDLED
                 or read_text(seen / f"{i}.stopped") == w.get("token")):
             continue
-        out.append(f"PENDING {i} [exited, returncode={w.get('returncode')}, report: {one_line(status, 80)}]")
+        out.append(f"PENDING {i} [exited, returncode={w.get('returncode')}, report: {one_line(status, 80)}]; "
+                   f"relaunch it, or fleet stop {state['run']} {i} once handled")
     return out
 
 
@@ -7248,11 +7252,11 @@ def cmd_stop(a, cfg):
             if w["state"] in ACTIVE_STATES:
                 w["state"] = "stop-failed"
             print(f"{i}: {e}", file=sys.stderr)
+        if w["state"] not in ACTIVE_STATES and w.get("token"):  # before the save, so a lockless wait never sees
+            mark_stopped(run_dir(repo, a.run) / ".seen", i, w["token"])  # the exit without the marker
         ledger_usage(state, cfg)
         save_run(repo, a.run, state)
         print(f"{i}: {w['state']} ({w['surface']})")
-        if w["state"] not in ACTIVE_STATES and w.get("token"):
-            mark_stopped(run_dir(repo, a.run) / ".seen", i, w["token"])
         if was_live and w["state"] not in ACTIVE_STATES:
             try:
                 now = now or tree_state(repo, run_ignore(state, cfg))
