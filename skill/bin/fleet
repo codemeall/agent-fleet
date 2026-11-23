@@ -2482,24 +2482,35 @@ def process_gone(repo: Path, state: dict, w: dict) -> bool:
 GONE = "its terminal and every process it recorded are gone, and it left no exit receipt"
 
 
+def gone_workers(repo: Path, state: dict, ids=None) -> list[dict]:
+    """Active workers (of `ids`, else all) with no exit receipt whose recorded processes are all dead and whose
+    terminal is positively gone. Reads only."""
+    found = []
+    term = terminal(state)
+    for w in active(state):
+        if ids is not None and w["id"] not in ids or not w.get("exit_file") or not w.get("token"):
+            continue
+        try:
+            if contained(run_dir(repo, state["run"]), Path(w["exit_file"])).exists():
+                continue  # reconcile records it
+            if process_gone(repo, state, w) and term.gone(w):
+                found.append(w)
+        except (FleetError, OSError, ValueError, subprocess.TimeoutExpired):
+            continue
+    return found
+
+
 def reap_gone(repo: Path, state: dict, ids=None) -> list[str]:
     """Record the exit of each active worker (of `ids`, else all) whose terminal is positively gone and whose
     recorded processes are all dead, as its runner would have: an exit receipt with no return code, then
     reconcile. Kills nothing. A runner writes its receipt even when its window closes (SIGHUP), so this is for a
     reboot or a killed runner. A launch that recorded no process goes through stop's cancel instead."""
     reaped = []
-    term = terminal(state)
-    for w in active(state):
-        if ids is not None and w["id"] not in ids or not w.get("exit_file") or not w.get("token"):
-            continue
+    for w in gone_workers(repo, state, ids):
         try:
-            if not (process_gone(repo, state, w) and term.gone(w)):
-                continue
-            receipt = contained(run_dir(repo, state["run"]), Path(w["exit_file"]))
-            if receipt.exists():
-                continue  # reconcile records it
-            atomic_json(receipt, {"token": w["token"], "returncode": None, "gone": GONE})
-        except (FleetError, OSError, ValueError, subprocess.TimeoutExpired):
+            atomic_json(contained(run_dir(repo, state["run"]), Path(w["exit_file"])),
+                        {"token": w["token"], "returncode": None, "gone": GONE})
+        except (FleetError, OSError):
             continue
         reaped.append(w["id"])
     if reaped:
@@ -2543,8 +2554,12 @@ def ensure_other_runs_idle(repo: Path, current: str) -> None:
         state = json.loads(file.read_text())
         if state.get("schema") == 2:
             reconcile(repo, state)  # in memory only: a receipt can clear a worker for this check, and is not saved
-            if active(state) and reap_gone(repo, state):  # under the checkout lock, like every caller's command
-                save_run(repo, file.parent.name, state)
+            # Only under the checkout lock, and only on a run.json that matches Fleet's own copy: a run a worker
+            # rewrote is refused (check_control), never saved over its control record.
+            if active(state) and str(repo.resolve()) in LOCK_HELD and gone_workers(repo, state):
+                check_control(repo, file.parent.name)
+                if reap_gone(repo, state):
+                    save_run(repo, file.parent.name, state)
         live = active(state)
         if live:
             raise FleetError(active_run_refusal(file.parent.name, live))
@@ -2752,15 +2767,18 @@ def run_child(args: list[str]) -> int:
         return NUDGE_REFUSED
     if runner_cancelled(Path(path), token):
         return LAUNCH_REFUSED
-    child = subprocess.Popen(command, shell=True, executable="/bin/sh", env=worker_env(Path(path)))
-    atomic_json(Path(path).with_suffix(".started.json"), start_record(token, child.pid))
+    spawned: list = []
 
     def hangup(signum, frame):  # its terminal is gone (window closed, tmux server killed): end the CLI, which can
-        try:                     # no longer be used, and stay to write the receipt, so the exit is on record
-            child.send_signal(signal.SIGHUP)
-        except OSError:
-            pass
-    signal.signal(signal.SIGHUP, hangup)
+        for child in spawned:    # no longer be used, and stay to write the receipt, so the exit is on record
+            try:
+                child.send_signal(signal.SIGHUP)
+            except OSError:
+                pass
+    signal.signal(signal.SIGHUP, hangup)  # before the spawn: exec puts the default back for the CLI itself
+    child = subprocess.Popen(command, shell=True, executable="/bin/sh", env=worker_env(Path(path)))
+    spawned.append(child)
+    atomic_json(Path(path).with_suffix(".started.json"), start_record(token, child.pid))
     while True:
         try:
             code = child.wait()
@@ -2948,8 +2966,11 @@ def headless_child(args: list[str]) -> int:
 
     def drain() -> None:  # stderr shows in the pane as it comes; a blocked report quotes its end
         for line in child.stderr:
-            sys.stderr.write(line)
-            sys.stderr.flush()
+            try:  # its terminal may be gone (a hangup); the tail still reaches a blocked report
+                sys.stderr.write(line)
+                sys.stderr.flush()
+            except OSError:
+                pass
             tail.append(line.rstrip("\n"))
             del tail[:-HEADLESS_TAIL]
 
@@ -2972,7 +2993,10 @@ def headless_child(args: list[str]) -> int:
             for line in iter(child.stdout.readline, ""):
                 out.append(line)
                 if note := headless_progress(line):
-                    print(note, flush=True)
+                    try:
+                        print(note, flush=True)
+                    except OSError:
+                        pass  # its terminal is gone; the receipt must still follow
             code = child.wait()
             break
         except KeyboardInterrupt:
@@ -7343,11 +7367,12 @@ def cmd_stop(a, cfg):
     ids = list(state["workers"]) if a.all else [x for i in a.ids for x in fanout_members(state, i) or [i]]
     if not ids and not a.all:
         raise FleetError("name workers to stop, or pass --all")
+    live_before = {w["id"] for w in active(state)}
     reap_gone(repo, state, set(ids))  # a dead worker needs no quit keys, and would only become stop-failed
     failed, now = False, None
     for i in ids:
         w = worker(state, i)
-        was_live = w["state"] in ACTIVE_STATES
+        was_live = i in live_before  # a worker reaped just above still gets the scope check
         try:
             if w["state"] in ACTIVE_STATES and stop_unstarted(w):  # its runner never ran: nothing to quit
                 reconcile(repo, state)
@@ -14778,7 +14803,8 @@ def process_start(pid: int) -> str | None:
     except (OSError, IndexError):
         pass
     try:
-        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=5,
+                             env=dict(os.environ, LC_ALL="C", TZ="UTC0"))  # the same text in every shell
         return out.stdout.strip() or None
     except (OSError, subprocess.TimeoutExpired):
         return None

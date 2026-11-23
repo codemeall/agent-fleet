@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_runtime import RuntimeCase, fleet  # noqa: E402
@@ -164,3 +165,62 @@ class ProcessGone(unittest.TestCase):
         self.assertFalse(self.gone())
         self.record(wrapper_pid=self.dead_pid(), pidns="pid:[1]" if fleet.pid_namespace() != "pid:[1]" else "x")
         self.assertFalse(self.gone())
+
+
+class TerminalGone(unittest.TestCase):
+    """term.gone needs positive evidence: an answer without the window, or no server at all."""
+
+    def tmux_gone(self, returncode=0, stdout="", stderr=""):
+        w = {"id": "01", "surface_id": "123/@4"}
+        res = subprocess.CompletedProcess([], returncode, stdout, stderr)
+        with patch.object(fleet.subprocess, "run", return_value=res):
+            return fleet.Tmux({"workspace": "s", "tmux_socket": "t"}).gone(w)
+
+    def test_tmux(self):
+        self.assertFalse(self.tmux_gone(stdout="123 @4\n"))
+        self.assertTrue(self.tmux_gone(stdout="123 @5\n999 @4\n"))  # a restarted server's @4 is not this one
+        self.assertTrue(self.tmux_gone(1, stderr="no server running on /tmp/tmux-0/t\n"))
+        self.assertTrue(self.tmux_gone(1, stderr="error connecting to /tmp/tmux-0/t (No such file or directory)\n"))
+        self.assertFalse(self.tmux_gone(1, stderr="error connecting to /tmp/tmux-0/t (Permission denied)\n"))
+        self.assertFalse(self.tmux_gone(1, stderr="lost server\n"))
+        self.assertFalse(fleet.Tmux({"workspace": "s"}).gone({"id": "01", "surface": "unknown"}))
+
+    def test_tmux_timeout_is_no_proof(self):
+        with patch.object(fleet.subprocess, "run", side_effect=subprocess.TimeoutExpired("tmux", 30)):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                fleet.Tmux({"workspace": "s"}).gone({"id": "01", "surface_id": "1/@2"})
+
+    def test_an_unreachable_cmux_never_reaps(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        repo = Path(temp.name).resolve()
+        (repo / ".fleet/runs/r/exits").mkdir(parents=True)
+        w = {"id": "01", "state": "running", "token": "tok", "surface": "surface:3", "surface_id": "uuid-3",
+             "exit_file": str(repo / ".fleet/runs/r/exits/01.tok.json")}
+        state = {"run": "r", "backend": "cmux", "workspace": "ws", "workers": {"01": w}}
+        with patch.object(fleet, "process_gone", return_value=True), \
+                patch.object(fleet, "list_panes", side_effect=fleet.FleetError("cmux is not running")):
+            self.assertEqual(fleet.reap_gone(repo, state), [])
+        self.assertEqual(w["state"], "running")
+        self.assertFalse(Path(w["exit_file"]).exists())
+
+    def test_a_gone_terminal_with_a_live_recorded_process_is_never_reaped(self):
+        """The false positive reaping must never produce: the backend says the terminal is gone, but a recorded
+        process still runs (a CLI that outlived its hangup)."""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        repo = Path(temp.name).resolve()
+        exits = repo / ".fleet/runs/r/exits"
+        exits.mkdir(parents=True)
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        (exits / "01.tok.started.json").write_text(json.dumps({
+            "token": "tok", "pidns": fleet.pid_namespace(), "wrapper_pid": dead.pid,
+            "child_pid": os.getpid(), "child_start": fleet.process_start(os.getpid())}))
+        w = {"id": "01", "state": "running", "token": "tok", "surface": "@1", "surface_id": "1/@1",
+             "exit_file": str(exits / "01.tok.json")}
+        state = {"run": "r", "backend": "tmux", "workspace": "s", "workers": {"01": w}}
+        with patch.object(fleet.Tmux, "gone", return_value=True):
+            self.assertEqual(fleet.reap_gone(repo, state), [])
+        self.assertEqual(w["state"], "running")
+        self.assertFalse(Path(w["exit_file"]).exists())

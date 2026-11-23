@@ -405,6 +405,14 @@ class TmuxLive(unittest.TestCase):
         self.assertIn("demo/01: exit recorded: its terminal and every process it recorded are gone", out)
         old = json.loads((self.repo / ".fleet/runs/demo/run.json").read_text())
         self.assertEqual(old["workers"]["01"]["state"], "exited")
+        self.assertRegex(self.call("status", "demo"), r"01 .* exited")  # a locked command: its record still matches
+        ticket = self.repo / "02.md"
+        ticket.write_text("# Change a.txt again\n")
+        (self.repo / "plan2.json").write_text(json.dumps({"tickets": [
+            {"id": "02", "ticket": str(ticket), "files": ["a.txt"], "provider": "fake", "tier": "standard",
+             "context": "none", "checks": {"manual": "manual prose review is sufficient"}}]}))
+        self.call("plan", "next", "--file", "plan2.json")
+        self.assertRegex(self.call("launch", "next", "--ready"), r"LAUNCHED 02 fake:fake-1")
 
     def test_a_live_worker_is_never_reaped(self):
         self.plan_tickets(("01", "fake", "a.txt"))
