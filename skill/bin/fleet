@@ -1029,8 +1029,9 @@ def trust_targets(_cfg: dict, repo: Path | None) -> list[tuple[str, str | None]]
 
 
 def untrusted_labels(cfg: dict, pcfg: dict, repo: Path | None) -> list[str]:
-    """Checkout paths this CLI would still ask to trust. Empty when auto_trust is on, the CLI asks nothing,
-    there is no checkout, or the checkout is already trusted. Reads only."""
+    """Checkout paths this CLI would still ask to trust. Empty when auto_trust is on and the CLI's config file
+    exists for launch to write, the CLI asks nothing, there is no checkout, or the checkout is already trusted.
+    Reads only."""
     if repo is None or pcfg.get("trust") not in TRUST_METHODS:
         return []
     if cfg.get("defaults", DEFAULTS).get("auto_trust") and not trust_file_missing(pcfg):
