@@ -23,6 +23,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "fixtures"))
+from fleet_harness import stop_tmux  # noqa: E402
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_claude_hooks import HookCase, notification, stop  # noqa: E402
 from test_runtime import fleet  # noqa: E402
@@ -1080,7 +1083,7 @@ class LiveTmux(unittest.TestCase):
                     "providers": {"fake": {"bin": str(agent), "launch": "{bin} --model {model} {prompt}",
                                            "enabled": True, "family": "test", "max": 1, "quit": ["/quit", "enter"],
                                            "tiers": {"standard": {"model": "fake-1", "family": "test"}}}}}
-        self.addCleanup(subprocess.run, ["tmux", "-L", self.socket, "kill-server"], capture_output=True)
+        self.addCleanup(stop_tmux, self.socket, root)
         cwd = os.getcwd()
         os.chdir(self.repo)
         self.addCleanup(os.chdir, cwd)

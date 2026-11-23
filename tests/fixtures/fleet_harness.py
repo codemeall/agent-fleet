@@ -4,6 +4,7 @@ Each test gets a throwaway Git repository, its own HOME and FLEET_CONFIG, and a 
 <socket>`) that is killed on cleanup, whether the test passed or not. Nothing reads the real user config, account
 directories or tmux server.
 """
+import json
 import os
 import re
 import shutil
@@ -20,6 +21,31 @@ FIXTURES = Path(__file__).resolve().parent
 HAS_TMUX = shutil.which("tmux") is not None
 # The lead's own markers, a terminal multiplexer it runs in and any Fleet config never reach the fleet under test.
 SCRUB = re.compile(r"(CLAUDE|CODEX|CMUX|TMUX|FLEET)")
+
+
+def stop_tmux(socket: str, root: Path) -> None:
+    """Kill a test's tmux server, then wait (10 s at most) for every Fleet runner under `root` to exit: a runner
+    outlives its terminal's hangup to write its exit receipt, which must not race the temp directory's removal."""
+    subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
+    pids = set()
+    for record in Path(root).glob("**/.fleet/runs/*/exits/*.json"):
+        if record.name.endswith((".runner.json", ".started.json")):
+            try:
+                pid = json.loads(record.read_text()).get("wrapper_pid")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if type(pid) is int and pid > 1:
+                pids.add(pid)
+    deadline = time.time() + 10
+    for pid in pids:
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            except OSError:
+                break  # not ours
+            time.sleep(0.05)
 
 
 class FleetCase(unittest.TestCase):
@@ -46,7 +72,7 @@ class FleetCase(unittest.TestCase):
         self.git("commit", "-qm", "base")
         self.socket = f"fleettest{os.getpid()}{id(self) % 100000}"
         # Registered after the temp dir, so it runs first: no tmux server outlives its test.
-        self.addCleanup(subprocess.run, ["tmux", "-L", self.socket, "kill-server"], capture_output=True)
+        self.addCleanup(stop_tmux, self.socket, self.root)
         self.config = self.root / "config.toml"
         self.env = {k: v for k, v in os.environ.items() if not SCRUB.match(k)}
         self.env.update(HOME=str(self.home), FLEET_CONFIG=str(self.config), SHELL="/bin/sh",
