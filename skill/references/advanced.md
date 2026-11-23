@@ -8,7 +8,7 @@ Hard rules stay on the skill page and still apply here: do not answer permission
 
 When tickets have planned `{"run":...}` checks and the owner asked for the gate, add `--gate` to `fleet wait <run>`. Fleet runs those checks on each hand-back, sends failures back to the worker, and wakes you only on a pass, `GATE-FAILED`, or a scope problem. `fleet gate <run> <id>` runs the same commands and the scope check, and writes `evidence/<id>.gate.md`. You still run prose checks yourself. Flags: [gate](commands.md#gate).
 
-Checks run unsandboxed in the checkout, over files a worker may have just edited, so they get only a short allowlist of the lead's environment (PATH, HOME, locale, proxy, CA certificates, toolchain homes; [gate](commands.md#gate) lists it), never its tokens or keys. Automatic checks are the owner's opt-in: `wait --gate`, `[defaults] gate`, or supervise, which runs only when the owner asks for it (its default steps include the gate).
+Checks run unsandboxed in the checkout, over files a worker may have just edited, so they get only a short allowlist of the lead's environment variables (PATH, HOME, locale, proxy, CA certificates, toolchain homes; [gate](commands.md#gate) lists it), never its tokens or keys there. They are not sandboxed: files under HOME stay readable. Automatic checks are the owner's opt-in: `wait --gate`, `[defaults] gate`, or supervise, which runs only when the owner asks for it (its default steps include the gate).
 
 `GATE-FAILED <id> after N rounds` means the checks still fail after Fleet sent them back. Read the evidence, then repair with `fleet send --changes` or tell the owner.
 

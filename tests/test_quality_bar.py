@@ -7,6 +7,7 @@ run started under "warn", and a run from before the bar, behave as before."""
 import contextlib
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -714,6 +715,19 @@ class WorktreeChecks(WorktreeCase):
         out = self.accept("a")
         self.assertLess(out.index("MERGED a: applied 1 file(s)"), out.index("ACCEPT-CHECKS a 1/1 passed"))
         self.assertIn("a: verified", out)
+
+    def test_accept_checks_get_the_check_allowlist_not_the_leads_environment(self):
+        self.cfg["defaults"]["accept_checks"] = [{"run": 'test -z "$DUMMY_FLEET_VAR" && test -n "$PATH"'}]
+        self.start([{"id": "a", "files": ["a.txt"]}])
+        self.launch("a")
+        self.work("a", {"a.txt": "from a\n"}, report=False)
+        self.report_path("a").write_text("# Report a\nStatus: needs-verification\n\n```fleet\n" + json.dumps(
+            {"files_changed": ["a.txt"], "checks": [], "criteria": [], "findings": [], "questions": []})
+            + "\n```\n")
+        self.stop_with_receipt("a")
+        with patch.dict(os.environ, {"DUMMY_FLEET_VAR": "not-a-secret"}):
+            out = self.accept("a")
+        self.assertIn("ACCEPT-CHECKS a 1/1 passed", out)
 
     def test_a_failure_after_the_merge_says_the_diff_is_in_the_checkout(self):
         self.cfg["defaults"]["accept_checks"] = [{"run": "echo broken build; exit 1"}]
