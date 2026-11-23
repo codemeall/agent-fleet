@@ -171,6 +171,13 @@ class AskRules(unittest.TestCase):
         self.assertIn("run.json", names)  # the scan finds them at all
         self.assertEqual(names - {"reports"} - set(fleet.RUN_DENY_DIRS) - set(fleet.RUN_DENY_FILES), set())
 
+    def test_doctor_names_the_workers_mode_and_ask_rules(self):
+        p = SHIPPED["providers"]["claude"]
+        lines, _ = fleet.profile_report({"defaults": dict(fleet.DEFAULTS)}, "claude", p, "/nonexistent/claude")
+        hooks = next(line for line in lines if "hooks claude-settings" in line)
+        self.assertIn("workers in acceptEdits mode, asking before rm, rmdir, mv, cp, sed", hooks)
+        self.assertNotIn("account mode", hooks)
+
 class Shipped(unittest.TestCase):
     """The shipped config, build_launch, doctor and the strict fake; no run."""
 

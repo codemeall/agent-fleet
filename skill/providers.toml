@@ -79,7 +79,8 @@ signals = "claude-settings"
 # tee are missed by the ask rules, but they still prompt unless the owner allowed them, because acceptEdits
 # auto-approves file edits and its filesystem commands (mkdir, touch, rm, rmdir, mv, cp, sed); read-only commands
 # run without a prompt in every mode, and other commands prompt. Edit deny rules block edits, redirects, sed and tee into the denied run paths. A
-# script that opens files itself (python -c) is not covered. The edit hook does not see shell
+# script that opens files itself (python -c) is not covered, nor a new file at the run directory's root, and
+# events/* stays out of the control record (Codex's notify runs without the cache home). The edit hook does not see shell
 # commands. The scope check misses gitignored files, scope_ignore paths, and .fleet/runs/. scope_permissions only
 # adds allow rules; it does not change this mode.
 # The flag beats an account's permissions.defaultMode in user, project and local settings, so doctor does not read

@@ -79,8 +79,11 @@ class TrustReads(unittest.TestCase):
             root: {"hasTrustDialogAccepted": True}}}))
         self.assertEqual(fleet.untrusted_labels(self.cfg, self.claude(), self.repo), [])
         self.cfg["defaults"]["auto_trust"] = True
-        (self.home / ".claude.json").unlink()
+        (self.home / ".claude.json").write_text("{}")  # launch will write the trust into it
         self.assertEqual(fleet.untrusted_labels(self.cfg, self.claude(), self.repo), [])
+        (self.home / ".claude.json").unlink()  # nothing for auto_trust to write: the trust screen still shows
+        self.assertEqual(fleet.untrusted_labels(self.cfg, self.claude(), self.repo),
+                         [f"checkout {self.repo.resolve()}"])
         self.assertFalse((self.home / ".claude.json").exists())
 
     def test_codex_and_agy_read_their_own_stores(self):
@@ -164,18 +167,35 @@ class DoctorTrust(unittest.TestCase):
         code, text = self.doctor({"claude": provider("claude", trust="claude-config", login="claude auth status",
                                                      login_ok='"loggedIn": true')})
         self.assertEqual(code, 1, text)
-        self.assertIn("fix: open the CLI once in the checkout and accept its trust screen (~/.claude.json does not "
+        self.assertIn("fix: run claude once in the checkout and accept its trust screen (~/.claude.json does not "
                       "exist yet, so auto_trust has no file to write)", text)
         self.assertNotIn("set auto_trust = true", text)
         self.assertFalse((self.home / ".claude.json").exists())
 
     def test_auto_trust_does_not_fail_the_trust_check_or_write(self):
+        (self.home / ".claude.json").write_text("{}")  # the CLI ran once, so launch has a file to write
         code, text = self.doctor({"claude": provider("claude", trust="claude-config", login="echo ok", login_ok="ok")},
                                  auto_trust=True)
         self.assertEqual(code, 0, text)
         self.assertNotIn("NOT TRUSTED", text)
-        self.assertFalse((self.home / ".claude.json").exists())
+        self.assertEqual((self.home / ".claude.json").read_text(), "{}")
         self.assertIs(fleet.DEFAULTS["auto_trust"], False)
+
+    def test_auto_trust_cannot_cover_a_cli_that_never_ran(self):
+        code, text = self.doctor({"claude": provider("claude", trust="claude-config", login="echo ok", login_ok="ok")},
+                                 auto_trust=True)
+        self.assertEqual(code, 1, text)
+        self.assertIn("NOT TRUSTED", text)
+        self.assertIn("fix: run claude once in the checkout", text)
+        self.assertFalse((self.home / ".claude.json").exists())
+
+    def test_a_second_account_that_never_ran_is_told_to_run_its_own_cli(self):
+        second = provider("claude", trust="claude-config", login="echo ok", login_ok="ok",
+                          account_env="CLAUDE_CONFIG_DIR", env={"CLAUDE_CONFIG_DIR": str(self.home / "claude-co")})
+        code, text = self.doctor({"claude-2": second})
+        self.assertEqual(code, 1, text)
+        self.assertIn(f"fix: run CLAUDE_CONFIG_DIR={self.home / 'claude-co'} claude once in the checkout", text)
+        self.assertIn("claude-co/.claude.json does not exist yet", text)
 
     def test_a_cli_without_folder_trust_is_not_failed_for_it(self):
         code, text = self.doctor({"cursor": provider("cursor-agent", login="cursor-agent status", login_ok="Logged in")})

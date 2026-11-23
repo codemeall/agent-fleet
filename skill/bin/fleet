@@ -1031,8 +1031,10 @@ def trust_targets(_cfg: dict, repo: Path | None) -> list[tuple[str, str | None]]
 def untrusted_labels(cfg: dict, pcfg: dict, repo: Path | None) -> list[str]:
     """Checkout paths this CLI would still ask to trust. Empty when auto_trust is on, the CLI asks nothing,
     there is no checkout, or the checkout is already trusted. Reads only."""
-    if repo is None or cfg.get("defaults", DEFAULTS).get("auto_trust") or pcfg.get("trust") not in TRUST_METHODS:
+    if repo is None or pcfg.get("trust") not in TRUST_METHODS:
         return []
+    if cfg.get("defaults", DEFAULTS).get("auto_trust") and not trust_file_missing(pcfg):
+        return []  # launch writes the trust; with no file to write, the trust screen still shows
     missing = []
     for label, path in trust_targets(cfg, repo):
         if path is None:
@@ -1070,8 +1072,9 @@ def trust_file_missing(pcfg: dict | None) -> str | None:
 def trust_fix_line(pcfg: dict | None = None) -> str:
     method = (pcfg or {}).get("trust")
     if missing := trust_file_missing(pcfg):
-        return (f"fix: open the CLI once in the checkout and accept its trust screen ({missing} does not exist yet, "
-                "so auto_trust has no file to write)")
+        cli = first_binary((pcfg or {}).get("bin") or "the CLI")
+        return (f"fix: run {shown_env_prefix(pcfg or {})}{cli} once in the checkout and accept its trust screen "
+                f"({missing} does not exist yet, so auto_trust has no file to write)")
     if method == "claude-config":
         writes = f"it writes {claude_config_file(pcfg)}"
     elif method == "agy-settings":
@@ -6683,7 +6686,8 @@ def scan_workers(repo: Path, state: dict, seen: Path, stall: int) -> list[str]:
         if now - w.get("launched_at", 0) < LAUNCH_WATCH_S and TRUST_SCREEN_RE.search(screen_tail(screen, 15)):
             if mark_once(seen, f"{i}.trust", token):  # once; the generic STALLED stays quiet while it shows
                 events.append(f"STALLED {i} trust screen: its CLI asks whether to trust this folder; the owner "
-                              "answers it in its pane (fleet agents), the lead never does. Or the owner sets auto_trust")
+                              "answers it in its pane (fleet agents), the lead never does; fleet doctor names the "
+                              "lasting fix")
             continue
         marker = seen / f"{i}.screen"
         h = digest(screen.encode())
@@ -12063,7 +12067,7 @@ def profile_report(cfg: dict, name: str, p: dict, found: str) -> tuple[list[str]
         mode = re.search(r"--permission-mode[ =](\S+)", adapter_profile(p, "worker")["args"] or "")
         lines.append(f"{pad}hooks claude-settings: edits outside a worker's files or report refused; {reviewers}; "
                      f"workers in {mode.group(1) + ' mode' if mode else 'the account mode'}, asking before "
-                     f"rm, rmdir, mv, cp and sed{', their files and planned checks allowed' if scoped else ''}"
+                     f"{', '.join(r[5:-3] for r in WORKER_ASK)}{', their files and planned checks allowed' if scoped else ''}"
                      f" (scope_permissions {'on' if scoped else 'off'})")
     lines.append(pad + signals_line(p))
     missing, where = flag_drift(p)
