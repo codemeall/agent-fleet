@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Launch says when a worker dies at start, on every backend** (#69). Launch refuses a ticket whose CLI is not on PATH before it records or opens anything (`--ready` skips that ticket and goes on). Two seconds after launch, `--settle 0` and `--ready` included, a worker whose CLI already exited non-zero prints `NOT STARTED <id>: its CLI exited <rc> at start` with the end of its screen, and launch exits 1. Before, tmux launches always exited 0.
+- **`wait` never hides an exit** (#80). An exit that `status`, `launch` or `stop` recorded first still wakes `EXITED` once, and every `TIMEOUT` lists `PENDING <id> [exited, ...]` for a worker that exited without handing back until the lead stops, relaunches or drops it. Before, such a worker left only `TIMEOUT nothing new`. Upgrade: a worker that exited before this version without handing back wakes `EXITED` once and stays `PENDING` until `fleet stop` (or a relaunch) clears it.
 - **Claude workers launch with acceptEdits.** Previously a worker used the account's own permission mode. The worker settings ask before `Bash(rm *)`, `Bash(rmdir *)`, `Bash(mv *)`, `Bash(cp *)` and `Bash(sed *)`, so those commands prompt while file edits still pass. Ask rules are checked before the mode.
 - **Known limit.** Ask rules match by command name. Shell redirects, mkdir, touch and owner-allowed commands can still write under `.fleet/runs` (for example another ticket's report). Deny rules cover every path in the run directory except `reports/`. A script that writes files itself is not covered. `events/` is not in the control record. Codex workers get no deny rules.
 

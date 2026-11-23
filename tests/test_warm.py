@@ -601,8 +601,10 @@ class WarmAdapterSmoke(FleetCase):
         session = self.start("claude")
         self.expectations("claude", session="resume", session_id=session, warm_after="01", unknown_sessions=[session])
         self.fleet("prompt", "smoke", "02")
-        self.fleet("launch", "smoke", "02", "claude", "--tier", "standard", "--after", "01", "--settle", "0")
-        self.exited("02")                                       # reported as any exit is
+        out = self.fleet("launch", "smoke", "02", "claude", "--tier", "standard", "--after", "01", "--settle", "0",
+                         expected=1)                            # its CLI exits at once: launch says so
+        self.assertRegex(out, r"NOT STARTED 02: its CLI exited \d+ at start")
+        self.exited("02")                                       # and wait still reports it
         self.assertIn("No conversation found with session ID: " + session, self.fleet("peek", "smoke", "02"))
         self.expectations("claude")
         self.fleet("launch", "smoke", "02", "claude", "--tier", "standard", "--settle", "0")
