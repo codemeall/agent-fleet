@@ -112,6 +112,22 @@ class ActiveRunCli(RuntimeCase):
         self.assertEqual(path.read_bytes(), before)
 
 
+    def test_a_tampered_run_with_a_gone_worker_is_refused_not_saved(self):
+        """Reaping saves another run only when its run.json is still Fleet's own: an edited one is refused."""
+        self.setup_run()
+        self.launch()
+        path = self.repo / ".fleet" / "runs" / "demo" / "run.json"
+        state = json.loads(path.read_text())
+        state["decisions"].append("a worker wrote this")
+        path.write_text(json.dumps(state))
+        before = path.read_bytes()
+        with patch.object(fleet, "gone_workers", side_effect=lambda repo, st, ids=None: list(fleet.active(st))):
+            out = self.call("init", "other", "--backend", "tmux", "--review", "off", *self.off_reason("off"),
+                            expected=1)
+        self.assertIn("changed outside Fleet", out)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertFalse((self.repo / ".fleet" / "runs" / "other").exists())
+
 class ProcessGone(unittest.TestCase):
     """reap_gone's process test: every recorded pid dead (or reused), in this pid namespace, and at least one."""
 

@@ -2558,6 +2558,8 @@ def ensure_other_runs_idle(repo: Path, current: str) -> None:
             # rewrote is refused (check_control), never saved over its control record.
             if active(state) and str(repo.resolve()) in LOCK_HELD and gone_workers(repo, state):
                 check_control(repo, file.parent.name)
+                state = json.loads(file.read_text())  # the state now known to match Fleet's copy
+                reconcile(repo, state)
                 if reap_gone(repo, state):
                     save_run(repo, file.parent.name, state)
         live = active(state)
@@ -2768,14 +2770,20 @@ def run_child(args: list[str]) -> int:
     if runner_cancelled(Path(path), token):
         return LAUNCH_REFUSED
     spawned: list = []
+    hung: list = []
 
     def hangup(signum, frame):  # its terminal is gone (window closed, tmux server killed): end the CLI, which can
-        for child in spawned:    # no longer be used, and stay to write the receipt, so the exit is on record
+        hung.append(signum)      # no longer be used, and stay to write the receipt, so the exit is on record
+        for child in spawned:
             try:
                 child.send_signal(signal.SIGHUP)
             except OSError:
                 pass
     signal.signal(signal.SIGHUP, hangup)  # before the spawn: exec puts the default back for the CLI itself
+    if hung:  # its terminal went away before the CLI started: start nothing
+        atomic_json(Path(path), {"token": token, "returncode": LAUNCH_REFUSED,
+                                 "refused": "its terminal hung up before the worker started"})
+        return LAUNCH_REFUSED
     child = subprocess.Popen(command, shell=True, executable="/bin/sh", env=worker_env(Path(path)))
     spawned.append(child)
     atomic_json(Path(path).with_suffix(".started.json"), start_record(token, child.pid))
