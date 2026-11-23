@@ -1114,10 +1114,18 @@ class LiveTmux(unittest.TestCase):
              "context": "none", "checks": {"manual": "manual prose review is sufficient"}}]}))
         self.call("plan", "demo", "--file", "plan.json")
 
+    def kill_server(self):
+        """kill-server returns before the server is gone; wait until tmux no longer answers on the socket."""
+        subprocess.run(["tmux", "-L", self.socket, "kill-server"], capture_output=True)
+        deadline = time.time() + 10
+        while subprocess.run(["tmux", "-L", self.socket, "list-sessions"], capture_output=True).returncode == 0:
+            self.assertLess(time.time(), deadline, "the tmux server outlived kill-server")
+            time.sleep(0.1)
+
     def test_a_lost_tmux_server_shows_unreachable_not_working(self):
         self.plan_one()
         self.call("launch", "demo", "--ready")
-        subprocess.run(["tmux", "-L", self.socket, "kill-server"], capture_output=True)
+        self.kill_server()
         self.assertRegex(self.call("status", "--brief"),
                          r"  ● 01  fake:fake-1  unreachable: its tmux window is gone and it left no exit receipt")
 
@@ -1126,7 +1134,7 @@ class LiveTmux(unittest.TestCase):
         self.plan_one()
         self.call("launch", "demo", "--ready")
         self.assertEqual(fleet.live_workers(self.repo), 1)
-        subprocess.run(["tmux", "-L", self.socket, "kill-server"], capture_output=True)
+        self.kill_server()
         self.assertEqual(fleet.live_workers(self.repo), 0)  # the dashboard's idle check and the summary count it so
         with patch.object(fleet, "OTHERS_TTL_S", 0):
             self.assertEqual(fleet.others_live(None), [])  # no "+1 worker in 1 other repo" forever

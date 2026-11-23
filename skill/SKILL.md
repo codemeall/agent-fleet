@@ -77,7 +77,7 @@ The default is `fleet launch <run> --ready`. It starts every ready ticket on its
 
 Per-ticket launch is the exception, for one relaunch or repair: `fleet launch <run> <id>`, or `fleet launch <run> <id> <provider>` with no other flags, uses the saved provider, tier, model, effort and family. A different value is refused. The message names the saved route and a command to copy.
 
-Each worker gets its own pane, never yours. Read the launch screen for a login, trust, model or permission prompt and do not answer it. `NOT STARTED` (exit 1) means it never ran: `fleet stop` that id, then relaunch. If launch says the checkout is on hold, tell the owner and end the turn. Do not retry, and do not stop workers to get around the hold. A launch refused at a cap (`max_workers` or `max_wall_minutes`) goes to the owner. Never retry around it.
+Each worker gets its own pane, never yours. Read the launch screen for a login, trust, model or permission prompt and do not answer it. `NOT STARTED` (exit 1) means it never ran: `fleet stop` that id, then relaunch. `NOT STARTED <id>: its CLI exited <rc> at start` or `... is not on PATH` needs no stop: tell the owner the cause it shows, then relaunch once it is fixed. If launch says the checkout is on hold, tell the owner and end the turn. Do not retry, and do not stop workers to get around the hold. A launch refused at a cap (`max_workers` or `max_wall_minutes`) goes to the owner. Never retry around it.
 
 ## Wait
 
@@ -93,7 +93,7 @@ Every wait is a full turn, so wait long and rarely. Use `fleet wait <run> --time
 - `SCOPE <path>`: a file outside every ticket changed. Find out who before acceptance.
 - `UNREACHABLE <id>`: its pane or window cannot be read. It may be closed.
 - `HOLD`: launches are on hold and no worker is running. Handle any `PENDING` lines first, tell the owner, and end the turn. Do not wait again until they release.
-- `TIMEOUT`: handle any `PENDING` lines, otherwise wait again.
+- `TIMEOUT`: handle any `PENDING` lines, otherwise wait again. `PENDING <id> [exited, ...]` is a worker that exited without handing back: read its report and screen, then relaunch or `fleet stop` it.
 
 ## Status, send and stop
 
