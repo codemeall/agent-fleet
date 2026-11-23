@@ -462,4 +462,6 @@ class LeadMarkers(unittest.TestCase):
             env = fleet.worker_env(receipt)
             checks = fleet.check_env()
         self.assertEqual(env, {**owner, "FLEET_WORKER": "demo/01"})
-        self.assertEqual(checks, {k: v for k, v in owner.items() if k not in ("TMUX", "CMUX_SURFACE_ID")})
+        self.assertEqual(checks, {"PATH": "/usr/bin"})  # a check gets no account settings or keys either
+        with patch.dict(os.environ, {**lead, **owner}, clear=True):
+            self.assertEqual(fleet.lead_env(), {k: v for k, v in owner.items() if k not in ("TMUX", "CMUX_SURFACE_ID")})
