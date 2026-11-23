@@ -162,6 +162,15 @@ class AskRules(unittest.TestCase):
         self.assertNotIn("ask", lead["permissions"])
 
 
+    def test_every_run_entry_fleet_creates_is_denied_except_reports(self):
+        """A worker may write only its report under the run directory: every name Fleet joins onto it in the
+        source is in RUN_DENY_DIRS or RUN_DENY_FILES, so a new entry cannot be left open by accident."""
+        import re
+        source = Path(fleet.__file__).read_text()
+        names = set(re.findall(r'(?:run_dir\([^)]*\)|\bd) / "([^"]+)"', source))
+        self.assertIn("run.json", names)  # the scan finds them at all
+        self.assertEqual(names - {"reports"} - set(fleet.RUN_DENY_DIRS) - set(fleet.RUN_DENY_FILES), set())
+
 class Shipped(unittest.TestCase):
     """The shipped config, build_launch, doctor and the strict fake; no run."""
 

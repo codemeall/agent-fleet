@@ -35,6 +35,8 @@ Restart your agent host in any terminal with tmux installed (workers run headles
 
 > Use `/fleet` with auto routing for the approved tickets in `.scratch/my-feature/issues`.
 
+A worker stops at its CLI's folder-trust screen until someone answers it. Open `claude` and `codex` once in the repository and accept, or opt in to [`auto_trust`](#configuration) so Fleet marks the checkout trusted before each launch. `fleet doctor` tells you which applies.
+
 ## Installation
 
 ### Requirements

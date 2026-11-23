@@ -140,6 +140,7 @@ class DoctorTrust(unittest.TestCase):
         return code, out.getvalue()
 
     def test_doctor_fails_untrusted_and_logged_out_and_names_the_fix(self):
+        (self.home / ".claude.json").write_text('{"projects": {}}')  # the CLI ran once, elsewhere
         code, text = self.doctor({"claude": provider("claude", trust="claude-config", login="claude auth status",
                                                      login_ok='"loggedIn": true')})
         self.assertEqual(code, 1, text)
@@ -157,6 +158,15 @@ class DoctorTrust(unittest.TestCase):
         self.assertNotIn("auth login", log)
         self.assertIn("auth status", log)
         self.assertNotIn("stdin-had-data", log)
+        self.assertEqual((self.home / ".claude.json").read_text(), '{"projects": {}}')  # doctor writes nothing
+
+    def test_a_missing_cli_config_file_is_fixed_by_opening_the_cli_not_by_auto_trust(self):
+        code, text = self.doctor({"claude": provider("claude", trust="claude-config", login="claude auth status",
+                                                     login_ok='"loggedIn": true')})
+        self.assertEqual(code, 1, text)
+        self.assertIn("fix: open the CLI once in the checkout and accept its trust screen (~/.claude.json does not "
+                      "exist yet, so auto_trust has no file to write)", text)
+        self.assertNotIn("set auto_trust = true", text)
         self.assertFalse((self.home / ".claude.json").exists())
 
     def test_auto_trust_does_not_fail_the_trust_check_or_write(self):
@@ -244,9 +254,8 @@ class DoctorTrust(unittest.TestCase):
         second = provider(
             "claude", trust="claude-config", login="claude auth status", login_ok='"loggedIn": true',
             account_env="CLAUDE_CONFIG_DIR", env={"CLAUDE_CONFIG_DIR": "~/claude-co"})
-        prefix = fleet.env_prefix(second)
-        self.assertTrue(prefix.startswith("env "))
-        self.assertIn("CLAUDE_CONFIG_DIR=", prefix)
+        prefix = fleet.shown_env_prefix(second)
+        self.assertTrue(prefix.startswith("CLAUDE_CONFIG_DIR="))
 
         def unconfirmed(p, timeout=60):
             return ("unconfirmed", "")
@@ -378,3 +387,35 @@ class InitOwnerAction(RuntimeCase):
         self.assertNotIn("not logged in", out)
         self.assertNotIn("login not confirmed", out)
         self.assertTrue((self.repo / ".fleet/runs/demo/run.json").exists())
+
+
+class ShownPrefix(unittest.TestCase):
+    """One rule for login fixes and doctor hints: VAR=value for a variable the adapter sets, env -u only for an
+    account variable set in this shell, nothing for a default account in a clean shell."""
+
+    def test_default_account(self):
+        shipped = {"account_env": "CLAUDE_CONFIG_DIR", "bin": "claude", "login": "claude auth status"}
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            self.assertEqual(fleet.shown_env_prefix(shipped), "")
+            self.assertEqual(fleet.login_fix("claude", shipped), "fix: claude auth login")
+        with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "/elsewhere"}):
+            self.assertEqual(fleet.shown_env_prefix(shipped), "env -u CLAUDE_CONFIG_DIR ")
+            self.assertEqual(fleet.login_fix("claude", shipped), "fix: env -u CLAUDE_CONFIG_DIR claude auth login")
+
+    def test_second_account(self):
+        second = {"account_env": "CLAUDE_CONFIG_DIR", "env": {"CLAUDE_CONFIG_DIR": "/x/claude-co"}}
+        with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "/elsewhere"}):
+            self.assertEqual(fleet.shown_env_prefix(second), "CLAUDE_CONFIG_DIR=/x/claude-co ")
+
+
+class InitMissingBinary(RuntimeCase):
+    def test_a_missing_binary_gets_no_trust_line(self):
+        home = self.cache / "home"
+        home.mkdir()
+        self.cfg["providers"]["writer"].update(bin="no-such-fleet-bin-xyz", trust="claude-config",
+                                                login="echo no", login_ok="Logged in")
+        with patch.dict(os.environ, {"HOME": str(home)}):
+            text = fleet.owner_action_block(self.cfg, self.repo, skip_login=True)
+        self.assertIn("- writer: missing binary 'no-such-fleet-bin-xyz'", text)
+        self.assertNotIn("- writer: not trusted", text)

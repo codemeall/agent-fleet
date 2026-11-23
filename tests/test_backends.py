@@ -360,6 +360,17 @@ class TmuxLive(unittest.TestCase):
         out = self.call("wait", "demo", "--timeout", "1", "--interval", "1", "--settle", "0", expected=2)
         self.assertNotIn("01", out)
 
+    def test_a_trust_screen_wakes_wait_before_timeout(self):
+        self.add_provider("asking", "#!/bin/sh\necho 'Do you trust the files in this folder?'\n"
+                                    "echo '> 1. Yes, proceed'\nsleep 60\n")
+        self.plan_tickets(("01", "asking", "a.txt"))
+        self.call("launch", "demo", "--ready")
+        out = self.call("wait", "demo", "--timeout", "15", "--interval", "1", "--settle", "0")
+        self.assertIn("STALLED 01 trust screen", out)
+        self.assertIn("the lead never does", out)
+        out = self.call("wait", "demo", "--timeout", "2", "--interval", "1", "--settle", "0", expected=2)
+        self.assertNotIn("STALLED 01", out)  # once, and the generic STALLED stays quiet while it shows
+
     def test_launch_ready_skips_a_missing_cli_and_fails_on_one_that_dies(self):
         self.add_provider("ghost", None)
         self.add_provider("dying", "#!/bin/sh\nexit 3\n")

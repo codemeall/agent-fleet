@@ -77,12 +77,13 @@ signals = "claude-settings"
 # working directory run without a prompt, and so do mkdir and touch. In shared isolation those unprompted writes
 # can overwrite uncommitted owner edits, including gitignored files. bash -c, absolute paths such as /bin/rm, and
 # tee are missed by the ask rules, but they still prompt unless the owner allowed them, because acceptEdits
-# auto-approves file edits, its filesystem commands (mkdir, touch, rm, rmdir, mv, cp, sed), and the read-only
-# set; other commands prompt. Edit deny rules block edits, redirects, sed and tee into the denied run paths. A
+# auto-approves file edits and its filesystem commands (mkdir, touch, rm, rmdir, mv, cp, sed); read-only commands
+# run without a prompt in every mode, and other commands prompt. Edit deny rules block edits, redirects, sed and tee into the denied run paths. A
 # script that opens files itself (python -c) is not covered. The edit hook does not see shell
 # commands. The scope check misses gitignored files, scope_ignore paths, and .fleet/runs/. scope_permissions only
 # adds allow rules; it does not change this mode.
-# Doctor does not read settings.json for permissions.defaultMode; that check is still open.
+# The flag beats an account's permissions.defaultMode in user, project and local settings, so doctor does not read
+# them; only a managed policy could override it, and doctor does not read that either.
 # Reviewers pin manual mode (`claude --help` 2.1.318: Claude asks before each edit and command), so a looser
 # defaultMode never reaches them. With hooks on, the guard lets a reviewer write only its report and its settings
 # allow that one file, so the report write needs no answer. Hooks never change the mode, so a guard that cannot run
