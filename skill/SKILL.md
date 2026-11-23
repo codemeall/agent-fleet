@@ -81,7 +81,7 @@ Each worker gets its own pane, never yours. Read the launch screen for a login, 
 
 ## Wait
 
-Every wait is a full turn, so wait long and rarely. Use `fleet wait <run> --timeout <seconds>` with the longest timeout your host's command tool allows (at most 600, such as 540 in Claude Code, or in the background where the host wakes you). Set `fleet wait`'s own `--timeout` long. It defaults to 45 s. Run one wait at a time: a wait consumes the events it prints, so end a background wait before a handoff.
+Every wait is a full turn, so wait long and rarely. `fleet wait <run> --timeout` defaults to 45 s and refuses a value above 600 s, so use the longest one that still fits (about 540 in Claude Code; a Codex lead's command returns after yield_time_ms, default 10 s, and keeps running, so poll it with write_stdin, or pass timeout_ms where unified exec is off), or run the wait where the host wakes you. `fleet accept` with accept_checks, and `fleet launch` or `fleet review` in a worktree run with worktree_setup, can outlast any host timeout. Run them in the background, and run `fleet status <run>` before retrying one that was cut off. Each accept check is up to 3600 s and they run in sequence. Worktree setup is up to 1800 s for each new tree. Run one wait at a time: a wait consumes the events it prints, so end a background wait before a handoff.
 
 - `REPORT <id> [needs-verification]`: read the report and the diff, then review or accept.
 - `REPORT <id> [blocked]`: `fleet send <run> <id> <answer>` for an authorized decision, and record it in `.fleet/runs/<run>/notes.md`.
