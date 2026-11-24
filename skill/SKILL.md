@@ -41,7 +41,7 @@ In the repo, run `fleet doctor <providers you will route to>`. Route only to ada
 
 If the named run exists, `fleet resume <run>` and read its reports and decisions. Do not init a replacement, and do not relaunch a worker whose exit is unconfirmed.
 
-Otherwise `fleet init <run> [--backend cmux|tmux] [--workspace <ref>] [--routing <mode>] [--review <mode>]`. Init defaults to cmux inside cmux, else headless tmux. Relay its `WATCH` line. One active run per checkout.
+Otherwise `fleet init <run> [--backend cmux|tmux] [--workspace <ref>] [--routing <mode>] [--review <mode>]`. Init defaults to headless tmux when it is installed, inside cmux too; cmux only with `backend=cmux` or a workspace. Route implementation work to Claude and Codex, the enabled adapters. Relay its `WATCH` line. One active run per checkout.
 
 ## Plan
 
@@ -77,7 +77,7 @@ The default is `fleet launch <run> --ready`. It starts every ready ticket on its
 
 Per-ticket launch is the exception, for one relaunch or repair: `fleet launch <run> <id>`, or `fleet launch <run> <id> <provider>` with no other flags, uses the saved provider, tier, model, effort and family. A different value is refused. The message names the saved route and a command to copy.
 
-Each worker gets its own pane, never yours. Read the launch screen for a login, trust, model or permission prompt and do not answer it. `NOT STARTED` (exit 1) means it never ran: `fleet stop` that id, then relaunch. `NOT STARTED <id>: its CLI exited <rc> at start` or `... is not on PATH` needs no stop: tell the owner the cause it shows, then relaunch once it is fixed. If launch says the checkout is on hold, tell the owner and end the turn. Do not retry, and do not stop workers to get around the hold. A launch refused at a cap (`max_workers` or `max_wall_minutes`) goes to the owner. Never retry around it.
+Each worker gets its own pane, never yours. Read the launch screen for a login, trust, model or permission prompt and do not answer it. `NOT STARTED` (exit 1) means it never ran: `fleet stop <run> <id> --close`, then relaunch. `NOT STARTED <id>: its CLI exited <rc> at start` or `... is not on PATH` needs no stop: tell the owner the cause it shows, then relaunch once it is fixed. If launch says the checkout is on hold, tell the owner and end the turn. Do not retry, and do not stop workers to get around the hold. A launch refused at a cap (`max_workers` or `max_wall_minutes`) goes to the owner. Never retry around it.
 
 ## Wait
 

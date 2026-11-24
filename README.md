@@ -4,7 +4,7 @@ Run a fleet of coding-agent CLIs (Claude Code, Codex, Cursor) led by the agent y
 
 The lead turns approved tickets into a saved execution plan, picks a worker model and effort for each ticket, watches progress, and verifies every result before dependents start. Workers share one Git checkout with explicit file ownership, or each work in their own Git worktree when you ask. **You keep control of commits and publishing.**
 
-> **Preview `0.1.0-preview.40`.** Bundled adapters exist for Claude Code, Codex and Cursor, plus Antigravity and OpenCode (disabled by default). Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
+> **Preview `0.1.0-preview.40`.** Claude Code and Codex are the supported, enabled worker adapters. Bundled adapters for Cursor, Antigravity and OpenCode ship disabled until launch is proven on them. Live compatibility depends on your installed CLI versions, account models and local permissions. MIT licensed.
 
 - [Quick start](#quick-start)
 - [Installation](#installation)
@@ -27,11 +27,11 @@ The lead turns approved tickets into a saved execution plan, picks a worker mode
 # 1. Install the skill globally with the skills CLI
 npx skills add codemeall/agent-fleet -g -a claude-code -a codex -a cursor
 
-# 2. Check the terminal backend (cmux or tmux), Python and worker CLIs
+# 2. Check the terminal backend (tmux, or cmux), Python and worker CLIs
 ~/.claude/skills/fleet/bin/fleet doctor
 ```
 
-Restart your agent host, open it inside a cmux workspace (or any terminal with tmux installed, for headless workers), and ask:
+Restart your agent host in any terminal with tmux installed (workers run headless; `fleet agents` shows them), or inside a cmux workspace if you choose `backend=cmux`, and ask:
 
 > Use `/fleet` with auto routing for the approved tickets in `.scratch/my-feature/issues`.
 
@@ -40,9 +40,9 @@ Restart your agent host, open it inside a cmux workspace (or any terminal with t
 ### Requirements
 
 - **Python 3.11+** and **Git**, plus a terminal backend for the workers:
-  - **[cmux](https://github.com/manaflow-ai/cmux)** (macOS) running with a reachable socket, for workers in visible panes beside the lead, or
-  - **[tmux](https://github.com/tmux/tmux)** 3.0+ (macOS or Linux, including SSH sessions and containers), for headless workers you open with `fleet agents`
-- At least one installed, authenticated worker CLI: `claude`, `codex` or `cursor-agent` (`agy` and `opencode` adapters ship disabled; turn them on in your config)
+  - **[tmux](https://github.com/tmux/tmux)** 3.0+ (macOS or Linux, including SSH sessions and containers), the default: headless workers you open with `fleet agents`, or
+  - **[cmux](https://github.com/manaflow-ai/cmux)** (macOS) running with a reachable socket, optional, for workers in visible panes beside the lead (`backend=cmux`)
+- At least one installed, authenticated worker CLI: `claude` or `codex` (`cursor-agent`, `agy` and `opencode` adapters ship disabled; `fleet provider enable <name>` turns one on)
 - **Node.js 18+** for the installer (not needed at runtime)
 
 The lead host must be allowed to use the local shell, the repository and cmux or tmux. Installing the skill does not grant those permissions; see [host setup](skill/references/harnesses.md).
@@ -335,7 +335,7 @@ Every Fleet worker costs a pane, a prompt, a report and a verification turn by t
 - **Small or single-file tickets: use one agent.** Rule of thumb: if the whole job is one or two tickets that would run one after the other, or touches a single file, or you could review the change in one sitting, ask your agent to do it directly. Reach for Fleet when at least two tickets with disjoint files can run at the same time, or a ticket needs cross-family review.
 - **A quick read-only lookup: use the lead's own subagent.** Where something is defined, what a function does, which files a change would touch: your host's subagent (Claude Code's Explore, a Codex `explorer`) answers for less. Fleet's `investigate` tickets are for questions that need another vendor's model, a long investigation you want verified, or one kept out of the lead's context ([Fleet or your own subagent](skill/references/delegation.md#0-fleet-or-your-own-subagent)).
 - **No speed or quality claim.** Fleet is not yet benchmarked against one agent doing the same tickets ([#16](https://github.com/codemeall/agent-fleet/issues/16)), so this README makes no performance claim: parallel workers may finish sooner or later than one agent would. The [benchmark kit](benchmarks/README.md) is how that will be measured. It has no paid results yet; a simulated run shows only that the kit and Fleet's pipeline work.
-- **Only Claude Code, Codex and Cursor are on by default.** Antigravity and OpenCode ship disabled (`fleet provider enable agy`, then `fleet doctor agy`), and Grok and Muse are placeholders, not supported CLIs ([compatibility](#compatibility-and-adapters)).
+- **Only Claude Code and Codex are on by default.** They are the supported implementation adapters while launch, wait and recovery are hardened. Cursor, Antigravity and OpenCode ship disabled (`fleet provider enable cursor`, then `fleet doctor cursor`), and Grok and Muse are placeholders, not supported CLIs ([compatibility](#compatibility-and-adapters)). Cursor still works as a lead harness.
 
 ## Where workers run: cmux or headless
 
@@ -348,14 +348,14 @@ Every run picks a terminal backend at `fleet init` and keeps it. Both run the sa
 | How you look at a worker | It's on screen; `fleet agents` also works | `fleet agents`, `fleet attach`, or plain `tmux` |
 | Limit | 8 panes per workspace, then finished panes are reused | None |
 
-Choose with `backend=cmux|tmux` in your request to the lead, `fleet init <run> --backend …`, or `backend` under `[defaults]` in your config. The default, `auto`, uses cmux when the lead runs inside cmux (or you name a workspace) and headless tmux otherwise, so existing cmux setups behave as before.
+Choose with `backend=cmux|tmux` in your request to the lead, `fleet init <run> --backend …`, or `backend` under `[defaults]` in your config. The default, `auto`, uses headless tmux whenever tmux is installed, inside cmux too, because tmux runs the launch line directly while cmux types it into a new shell. It uses cmux when you name a workspace (`workspace=`, `--workspace` or `defaults.workspace`) or tmux is missing. To keep worker panes beside the lead in cmux, choose `backend=cmux` or set `backend = "cmux"`; `fleet attach` opens a tmux worker in any terminal, cmux included.
 
 | How you choose | Example | Applies to |
 | --- | --- | --- |
 | In your request to the lead | `/fleet backend=tmux -- .scratch/settings/issues` | That run |
 | On the command line | `fleet init settings --backend tmux` | That run |
 | In your config | `backend = "tmux"` under `[defaults]` | Every new run |
-| Nothing | `auto`: cmux inside cmux or with a `workspace=`, otherwise tmux | Every new run |
+| Nothing | `auto`: tmux when installed; cmux with a `workspace=` or without tmux | Every new run |
 
 A run never changes backend after `init`. To move work to the other backend, finish or stop the run and start a new one. `fleet resume <run>` and `fleet status <run>` show which one a run uses (`workspace …` for cmux, `tmux session …` for tmux).
 
@@ -366,10 +366,10 @@ Use cmux when you're on macOS and want to see every worker on screen beside the 
 1. Install and start [cmux](https://github.com/manaflow-ai/cmux), and open a workspace for the repository.
 2. Start your agent host (Claude Code, Codex, Cursor) **inside that workspace**, in the repository.
 3. Run `fleet doctor`; the `cmux` line must say `ready`.
-4. Ask the lead to run your tickets, for example:
-   > Use `/fleet` with auto routing for the approved tickets in `.scratch/settings/issues`.
+4. Ask the lead to run your tickets with `backend=cmux` (with tmux installed, `auto` picks tmux), for example:
+   > Use `/fleet` with auto routing and `backend=cmux` for the approved tickets in `.scratch/settings/issues`.
 
-   To be explicit, add `backend=cmux`. To target a workspace other than the current one, add `workspace=workspace:3` (the `cmux` companion skill helps find the ref).
+   Or set `backend = "cmux"` in your config. To target a workspace other than the current one, add `workspace=workspace:3` (the `cmux` companion skill helps find the ref).
 5. Each worker opens in its own pane, labelled `<ticket> · <provider>:<model>@<effort>`. Up to 8 panes, launch splits the largest one; past that it reuses panes of verified workers or adds tabs. Click a pane to watch it, or run `fleet agents` in another pane for the list view.
 
 Don't type into a worker's pane while the lead is driving it; ask the lead to `send` a message instead.
@@ -578,7 +578,8 @@ Window sizes differ by host and setting: Claude Code runs Opus 5.5 with a 1M win
 
 | Lead or worker | Preview scope |
 | --- | --- |
-| Local Claude Code, Codex CLI, Cursor CLI | Bundled worker adapters; the lead needs shell, repository and cmux or tmux access |
+| Local Claude Code, Codex CLI | Supported worker adapters, enabled by default; the lead needs shell, repository and tmux (or cmux) access |
+| Cursor CLI | A supported lead; its worker adapter ships disabled; `fleet provider enable cursor`, then `fleet doctor cursor` |
 | Antigravity (`agy`), OpenCode | Bundled worker adapters, disabled by default; `fleet provider enable agy`, then `fleet doctor agy` |
 | Grok, Muse | Not supported as their own CLIs (disabled placeholders). Their models work through Cursor: `grok-4.7-high`, `muse-spark-1.3-max` |
 | Codex desktop / ChatGPT with local execution | Usable when the same capabilities and permissions are available |

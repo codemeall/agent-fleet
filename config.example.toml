@@ -2,7 +2,7 @@
 # fleet providers prints the merged configuration. No workspace is pinned.
 [defaults]
 routing = "auto"
-prefer = ["claude", "codex", "cursor"]
+prefer = ["claude", "codex"]
 max_parallel = 3
 review = "cross-heavy"
 # Reviewer launches per ticket (1 to 5). Past them, Fleet refuses the next repair or review and the lead brings
@@ -40,7 +40,8 @@ review = "cross-heavy"
 # A headless run not finished after this many minutes (1 to 240) is stopped with a blocked report.
 # headless_timeout_minutes = 30
 # Where workers run: "cmux" (visible panes beside the lead, macOS), "tmux" (headless windows in a detached
-# session; watch them with `fleet agents`) or "auto" (the default: cmux inside cmux, else tmux).
+# session; watch them with `fleet agents`) or "auto" (the default: tmux when installed, inside cmux too; cmux
+# when a workspace is named or tmux is missing).
 # backend = "tmux"
 # Headless workers use Fleet's own tmux server (tmux -L fleet). "" puts their sessions on your default server,
 # so `tmux ls` lists them and, inside tmux, `fleet attach` switches to a worker instead of nesting.
@@ -111,7 +112,8 @@ review = "cross-heavy"
 # family = "openai"
 
 # Turn providers on or off: `fleet provider enable|disable <name>` edits this file for you, then run
-# fleet doctor <name>. Antigravity and OpenCode ship off; add a provider to defaults.prefer above for auto routing.
+# fleet doctor <name>. Cursor, Antigravity and OpenCode ship off; add a provider to defaults.prefer above for auto
+# routing.
 # OpenCode's shipped tiers assume OpenRouter; override its tiers and login check for another provider.
 # grok and muse are placeholders and can't be turned on until filled in (see references/providers.md).
 # [providers.agy]
@@ -119,7 +121,7 @@ review = "cross-heavy"
 # [providers.opencode]
 # enabled = true
 # [providers.cursor]
-# enabled = false
+# enabled = true
 
 # Turn Claude's hooks off (reviewers then ask before every edit again, and wait falls back to STALLED):
 # [providers.claude]
