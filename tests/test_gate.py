@@ -138,9 +138,17 @@ class Gate(RuntimeCase):
         self.assertIn("Not launched yet", text)
 
     def test_gate_runs_without_the_leads_session_or_stdin(self):
-        with patch.dict(os.environ, {"CLAUDECODE": "1", "TMUX": "/tmp/x", "FLEET_GATE_KEEP": "kept"}):
-            self.gate_run([{"run": 'test -z "$CLAUDECODE$TMUX" && test "$FLEET_GATE_KEEP" = kept && ! read x'}])
+        with patch.dict(os.environ, {"CLAUDECODE": "1", "TMUX": "/tmp/x", "LC_ALL": "C", "HTTPS_PROXY": "http://p"}):
+            self.gate_run([{"run": 'test -z "$CLAUDECODE$TMUX" && test "$LC_ALL$HTTPS_PROXY" = Chttp://p && ! read x'}])
             self.call("gate", "demo", "01")
+
+    def test_gate_checks_see_no_other_variable_unless_the_owner_names_it(self):
+        probe = 'test -z "$DUMMY_FLEET_VAR" && echo clean || { echo leaked; exit 1; }'
+        with patch.dict(os.environ, {"DUMMY_FLEET_VAR": "not-a-secret", "GITHUB_TOKEN": "dummy"}):
+            self.gate_run([{"run": probe}, {"run": 'test -z "$GITHUB_TOKEN"'}])
+            self.call("gate", "demo", "01")
+            self.cfg["defaults"]["check_env"] = ["DUMMY_FLEET_VAR"]
+            self.assertIn("FAIL", self.call("gate", "demo", "01", expected=1))  # the owner's name passes it
 
     def test_gate_reports_unowned_changes_and_fails_on_them(self):
         self.commit_other()

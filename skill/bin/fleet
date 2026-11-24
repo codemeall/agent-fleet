@@ -105,6 +105,9 @@ DEFAULTS = {
     # Combined-tree checks fleet accept runs in the checkout, after a worktree ticket's merge and before anything is
     # verified: commands in a ticket check's shape ({run, cwd, timeout}). A run keeps the list it started with.
     "accept_checks": [],
+    # Extra environment variable names a gate or accept check may see, beyond CHECK_ENV_KEEP (PATH, HOME, locale,
+    # proxy, CA certificates, toolchain homes). Checks never see the rest of the lead's environment.
+    "check_env": [],
     # Where the owner sees the workers once a run starts (init's WATCH line): "auto" picks Claude Code's status
     # line, or starts the background dashboard, by the lead's host; "off" only names fleet agents.
     "watch": "auto",
@@ -277,6 +280,9 @@ def load_config(user_path: Path | None = None) -> dict:
     if cfg["defaults"]["acceptance"] not in ACCEPTANCE_MODES:
         raise FleetError('defaults.acceptance must be "strict" (the default) or "warn"')
     accept_checks_shape(cfg["defaults"]["accept_checks"])
+    names = cfg["defaults"]["check_env"]
+    if not isinstance(names, list) or not all(isinstance(n, str) and ENV_NAME_RE.match(n) for n in names):
+        raise FleetError("defaults.check_env must be a list of environment variable names")
     if cfg["defaults"]["check_policy"] not in CHECK_POLICIES:
         raise FleetError('defaults.check_policy must be "refuse" (the default) or "warn"')
     if not isinstance(cfg["defaults"]["scope_permissions"], bool):
@@ -7638,13 +7644,36 @@ def cmd_diff(a, cfg):
 GATE_TAIL_LINES = 40
 
 
-def check_env() -> dict[str, str]:
-    """The lead's environment without its session markers, as a worker gets it: a check that starts Claude Code
-    or reads CLAUDECODE must behave as it would for anyone running it."""
+def lead_env() -> dict[str, str]:
+    """The lead's environment without its session markers, as a worker gets it: a command that starts Claude Code
+    or reads CLAUDECODE must behave as it would for anyone running it. worktree_setup, the owner's own command,
+    runs with it."""
     return {k: v for k, v in os.environ.items() if k not in LEAD_ENV and not lead_marker(k)}
 
 
-def run_check(repo: Path, c: dict) -> dict:
+# A gate or accept check runs commands a worker may have just edited, unsandboxed, so it gets only what a build
+# needs to find its tools, its locale, its proxy and its CA certificates: never the lead's tokens and keys. An
+# owner adds names with [defaults] check_env.
+CHECK_ENV_KEEP = frozenset("""
+    PATH HOME USER LOGNAME SHELL TERM TMPDIR TZ LANG LANGUAGE CI COLUMNS LINES
+    HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY http_proxy https_proxy no_proxy all_proxy
+    SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE CURL_CA_BUNDLE GIT_SSL_CAINFO
+    VIRTUAL_ENV CONDA_PREFIX CONDA_DEFAULT_ENV PYENV_ROOT PYENV_VERSION JAVA_HOME GOPATH GOROOT GOCACHE GOMODCACHE
+    CARGO_HOME RUSTUP_HOME NVM_DIR NVM_BIN PNPM_HOME RBENV_ROOT GEM_HOME GEM_PATH
+""".split())
+CHECK_ENV_PREFIXES = ("LC_", "XDG_")
+ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def check_env(cfg: dict | None = None) -> dict[str, str]:
+    """A gate or accept check's environment: lead_env() reduced to CHECK_ENV_KEEP, the LC_ and XDG_ variables and
+    the names the owner listed in [defaults] check_env."""
+    extra = set((cfg or {}).get("defaults", {}).get("check_env") or ())
+    return {k: v for k, v in lead_env().items()
+            if k in CHECK_ENV_KEEP or k in extra or k.startswith(CHECK_ENV_PREFIXES)}
+
+
+def run_check(repo: Path, c: dict, env: dict[str, str] | None = None) -> dict:
     """Run one check from its directory with /bin/sh, no stdin and its timeout. The command gets its own process
     group, so a timeout kills whatever it started too. Returns its exit code (None on timeout) and output."""
     started = time.monotonic()
@@ -7652,7 +7681,8 @@ def run_check(repo: Path, c: dict) -> dict:
         cwd = contained(repo.resolve(), repo.resolve() / c["cwd"])  # checked again: the tree may have changed
         if not cwd.is_dir():
             raise FleetError(f"{c['cwd']} is no longer a directory")
-        proc = subprocess.Popen(["/bin/sh", "-c", c["run"]], cwd=cwd, env=check_env(), stdin=subprocess.DEVNULL,
+        proc = subprocess.Popen(["/bin/sh", "-c", c["run"]], cwd=cwd, env=check_env() if env is None else env,
+                                stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
     except (FleetError, OSError) as e:
         return {**c, "code": None, "error": f"could not start: {e}", "seconds": 0.0, "output": ""}
@@ -7839,7 +7869,8 @@ def run_gate(repo: Path, state: dict, cfg: dict, i: str, out: Path, loop: bool =
     did not write it, and nothing about it may reach the worker. A worktree ticket's checks run in its own tree."""
     where = work_tree(repo, state, i)
     before = tree_scan(where, state, cfg)
-    results = [run_check(where, c) for c in writer_ticket(state, i)["commands"]]
+    env = check_env(cfg)
+    results = [run_check(where, c, env) for c in writer_ticket(state, i)["commands"]]
     after = tree_scan(where, state, cfg)
     wrote = (record_check_outputs if where == repo else record_tree_outputs)(repo, state, i, before, after)
     excused = set()
@@ -9090,7 +9121,7 @@ def cmd_accept(a, cfg):
     applied = ""
     if worktree_rec(state, a.id):  # its diff reaches the checkout's working tree before anything is verified
         applied = accept_merge(repo, state, a)
-    checked, overrode = combined_checks(repo, state, a, applied)  # accept_checks, on the merged checkout
+    checked, overrode = combined_checks(repo, state, a, cfg, applied)  # accept_checks, on the merged checkout
     evidence += checked
     if rid:
         try:
@@ -9520,7 +9551,7 @@ def checks_touched(repo: Path, state: dict, before: dict, after: dict) -> list[s
     return sorted(p for p in tree_changes(repo, before, after) if p in owned)
 
 
-def combined_checks(repo: Path, state: dict, a, done: str = "") -> tuple[list[str], list[str]]:
+def combined_checks(repo: Path, state: dict, a, cfg: dict, done: str = "") -> tuple[list[str], list[str]]:
     """accept's combined-tree checks: the run's accept_checks, in the checkout after a worktree ticket's merge and
     before the first verify. Returns the evidence file for the writer's verification and, when the owner's words
     override a failure, the item they overrode. A failure without them refuses; `done` is what that refusal must
@@ -9543,7 +9574,8 @@ def combined_checks(repo: Path, state: dict, a, done: str = "") -> tuple[list[st
               f"are unchanged since, so the checks were not run again; evidence {md}")
         return [str(md)], []
     before = tree_scan(repo, state)
-    results = [run_check(repo, c) for c in checks]
+    env = check_env(cfg)
+    results = [run_check(repo, c, env) for c in checks]
     after = tree_scan(repo, state)
     # What the checks wrote outside every ticket is theirs, as the gate's outputs are: recorded even while other
     # workers run, so the verify after them never refuses it, unless the file had changed before they ran. While
@@ -11082,7 +11114,7 @@ def accept_pick(repo: Path, state: dict, a, cfg) -> None:
     merge_step(repo, state, a, i, wid)
     applied = (f"; {wid}'s diff is already in the checkout's working tree (MERGED above), and the next accept does "
                "not apply it again")
-    checked, overrode = combined_checks(repo, load_run(repo, a.run), a, applied)  # accept_checks, merged checkout
+    checked, overrode = combined_checks(repo, load_run(repo, a.run), a, cfg, applied)  # accept_checks, merged checkout
     evidence += checked
     try:
         verify_pick(repo, argparse.Namespace(**{**vars(a), **quality_args(a, overrode, bar)}), wid, evidence)
@@ -11409,7 +11441,7 @@ def make_tree(repo: Path, state: dict, wid: str, owner: str, files: list[str], r
 
 def run_tree_setup(repo: Path, state: dict, wid: str, path: Path, command: str) -> None:
     """[defaults] worktree_setup, run in a new tree before its worker starts, as fleet gate runs a check."""
-    r = run_check(path, {"run": command, "cwd": ".", "timeout": WORKTREE_SETUP_TIMEOUT_S})
+    r = run_check(path, {"run": command, "cwd": ".", "timeout": WORKTREE_SETUP_TIMEOUT_S}, lead_env())
     log = run_dir(repo, state["run"]) / "worktrees" / f"{wid}.setup.log"
     log.parent.mkdir(exist_ok=True)
     log.write_text(f"$ {command}\n(in {path})\n\n{r['output']}\n{check_outcome(r)}, {r['seconds']:.1f}s\n")

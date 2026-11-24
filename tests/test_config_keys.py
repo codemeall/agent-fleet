@@ -128,3 +128,15 @@ class ConfigKeys(unittest.TestCase):
                     *fleet.PROFILE_FIELDS, "warn_at", "dumb_at"]:
             with self.subTest(key=key):
                 self.assertIn(f"`{key}`", table)
+
+
+class CheckEnvKey(unittest.TestCase):
+    def test_check_env_takes_a_list_of_variable_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "config.toml")
+            for bad in ('check_env = "FOO"', 'check_env = ["1BAD"]', 'check_env = ["A-B"]', "check_env = [3]"):
+                path.write_text(f"[defaults]\n{bad}\n")
+                with self.assertRaisesRegex(fleet.FleetError, "check_env"):
+                    fleet.load_config(path)
+            path.write_text('[defaults]\ncheck_env = ["DOCKER_HOST", "_X1"]\n')
+            self.assertEqual(fleet.load_config(path)["defaults"]["check_env"], ["DOCKER_HOST", "_X1"])
