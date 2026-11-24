@@ -263,6 +263,7 @@ class Doctor(unittest.TestCase):
         self.assertIn("(the launch line has no {profile} slot, so every role runs it as written)", text)
         self.assertNotIn("WARNING", text)
 
+    @patch.dict(os.environ, {"PATH": "/usr/bin:/bin"})  # a real cursor-agent elsewhere on the host must not count
     def test_a_missing_binary_still_fails_and_names_an_alias_it_found(self):
         self.fake("agent", 'echo "--model --trust"\n')
         code, text = self.doctor({"cursor": self.adapter("cursor-agent", "{bin} --model {model} {prompt}",

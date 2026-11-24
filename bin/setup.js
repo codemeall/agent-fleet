@@ -149,6 +149,7 @@ function run(action, args) {
   if (action === 'setup') {
     console.log('Restart your harness to discover Fleet. fleet is not added to PATH; use the copied runtime (or npx @codemeall/agent-fleet@preview):');
     console.log(path.join(targets[0], 'bin', 'fleet'));
+    console.log('Workers stop at a CLI\'s folder-trust screen until it is answered: open each worker CLI once in the repository and accept, or opt in with auto_trust = true under [defaults] in ~/.config/agent-fleet/config.toml. fleet doctor names what is missing.');
   }
 }
 function buildPluginSkills() {
