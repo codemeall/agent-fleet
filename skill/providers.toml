@@ -52,8 +52,12 @@
 #   {prompt}; no {session} or {profile}). Its own flags must deny every write and every prompt, so it counts as
 #   read-only. Its runner saves the CLI's final message as the report and the usage it prints for `fleet cost`.
 # review_transport: "tui" (default) or "headless", here or under [defaults]; headless needs a `headless` line, and
-#   an adapter without one keeps its TUI under a [defaults] headless. Implementation workers always run in a TUI.
-#   See references/providers.md#headless-reviewers.
+#   an adapter without one keeps its TUI under a [defaults] headless. See references/providers.md#headless-reviewers.
+# headless_worker: a one-shot launch line for implementation workers ({bin}, {model}, {effort}, {prompt}, and
+#   {settings} for hooks; no {session} or {profile}). Its own flags approve edits and deny every other request
+#   nobody could answer, so it counts as workspace-write. Its runner saves the final message as the report.
+# implementation_transport: "tui" (default) or "headless", here or under [defaults]: the owner's opt-in to run
+#   implementation workers on the headless_worker line (#79). See references/providers.md#headless-workers.
 # signals: how a worker tells `fleet wait` about its turns. Without one, wait watches the screen (STALLED).
 #   claude-settings, through the launch line's {settings} slot, writes .fleet/runs/<run>/settings/<id>.json and passes
 #   --settings <path>: a guard that refuses edits outside the worker's own files and report, and events wait reads
@@ -94,6 +98,11 @@ profiles.review = { args = "--permission-mode manual", level = "read-only" }
 # Headless (review_transport = "headless"): `-p` with nobody to answer (`--permission-prompts none`) in manual mode,
 # so every edit and every command that would ask is denied, not left waiting. JSON output carries the result and usage.
 headless = "{bin} -p --output-format json --model {model} --effort {effort} --permission-mode manual --permission-prompts none {prompt}"
+# Headless implementation workers (implementation_transport = "headless", the owner's opt-in, #79): the same
+# one-shot call in acceptEdits, so edits are approved, and with nobody to answer every other request (a command the
+# settings do not allow) is denied rather than left waiting. {settings} keeps Fleet's guard, ask and deny rules;
+# turn on scope_permissions to allow the ticket's planned checks. Its final message is the report.
+headless_worker = "{bin} -p --output-format json --model {model} --effort {effort} --permission-mode acceptEdits --permission-prompts none {settings} {prompt}"
 session = "--session-id {id}"
 resume = "--resume {id}"
 # Esc first: at a permission prompt ("Do you want to proceed? > 1. Yes") Esc is No and /exit's Enter would be Yes.
@@ -149,6 +158,10 @@ profiles.review = { args = "-s workspace-write -a on-request", level = "workspac
 # (exec's default, which an owner's auto_review would otherwise lift), so a write fails instead of escalating and
 # nothing waits for an answer. Its final message is the report; --json streams events and usage.
 headless = "{bin} exec --json -m {model} -c model_reasoning_effort={effort} -s read-only -c approval_policy=never {prompt}"
+# Headless implementation workers (implementation_transport = "headless", the owner's opt-in, #79): `codex exec`
+# under -s workspace-write with approval_policy never, so it edits and runs commands inside its sandbox and anything
+# that would need an approval fails instead of waiting. Its final message is the report.
+headless_worker = "{bin} exec --json -m {model} -c model_reasoning_effort={effort} -s workspace-write -c approval_policy=never {prompt}"
 # Esc first: at an approval prompt ("Would you like to run the following command? > 1. Yes, proceed") Esc is No and
 # /quit's Enter would be Yes. Checked on Codex 0.167.0 in tmux: Esc at an idle prompt changes nothing, and at an
 # approval prompt it denies the command before /quit quits.

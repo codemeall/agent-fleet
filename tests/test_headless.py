@@ -103,6 +103,38 @@ class ShippedHeadlessLines(unittest.TestCase):
         self.assertEqual(fleet.review_transport(headless, dict(SHIPPED["codex"], review_transport="tui")), "tui")
         self.assertEqual(fleet.review_transport(tui, dict(SHIPPED["codex"], review_transport="headless")), "headless")
 
+    def test_claude_and_codex_ship_headless_worker_lines_that_approve_edits_only(self):
+        claude, codex = SHIPPED["claude"]["headless_worker"], SHIPPED["codex"]["headless_worker"]
+        self.assertIn("-p --output-format json", claude)
+        self.assertIn("--permission-mode acceptEdits --permission-prompts none", claude)
+        self.assertIn("{settings}", claude)
+        self.assertIn("exec --json", codex)
+        self.assertIn("-s workspace-write -c approval_policy=never", codex)
+        for name in ("cursor", "agy", "opencode"):
+            self.assertNotIn("headless_worker", SHIPPED[name])
+        self.assertEqual(fleet.DEFAULTS["implementation_transport"], "tui")
+        tui = {"defaults": dict(fleet.DEFAULTS)}
+        headless = {"defaults": dict(fleet.DEFAULTS, implementation_transport="headless")}
+        self.assertEqual(fleet.implementation_transport(tui, SHIPPED["codex"]), "tui")
+        self.assertEqual(fleet.implementation_transport(headless, SHIPPED["codex"]), "headless")
+        self.assertEqual(fleet.implementation_transport(headless, SHIPPED["cursor"]), "tui")
+        self.assertEqual(fleet.role_profiles(headless, SHIPPED["claude"])[0], fleet.HEADLESS_WORKER)
+        self.assertEqual(fleet.adapter_profile(SHIPPED["claude"], fleet.HEADLESS_WORKER)["level"], "workspace-write")
+        self.assertIsNone(fleet.ceiling_problem(headless, "claude", SHIPPED["claude"], fleet.HEADLESS_WORKER))
+        narrow = {"defaults": dict(fleet.DEFAULTS, permission_ceiling="read-only")}
+        why = fleet.ceiling_problem(narrow, "claude", SHIPPED["claude"], fleet.HEADLESS_WORKER)
+        self.assertIn("headless-worker profile is workspace-write, above permission_ceiling read-only", why)
+        self.assertIn('set implementation_transport = "tui" for claude', why)
+
+    def test_config_refuses_a_bad_implementation_transport(self):
+        self.assertEqual(config_with('[defaults]\nimplementation_transport = "headless"\n')["defaults"]
+                         ["implementation_transport"], "headless")
+        with self.assertRaisesRegex(fleet.FleetError, "defaults.implementation_transport must be tui or headless"):
+            config_with('[defaults]\nimplementation_transport = "pipe"\n')
+        with self.assertRaisesRegex(fleet.FleetError, "cursor.implementation_transport is \"headless\" but cursor has no "
+                                                      "headless_worker line"):
+            config_with('[providers.cursor]\nimplementation_transport = "headless"\n')
+
     def test_config_refuses_a_bad_transport(self):
         self.assertEqual(config_with('[defaults]\nreview_transport = "headless"\n')["defaults"]["review_transport"],
                          "headless")
@@ -270,7 +302,7 @@ class HeadlessRuntime(RuntimeCase):
         self.assertIn(" _headless ", self.window_command())
         res = self.run_window()
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-        self.assertIn("review-01 runs headless and read-only", res.stdout)
+        self.assertIn("review-01 runs headless; nobody can answer it", res.stdout)
         [call] = self.calls()
         self.assertIn("--permission-prompts", call["argv"])
         self.assertFalse(call["stdin_tty"])
@@ -328,7 +360,7 @@ class HeadlessRuntime(RuntimeCase):
         self.assertEqual((self.repo / "owned.txt").read_text(), "implemented change\n")
         report = self.report_text()
         self.assertEqual(fleet.parse_status(report), "needs-verification")
-        self.assertIn("## Denied by the read-only run", report)
+        self.assertIn("## Denied by the headless run", report)
         self.assertIn(f'- Write {{"file_path": "{self.repo}/owned.txt"}}', report)
         [usage] = (self.repo / ".fleet/runs/demo/usage").glob("review-01.*.json")
         self.assertEqual(len(json.loads(usage.read_text())["denials"]), 1)
@@ -410,13 +442,129 @@ class HeadlessRuntime(RuntimeCase):
             proc.send_signal(signal.SIGINT)
         with patch.object(fleet, "send_keys", side_effect=ctrl_c):
             out = self.call("stop", "demo", "review-01", "--timeout", "15")
-        self.assertEqual(sent, [["ctrl+c"]])
+        self.assertEqual(sent, [])  # SIGINT to the runner's confirmed pid: nothing typed (#79)
         self.assertIn("review-01: exited", out)
         proc.wait(timeout=10)
         self.assertIn("interrupted; stopping the CLI", proc.stdout.read())
         self.assertFalse((self.repo / ".fleet/runs/demo/reports/review-01.md").exists())
         [usage] = (self.repo / ".fleet/runs/demo/usage").glob("review-01.*.json")
         self.assertTrue(json.loads(usage.read_text())["interrupted"])
+
+    def test_stop_falls_back_to_ctrl_c_when_the_runner_pid_cannot_be_confirmed(self):
+        self.use_headless()
+        self.expecting("sleep")
+        self.reviewed()
+        proc = self.run_window(wait=False)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        exits = self.repo / ".fleet/runs/demo/exits"
+        deadline = time.monotonic() + 20
+        while not list(exits.glob("review-01.*.started.json")) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        time.sleep(0.5)
+        sent = []
+
+        def ctrl_c(workspace, surface, items):
+            sent.append(items)
+            proc.send_signal(signal.SIGINT)
+        with patch.object(fleet, "send_keys", side_effect=ctrl_c), patch.object(fleet, "process_start",
+                                                                               return_value="another process"):
+            out = self.call("stop", "demo", "review-01", "--timeout", "15")
+        self.assertEqual(sent, [["ctrl+c"]])
+        self.assertIn("review-01: exited", out)
+        proc.wait(timeout=10)
+
+    def use_headless_worker(self, cli="codex", **extra):
+        """The plan's writer adapter on the shipped headless_worker line, the owner's opt-in."""
+        self.cfg["providers"]["writer"].update(bin=str(self.tools / "bin" / cli),
+                                               headless_worker=SHIPPED[cli]["headless_worker"],
+                                               implementation_transport="headless", **extra)
+
+    def writer_expects(self, cli="codex", **extra):
+        self.expect.write_text(json.dumps({"model": "writer-model", "effort": "high", "role": "writer",
+                                           "usage": CODEX_USAGE if cli == "codex" else CLAUDE_USAGE, **extra}))
+
+    def test_a_headless_writer_edits_its_file_and_its_final_message_is_its_report(self):
+        self.use_headless_worker()
+        self.writer_expects(mode="edit", write_path=str(self.repo / "owned.txt"), write_text="headless change\n")
+        self.setup_run()
+        self.assertIn("Fleet runs you headless", (self.repo / ".fleet/runs/demo/prompts/01.md").read_text())
+        self.assertIn("Edits to your ticket's files are approved", (self.repo / ".fleet/runs/demo/prompts/01.md").read_text())
+        self.launch()
+        self.assertIn(" _headless ", self.window_command())
+        self.assertEqual(self.state()["workers"]["01"]["transport"], "headless")
+        self.run_window()
+        self.assertEqual((self.repo / "owned.txt").read_text(), "headless change\n")
+        [call] = self.calls("codex")
+        argv = call["argv"]
+        self.assertEqual(argv[argv.index("-s") + 1], "workspace-write")
+        self.assertIn("approval_policy=never", argv)
+        self.assertIn("Status: needs-verification", self.report_text("01"))
+        self.assertIn("REPORT 01 [needs-verification]", self.wait())
+
+    def test_a_headless_claude_writer_runs_in_accept_edits_with_fleets_settings(self):
+        self.use_headless_worker("claude", signals="claude-settings")
+        self.writer_expects("claude", mode="edit", write_path=str(self.repo / "owned.txt"))
+        self.setup_run()
+        self.launch()
+        self.run_window()  # the fake refuses a line without acceptEdits or without Fleet's settings file
+        [call] = self.calls("claude")
+        argv = call["argv"]
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "acceptEdits")
+        self.assertEqual(argv[argv.index("--permission-prompts") + 1], "none")
+        settings = json.loads(Path(argv[argv.index("--settings") + 1]).read_text())
+        self.assertIn("Bash(rm *)", settings["permissions"]["ask"])  # asked, so denied with nobody to answer
+        self.assertTrue(settings["permissions"]["deny"])
+
+    def test_nothing_is_typed_into_a_headless_writer(self):
+        self.use_headless_worker()
+        self.writer_expects(mode="sleep")
+        self.setup_run()
+        self.launch()
+        self.cmux_calls.clear()
+        out = self.call("send", "demo", "01", "Use the new helper.")
+        self.assertIn("runs headless and reads no input once started", out)
+        self.assertFalse([c for c in self.cmux_calls if c[0] in ("send", "send-key")])
+
+    def test_a_failing_gate_goes_to_the_lead_not_into_a_headless_writer(self):
+        self.use_headless_worker()
+        self.writer_expects(mode="sleep")
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"], "context": "Agreed scope.",
+                                 "checks": [{"run": "false", "timeout": 10}]}])
+        self.launch()
+        self.report()
+        self.cmux_calls.clear()
+        out = self.call("wait", "demo", "--gate", "--timeout", "5", "--interval", "1", "--settle", "0", "--stall", "0")
+        self.assertIn("REPORT 01 [needs-verification]", out)
+        self.assertIn("could not send it back to the worker (01 runs headless and takes no input", out)
+        self.assertFalse([c for c in self.cmux_calls if c[0] in ("send", "send-key")])
+
+    def test_a_plan_first_ticket_waits_for_its_plan_on_a_tui_worker(self):
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"], "plan_first": True}])
+        self.use_headless_worker()
+        out = self.call("prompt", "demo", "01", "--force", expected=1)
+        self.assertIn("01 is plan-first and its plan is not approved yet, but a headless worker cannot wait", out)
+        self.assertIn("01 is plan-first", self.launch(expected=1))
+
+    def test_stop_never_signals_a_process_that_is_not_this_runner(self):
+        """A worker can write the run's folder: a start record naming another process must not get SIGINT."""
+        self.use_headless_worker()
+        self.writer_expects(mode="sleep")
+        self.setup_run()
+        self.launch()
+        w = self.state()["workers"]["01"]
+        Path(w["exit_file"]).with_suffix(".started.json").write_text(json.dumps({
+            "token": w["token"], "wrapper_pid": os.getpid(), "wrapper_start": fleet.process_start(os.getpid()),
+            "child_pid": os.getpid(), "pidns": fleet.pid_namespace()}))
+        with patch.object(fleet.os, "kill") as kill:
+            self.assertFalse(fleet.interrupt_headless(self.repo, self.state(), w))
+        kill.assert_not_called()
+
+    def test_a_tui_prompt_is_refused_for_a_headless_writer(self):
+        self.setup_run()  # prompts written while the writer still ran in a TUI
+        self.use_headless_worker()
+        out = self.launch(expected=1)
+        self.assertIn("01's prompt was written for a tui run, but writer runs it headless", out)
+        self.assertIn("fleet prompt demo 01 --force", out)
 
     def test_wait_never_calls_a_headless_run_stalled(self):
         self.use_headless()
@@ -534,6 +682,54 @@ class HeadlessLive(FleetCase):
         self.assertIn("q: exited", self.fleet("stop", "live", "q", "--timeout", "20"))
         self.assertFalse((self.repo / ".fleet/runs/live/reports/q.md").exists())
         self.assertIn("q: closed", self.fleet("stop", "live", "q", "--close"))
+
+
+@unittest.skipUnless(HAS_TMUX, "tmux is not installed")
+class HeadlessWriterLive(FleetCase):
+    """The shipped claude adapter with implementation_transport = "headless" (#79), through fleet in a real tmux
+    window: the worker edits its file, hands back through its final message and exits; nothing is typed into it."""
+
+    def setUp(self):
+        super().setUp()
+        install_fakes(self.root / "bin")
+        self.log = self.root / "fake-log"
+        self.log.mkdir()
+        self.expect = self.root / "expect.json"
+        self.env.update(PATH=f"{self.root / 'bin'}:{self.env['PATH']}", FAKE_HEADLESS_LOG=str(self.log),
+                        FAKE_HEADLESS_EXPECT=str(self.expect))
+        model, effort = fleet.resolve_model(SHIPPED["claude"], "standard", None, None)
+        self.want = {"model": model, "effort": effort, "usage": CLAUDE_USAGE, "role": "writer"}
+        self.write_config('review = "off"\nimplementation_transport = "headless"\nprefer = ["claude"]\n')
+        self.fleet("init", "live")
+        (self.repo / "t.md").write_text("# Change a.txt\nMake a.txt say done.\n")
+        (self.repo / "plan.json").write_text(json.dumps({"tickets": [
+            {"id": "t", "ticket": "t.md", "files": ["a.txt"], "provider": "claude", "tier": "standard",
+             "context": "Only a.txt.", "checks": [{"manual": "the lead reads the diff"}]}]}))
+        self.fleet("plan", "live", "--file", str(self.repo / "plan.json"))
+
+    def diagnostics(self) -> str:
+        logged = "".join(f.read_text() for f in sorted(self.log.glob("*.errors")))
+        return super().diagnostics() + (f"\n--- the fake CLI refused:\n{logged}" if logged else "")
+
+    def test_a_headless_writer_edits_hands_back_and_exits_in_tmux(self):
+        self.expect.write_text(json.dumps(dict(self.want, mode="edit", write_path=str(self.repo / "a.txt"),
+                                               write_text="done\n")))
+        self.assertRegex(self.fleet("launch", "live", "--ready"), r"LAUNCHED t claude:")
+        self.wait_for("live", r"^REPORT t \[needs-verification\]")
+        self.assertEqual((self.repo / "a.txt").read_text(), "done\n")
+        self.assertRegex(self.fleet("status", "live"), r"t +claude:\S+ +@\d+ +exited +needs-verification")
+        [call] = [json.loads(line) for line in (self.log / "claude.jsonl").read_text().splitlines()]
+        self.assertIn("acceptEdits", call["argv"])
+        self.assertIn("t: closed", self.fleet("stop", "live", "t", "--close"))
+
+    def test_stop_signals_a_running_headless_writer_in_tmux(self):
+        self.expect.write_text(json.dumps(dict(self.want, mode="sleep")))
+        self.fleet("launch", "live", "--ready")
+        deadline = time.monotonic() + 20
+        while not (self.log / "claude.jsonl").exists() and time.monotonic() < deadline:
+            time.sleep(0.2)
+        self.assertIn("t: exited", self.fleet("stop", "live", "t", "--timeout", "20"))
+        self.assertFalse((self.repo / ".fleet/runs/live/reports/t.md").exists())
 
 
 if __name__ == "__main__":

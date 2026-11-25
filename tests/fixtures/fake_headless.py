@@ -2,7 +2,9 @@
 
     fake_headless.py <cli> <argv...>      <cli> is claude or codex
 
-It accepts exactly the `headless` line skill/providers.toml ships for that CLI, its read-only flags included:
+It accepts exactly the `headless` line skill/providers.toml ships for that CLI, or with "role": "writer" in the
+expectations its `headless_worker` line (Claude acceptEdits with a --settings file, Codex -s workspace-write), its
+read-only flags included otherwise:
 Claude's `-p --output-format json ... --permission-mode manual --permission-prompts none`, Codex's
 `exec --json ... -s read-only -c approval_policy=never`. Anything else fails loudly: a `FAKE <cli>: ...` line on
 stderr and exit status 2. The model and effort it expects, and what it does, come from the JSON file named by
@@ -19,6 +21,7 @@ Claude (`result`, `usage`, `permission_denials`), JSONL events for Codex (`item.
     no-usage   a complete report, with no usage reported
     fail       no final message: an error on stderr, exit 1
     sleep      waits for a signal, as a long review would (for fleet stop)
+    edit       a writer's run: writes "write_text" to "write_path", then a report naming that file
 """
 import json
 import os
@@ -32,7 +35,7 @@ CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 CODEX_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 FLAGS = {  # name -> takes a value
     "claude": {"-p": False, "--output-format": True, "--model": True, "--effort": True, "--permission-mode": True,
-               "--permission-prompts": True},
+               "--permission-prompts": True, "--settings": True},
     "codex": {"--json": False, "-m": True, "-c": True, "-s": True},
 }
 
@@ -75,15 +78,24 @@ def check(cli: str, argv: list[str], want: dict) -> str:
         one(flags, "--model", want["model"])
         if one(flags, "--effort", want["effort"]) not in CLAUDE_EFFORTS:
             raise Refused("bad effort")
-        one(flags, "--permission-mode", "manual")  # a non-accepting mode: edits and unapproved commands would ask
-        one(flags, "--permission-prompts", "none")  # ... and nobody answers, so they are denied
+        writer = want.get("role") == "writer"
+        # A reviewer: a non-accepting mode, so edits and unapproved commands would ask; a writer: edits approved.
+        one(flags, "--permission-mode", "acceptEdits" if writer else "manual")
+        one(flags, "--permission-prompts", "none")  # ... and nobody answers, so the rest is denied
+        if writer:
+            settings = Path(one(flags, "--settings"))
+            data = json.loads(settings.read_text()) if settings.is_file() else {}
+            if "PreToolUse" not in data.get("hooks", {}) or not data.get("permissions", {}).get("deny"):
+                raise Refused(f"--settings {settings} is not Fleet's worker settings file (guard and deny rules)")
+        elif "--settings" in flags:
+            raise Refused("a headless reviewer gets no settings file")
     else:
         if not positional or positional[0] != "exec":
             raise Refused("expected the exec subcommand first")
         positional = positional[1:]
         one(flags, "--json")
         one(flags, "-m", want["model"])
-        one(flags, "-s", "read-only")
+        one(flags, "-s", "workspace-write" if want.get("role") == "writer" else "read-only")
         overrides = dict(item.partition("=")[::2] for item in flags.get("-c", []))
         expected = {"model_reasoning_effort": want["effort"], "approval_policy": "never"}
         if overrides != expected:
@@ -151,6 +163,11 @@ def main() -> int:
         # Read-only by its flags (checked above), so the write is denied and nothing touches the file.
         denials = [{"tool_name": "Write", "tool_use_id": "toolu_1", "tool_input": {"file_path": target}}]
         message = report(ticket, f"Tried to write {target}; the read-only run denied it.")
+    elif mode == "edit":
+        target = Path(want["write_path"])
+        target.write_text(want.get("write_text", "edited headless\n"))
+        message = report(ticket).replace('"files_changed": []', json.dumps({"files_changed": [target.name]})[1:-1]) \
+            .replace("changed no file", f"edited {target.name}")
     elif mode == "no-status":
         message = "I looked at the diff and it seems fine."
     usage = None if mode == "no-usage" else want.get("usage")
