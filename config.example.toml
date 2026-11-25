@@ -39,6 +39,10 @@ review = "cross-heavy"
 # review_transport = "headless"
 # A headless run not finished after this many minutes (1 to 240) is stopped with a blocked report.
 # headless_timeout_minutes = 30
+# Implementation workers run headless too, on an adapter with a headless_worker line (claude, codex): edits are
+# approved and every other permission request is denied, since nobody is at a pane to answer. Opt-in; with
+# claude, turn on scope_permissions so the ticket's planned checks are allowed.
+# implementation_transport = "headless"
 # Where workers run: "cmux" (visible panes beside the lead, macOS), "tmux" (headless windows in a detached
 # session; watch them with `fleet agents`) or "auto" (the default: tmux when installed, inside cmux too; cmux
 # when a workspace is named or tmux is missing).

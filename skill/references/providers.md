@@ -166,6 +166,20 @@ Others ship none ([checked](#headless-lines-checked)), so a `[defaults]` headles
 - **Wait, stop and send.** `wait` wakes on the report exactly as for a TUI reviewer, header summary included. A headless run cannot stall at a prompt and its screen stays still while it works, so it never shows as `STALLED`; it still shows `UNREACHABLE` when its window goes. `fleet stop` sends Ctrl-C: the runner ends the CLI's process group and writes the exit receipt, without a report. A run that finished has already exited. `fleet send` only saves the message: a headless run reads its inbox when it starts.
 - **Limits.** Allow rules in Claude's own settings (or a mod or `PermissionRequest` hook) still approve what they match, in manual mode as in the TUI profile; an owner who allows edits or writing commands there has widened headless reviewers too. Codex's user `config.toml` still applies apart from the sandbox and approval policy the line sets. Neither CLI's network access is changed. A CLI that hangs without exiting keeps its window until `fleet stop`.
 
+## Headless workers
+
+An implementation worker normally runs in a TUI and Fleet drives it by typing (#79). With `implementation_transport = "headless"` (under `[defaults]`, or under one adapter that has a `headless_worker` line) it instead runs one non-interactive call, like a [headless reviewer](#headless-reviewers), that may edit its files. This is the owner's opt-in; the default stays `tui`.
+
+| Adapter | `headless_worker` line (beyond model and effort) | What it may do |
+| --- | --- | --- |
+| `claude`, `claude-co` | `-p --output-format json --permission-mode acceptEdits --permission-prompts none {settings}` | Edits are approved. With nobody to answer, every other request (a command its settings do not allow) is denied, not left waiting. Fleet's settings file keeps the scope guard, the ask rules (so `rm`, `mv` and the like are denied) and the run-directory deny rules. Turn on `scope_permissions` so the ticket's planned checks are allowed. |
+| `codex` | `exec --json -s workspace-write -c approval_policy=never` | Edits and commands run inside the workspace-write sandbox; anything that would need an approval fails instead of escalating. |
+
+- **Launch and prompt.** The run is `fleet _headless` in the run's window, as for a headless reviewer, at the `workspace-write` level against `permission_ceiling`. The prompt tells the worker that nobody can answer it and to reply with its complete report as its final message, which the runner saves as `reports/<id>.md` (a missing `Status:` line becomes a `blocked` report). A prompt written for the other transport is refused at launch, as for reviewers.
+- **No typing.** `fleet send` saves the message in the worker's inbox for its next launch (a one-shot run reads no input). `fleet stop` signals the runner (SIGINT to its recorded pid, checked by start time) instead of typing keys; only when that pid cannot be confirmed does it press Ctrl-C in the window. `wait --gate` runs the checks on the hand-back but sends no round to a headless worker: the lead gets the result and relaunches it with the failures in its inbox, or repairs.
+- **Wait.** A headless worker never shows as `STALLED`; its report wakes `REPORT`, and an exit without one `EXITED`.
+- **Limits.** It cannot be resumed (`--resume`) or continued warm. A `blocked` report ends the run, so the lead's answer reaches it only on relaunch. Checked against the fake CLIs in the tests; check `fleet doctor <adapter>` and one live run on your own CLIs before relying on it.
+
 ## Keeping models current
 
 Tier models are pinned on purpose: plans record the exact model and cross-family review needs a known family. When a provider ships new models, `fleet models <provider> [filter]` lists what the account offers, then override the tier in the user config (with `family` for a mixed adapter) and run `fleet doctor`. No Fleet release is needed. Shipped defaults are refreshed in releases and noted in the changelog.
@@ -392,7 +406,7 @@ For every new adapter, test a harmless local ticket, multiple waves, a required 
 | Section | Keys |
 | --- | --- |
 | Top level | `defaults`, `providers`, `lead_context` |
-| `[defaults]` | `workspace`, `routing`, `prefer`, `max_parallel`, `review`, `review_rounds`, `gate`, `gate_rounds`, `supervise`, `auto_trust`, `backend`, `tmux_socket`, `max_workers`, `max_wall_minutes`, `scope_ignore`, `permission_ceiling`, `check_policy`, `scope_permissions`, `review_transport`, `headless_timeout_minutes`, `worktree_root`, `worktree_setup`, `warm_max`, `warm_context_tokens`, `plan_first`, `acceptance`, `accept_checks`, `check_env`, `watch` |
+| `[defaults]` | `workspace`, `routing`, `prefer`, `max_parallel`, `review`, `review_rounds`, `gate`, `gate_rounds`, `supervise`, `auto_trust`, `backend`, `tmux_socket`, `max_workers`, `max_wall_minutes`, `scope_ignore`, `permission_ceiling`, `check_policy`, `scope_permissions`, `review_transport`, `headless_timeout_minutes`, `worktree_root`, `worktree_setup`, `warm_max`, `warm_context_tokens`, `plan_first`, `acceptance`, `accept_checks`, `check_env`, `implementation_transport`, `watch` |
 | `[providers.<name>]` | `enabled`, `placeholder`, `extends`, `bin`, `bin_aliases`, `launch`, `profiles`, `session`, `resume`, `quit`, `login`, `login_ok`, `account_env`, `env`, `trust`, `models`, `model_config`, `default_home`, `model_note`, `models_allow`, `model_families`, `family_prefixes`, `efforts`, `family`, `plugins`, `max`, `tiers`, `hooks`, `signals`, `headless`, `review_transport`, `add_dir`, `prompt_marks` |
 | `[providers.<name>.tiers.<tier>]` | `model`, `effort`, `family` (any tier name) |
 | `[providers.<name>.profiles.<role>]` | `args`, `level`; the roles are `worker` and `review` |
