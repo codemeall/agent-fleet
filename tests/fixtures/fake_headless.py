@@ -84,8 +84,9 @@ def check(cli: str, argv: list[str], want: dict) -> str:
         one(flags, "--permission-prompts", "none")  # ... and nobody answers, so the rest is denied
         if writer:
             settings = Path(one(flags, "--settings"))
-            if not settings.is_file() or "permissions" not in json.loads(settings.read_text()):
-                raise Refused(f"--settings {settings} is not Fleet's worker settings file")
+            data = json.loads(settings.read_text()) if settings.is_file() else {}
+            if "PreToolUse" not in data.get("hooks", {}) or not data.get("permissions", {}).get("deny"):
+                raise Refused(f"--settings {settings} is not Fleet's worker settings file (guard and deny rules)")
         elif "--settings" in flags:
             raise Refused("a headless reviewer gets no settings file")
     else:

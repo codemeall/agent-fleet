@@ -120,7 +120,11 @@ class ShippedHeadlessLines(unittest.TestCase):
         self.assertEqual(fleet.implementation_transport(headless, SHIPPED["cursor"]), "tui")
         self.assertEqual(fleet.role_profiles(headless, SHIPPED["claude"])[0], fleet.HEADLESS_WORKER)
         self.assertEqual(fleet.adapter_profile(SHIPPED["claude"], fleet.HEADLESS_WORKER)["level"], "workspace-write")
-        self.assertIsNone(fleet.ceiling_problem(headless, "claude", SHIPPED["claude"], "worker"))
+        self.assertIsNone(fleet.ceiling_problem(headless, "claude", SHIPPED["claude"], fleet.HEADLESS_WORKER))
+        narrow = {"defaults": dict(fleet.DEFAULTS, permission_ceiling="read-only")}
+        why = fleet.ceiling_problem(narrow, "claude", SHIPPED["claude"], fleet.HEADLESS_WORKER)
+        self.assertIn("headless-worker profile is workspace-write, above permission_ceiling read-only", why)
+        self.assertIn('set implementation_transport = "tui" for claude', why)
 
     def test_config_refuses_a_bad_implementation_transport(self):
         self.assertEqual(config_with('[defaults]\nimplementation_transport = "headless"\n')["defaults"]
@@ -298,7 +302,7 @@ class HeadlessRuntime(RuntimeCase):
         self.assertIn(" _headless ", self.window_command())
         res = self.run_window()
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-        self.assertIn("review-01 runs headless and read-only", res.stdout)
+        self.assertIn("review-01 runs headless; nobody can answer it", res.stdout)
         [call] = self.calls()
         self.assertIn("--permission-prompts", call["argv"])
         self.assertFalse(call["stdin_tty"])
@@ -356,7 +360,7 @@ class HeadlessRuntime(RuntimeCase):
         self.assertEqual((self.repo / "owned.txt").read_text(), "implemented change\n")
         report = self.report_text()
         self.assertEqual(fleet.parse_status(report), "needs-verification")
-        self.assertIn("## Denied by the read-only run", report)
+        self.assertIn("## Denied by the headless run", report)
         self.assertIn(f'- Write {{"file_path": "{self.repo}/owned.txt"}}', report)
         [usage] = (self.repo / ".fleet/runs/demo/usage").glob("review-01.*.json")
         self.assertEqual(len(json.loads(usage.read_text())["denials"]), 1)
@@ -520,6 +524,40 @@ class HeadlessRuntime(RuntimeCase):
         out = self.call("send", "demo", "01", "Use the new helper.")
         self.assertIn("runs headless and reads no input once started", out)
         self.assertFalse([c for c in self.cmux_calls if c[0] in ("send", "send-key")])
+
+    def test_a_failing_gate_goes_to_the_lead_not_into_a_headless_writer(self):
+        self.use_headless_worker()
+        self.writer_expects(mode="sleep")
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"], "context": "Agreed scope.",
+                                 "checks": [{"run": "false", "timeout": 10}]}])
+        self.launch()
+        self.report()
+        self.cmux_calls.clear()
+        out = self.call("wait", "demo", "--gate", "--timeout", "5", "--interval", "1", "--settle", "0", "--stall", "0")
+        self.assertIn("REPORT 01 [needs-verification]", out)
+        self.assertIn("could not send it back to the worker (01 runs headless and takes no input", out)
+        self.assertFalse([c for c in self.cmux_calls if c[0] in ("send", "send-key")])
+
+    def test_a_plan_first_ticket_waits_for_its_plan_on_a_tui_worker(self):
+        self.setup_run(tickets=[{"id": "01", "files": ["owned.txt"], "plan_first": True}])
+        self.use_headless_worker()
+        out = self.call("prompt", "demo", "01", "--force", expected=1)
+        self.assertIn("01 is plan-first and its plan is not approved yet, but a headless worker cannot wait", out)
+        self.assertIn("01 is plan-first", self.launch(expected=1))
+
+    def test_stop_never_signals_a_process_that_is_not_this_runner(self):
+        """A worker can write the run's folder: a start record naming another process must not get SIGINT."""
+        self.use_headless_worker()
+        self.writer_expects(mode="sleep")
+        self.setup_run()
+        self.launch()
+        w = self.state()["workers"]["01"]
+        Path(w["exit_file"]).with_suffix(".started.json").write_text(json.dumps({
+            "token": w["token"], "wrapper_pid": os.getpid(), "wrapper_start": fleet.process_start(os.getpid()),
+            "child_pid": os.getpid(), "pidns": fleet.pid_namespace()}))
+        with patch.object(fleet.os, "kill") as kill:
+            self.assertFalse(fleet.interrupt_headless(self.repo, self.state(), w))
+        kill.assert_not_called()
 
     def test_a_tui_prompt_is_refused_for_a_headless_writer(self):
         self.setup_run()  # prompts written while the writer still ran in a TUI

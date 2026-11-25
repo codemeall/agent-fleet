@@ -148,6 +148,10 @@ TRANSPORTS = ("tui", HEADLESS)
 # other permission request denied, since nobody is at a pane to answer it (#79). The owner's opt-in.
 HEADLESS_WORKER = "headless-worker"
 HEADLESS_PROFILES = (HEADLESS, HEADLESS_WORKER)
+HEADLESS_PLAN_REFUSAL = ("{id} is plan-first and its plan is not approved yet, but a headless worker cannot wait for "
+                         "approval. Write and approve the plan on a TUI worker (implementation_transport = \"tui\" "
+                         "for its adapter), or turn plan-first off for it; once the plan is approved, a headless "
+                         "worker can implement it")
 UNDECLARED_PROFILE = {"args": "", "level": "workspace-write"}  # an adapter written before profiles existed
 HELP_TIMEOUT_S = 10  # doctor's `<bin> --help`; a CLI that takes longer leaves its flags unverified
 HOOK_METHODS = ("claude-settings",)  # an adapter's `hooks`: how launch gives a worker Fleet's guard and event hooks
@@ -533,9 +537,11 @@ def ceiling_problem(cfg: dict, name: str, pcfg: dict, profile: str) -> str | Non
     level = adapter_profile(pcfg, profile)["level"]
     if PERMISSION_LEVELS.index(level) <= PERMISSION_LEVELS.index(ceiling):
         return None
+    narrow = (f"set implementation_transport = \"tui\" for {name} (its headless_worker line edits without asking)"
+              if profile == HEADLESS_WORKER else
+              f"narrow the CLI's own permissions and set providers.{name}.profiles.{profile}.level to match")
     return (f"{name}'s {profile} profile is {level}, above permission_ceiling {ceiling}, so Fleet will not launch it. "
-            f"That is the owner's call: raise [defaults] permission_ceiling in {USER_CONFIG}, or narrow the CLI's "
-            f"own permissions and set providers.{name}.profiles.{profile}.level to match "
+            f"That is the owner's call: raise [defaults] permission_ceiling in {USER_CONFIG}, or {narrow} "
             "(references/providers.md#permission-profiles). Until then route to another provider")
 
 
@@ -2886,9 +2892,9 @@ REPORT_FENCE_RE = re.compile(r"\A\s*(`{3,}|~{3,})[ \t]*(?:markdown|md)?[ \t]*\n(
 
 def headless_writer_note(report: Path) -> str:
     """The ticket template's {{transport}} sentence for a headless implementation worker."""
-    return (f"\n\n**Fleet runs you headless:** nobody can answer you. Edits to your ticket's files are approved; every "
-            "other permission request, a command included, is denied unless the owner allowed it, so do not retry "
-            f"a denied one: say so in the report. Do not write `{report}` or wait for the lead: reply with the "
+    return (f"\n\n**Fleet runs you headless:** nobody can answer you. Edits to your ticket's files are approved; "
+            "anything that would need someone's approval is denied, so do not retry a denied call: say so in the "
+            f"report. Do not write `{report}` or wait for the lead: reply with the "
             "complete report below, its `Status:` line and `fleet` block included, as your final message, and Fleet "
             "saves it as your report.")
 
@@ -3011,7 +3017,7 @@ def headless_report(wid: str, code: int, parsed: dict, tail: list[str]) -> str:
     else:
         text = blocked_report(wid, f"the CLI exited {code} without a final message", None, parsed["errors"], tail)
     if parsed["denials"]:
-        text += ("\n## Denied by the read-only run\n\nFleet's note: the CLI's read-only mode denied these calls.\n\n"
+        text += ("\n## Denied by the headless run\n\nFleet's note: with nobody to answer, the CLI denied these calls.\n\n"
                  + "".join(f"- {d}\n" for d in parsed["denials"]))
     return text
 
@@ -3028,7 +3034,7 @@ def headless_child(args: list[str]) -> int:
     receipt, token, report, usage_file, command = Path(args[0]), args[1], Path(args[2]), Path(args[3]), args[4]
     limit = float(args[5]) if len(args) == 6 else None  # a launch from before the limit has none
     wid = report.stem
-    print(f"fleet: {wid} runs headless and read-only; its final message becomes {report}", flush=True)
+    print(f"fleet: {wid} runs headless; nobody can answer it, and its final message becomes {report}", flush=True)
     # Its own process group, so an interrupt ends the CLI and everything it started, whatever the shell does; a
     # closed window or a TERM ends it the same way. stdin is empty: the CLI takes its prompt from the command line.
     def interrupt(signum, frame):
@@ -4848,6 +4854,8 @@ def cmd_prompt(a, cfg):
         transport = review_transport(cfg, provider(cfg, planned_route(state, meta, a.id)["provider"]))
     if not review_of and not investigate:  # a writer: headless only when the owner opted in (#79)
         transport = writer_transport(repo, cfg, a, state, meta, a.id)
+        if transport == HEADLESS and plan_pending(t):
+            raise FleetError(HEADLESS_PLAN_REFUSAL.format(id=a.id))
     if transport == HEADLESS:
         meta["transport"] = HEADLESS  # launch refuses it on a TUI transport, and a TUI prompt on a headless one
     tree = prompt_tree(state, a.id, review_of, investigate)  # the worker's own worktree, in a worktree run
@@ -5121,6 +5129,8 @@ def launch_one(a, cfg) -> tuple[str, dict]:
         profile = HEADLESS  # a one-shot run, read-only by its own flags
     elif profile == "worker" and implementation_transport(cfg, pcfg) == HEADLESS:
         profile = HEADLESS_WORKER  # a one-shot run that edits without asking; nothing else it asks for is granted
+        if plan_pending(state["tickets"].get(meta_now.get("fanout_of") or a.id)):
+            raise FleetError(HEADLESS_PLAN_REFUSAL.format(id=a.id))
     written = meta_now.get("transport", "tui")
     if written != ("tui" if profile not in HEADLESS_PROFILES else HEADLESS):
         how = (f" --review-of {meta_now['review_of']} --diff <its diff>" if meta_now.get("review_of") else "")
@@ -6809,6 +6819,8 @@ def hook_events(state: dict, w: dict, seen: Path, handed_back: bool, now: float)
     answer) belongs to the turn that message answered, which the report's status no longer shows once the message
     parked it: it is skipped, so only a turn the worker ended after the message can wake IDLE."""
     path, token = (w.get("hooks") or w.get("signals") or {}).get("events"), w.get("token", "")
+    if w.get("transport") == HEADLESS:  # no pane to answer in, and nothing waits: its exit and report wake wait
+        return [], 0.0
     answered = w.get("last_send", 0)
     turn_wakes = (w.get("signals") or {}).get("method") == "codex-notify"
     if not path:
@@ -7433,6 +7445,20 @@ class Supervisor:
                                                            f"refused: {one_line(error, 400)}")
 
 
+def process_cmdline(pid: int) -> str | None:
+    """A process's command line (Linux's /proc, else ps), or None when it cannot be read."""
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip() or None
+    except OSError:
+        pass
+    try:
+        out = subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
+                             timeout=5, env=dict(os.environ, LC_ALL="C"))
+        return out.stdout.strip() or None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
 def interrupt_headless(repo: Path, state: dict, w: dict) -> bool:
     """Stop a headless run without keystrokes: SIGINT to its runner, which ends the CLI and writes the receipt.
     Only when the runner's recorded pid is still that very process (same start time, same pid namespace);
@@ -7443,9 +7469,16 @@ def interrupt_headless(repo: Path, state: dict, w: dict) -> bool:
                                                     Path(w["exit_file"]).with_suffix(suffix)), RECEIPT_MAX)[0])
         except (OSError, ValueError, KeyError, TypeError, FleetError, RecursionError):
             continue
+        if not isinstance(rec, dict):
+            continue
         pid, start = rec.get("wrapper_pid"), rec.get("wrapper_start")
-        if (not isinstance(rec, dict) or rec.get("token") != w.get("token") or type(pid) is not int or pid <= 1
-                or not start or rec.get("pidns") != pid_namespace() or process_start(pid) != start):
+        if (rec.get("token") != w.get("token") or type(pid) is not int or pid <= 1 or not start
+                or rec.get("pidns") != pid_namespace() or process_start(pid) != start):
+            continue
+        # A worker can write the run's folder, so the record alone is not proof: the process must be this very
+        # runner, `fleet _headless` started for this launch's receipt.
+        cmdline = process_cmdline(pid)
+        if not cmdline or " _headless " not in f" {cmdline} " or str(w["exit_file"]) not in cmdline:
             continue
         try:
             os.kill(pid, signal.SIGINT)
